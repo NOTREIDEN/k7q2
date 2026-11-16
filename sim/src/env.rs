@@ -694,8 +694,8 @@ impl Env {
     }
 
     /// A snapshot for drawing the duel: for each player its own position
-    /// and view angles, state flags, the keys it held on its last tick, its
-    /// running hit counts, and where it currently sees the other player;
+    /// and view angles, state flags, the keys it held on its last tick (for
+    /// the attack key, how many times it clicked), its running hit counts, and where it currently sees the other player;
     /// then the episode clock, arena size and the two pings.
     pub fn write_view(&self, o: &mut [f32]) {
         for id in 0..2 {
@@ -716,7 +716,7 @@ impl Env {
             o[b + 10] = inp.strafe as f32;
             o[b + 11] = inp.jump as i32 as f32;
             o[b + 12] = inp.sprint_key as i32 as f32;
-            o[b + 13] = inp.attack as i32 as f32;
+            o[b + 13] = if inp.attack { 1.0 + inp.extra_clicks as f32 } else { 0.0 };
             o[b + 14] = self.ep.hits[id] as f32;
             o[b + 15] = self.combo[id] as f32;
             o[b + 16] = self.ep.sprint_hits[id] as f32;
