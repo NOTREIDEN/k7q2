@@ -5,23 +5,27 @@ publishes its weights and replaces them with the average of everybody's
 latest weights. There is no coordinator: a machine that stops or restarts
 simply drops out of, or rejoins, the average.
 
-Two places to publish to: a folder (between processes of one machine) and
-the assets of a GitHub release (between GitHub Actions machines)."""
+Publishing means writing a file into a folder. Between the processes of one
+machine that folder is shared directly. Between GitHub Actions machines each
+one has a folder it writes to and a folder it reads from, and the steps of
+the workflow carry the files across as artifacts of the run
+(`.github/actions/round`)."""
 import os
 import shutil
-import subprocess
 import tempfile
 import time
-import urllib.error
-import urllib.request
 
 import torch
 
 
 class DirBackend:
-    def __init__(self, path):
-        self.path = path
-        os.makedirs(path, exist_ok=True)
+    """Files in `path`. With `read_path`, other members' files are looked
+    for there instead."""
+
+    def __init__(self, path, read_path=None):
+        self.path, self.read_path = path, read_path or path
+        os.makedirs(self.path, exist_ok=True)
+        os.makedirs(self.read_path, exist_ok=True)
 
     def put(self, name, src):
         tmp = os.path.join(self.path, f".{name}.{os.getpid()}.tmp")
@@ -29,71 +33,29 @@ class DirBackend:
         os.replace(tmp, os.path.join(self.path, name))
 
     def get(self, name, dst):
-        src = os.path.join(self.path, name)
+        src = os.path.join(self.read_path, name)
         if not os.path.exists(src):
             return False
         shutil.copyfile(src, dst)
         return True
 
-
-class _NoRedirect(urllib.request.HTTPRedirectHandler):
-    def redirect_request(self, *args, **kwargs):
-        return None
-
-
-class ReleaseBackend:
-    """Assets of one release of a public repository. Uploads go through the
-    `gh` command (needs GH_TOKEN); downloads use the public asset URL, which
-    does not count against the API rate limit. The public URL redirects to
-    an address that changes whenever the asset is replaced, so an unchanged
-    asset is recognised without downloading it again."""
-
-    def __init__(self, repo, tag):
-        self.repo, self.tag = repo, tag
-        self.where = {}
-        self.opener = urllib.request.build_opener(_NoRedirect)
-        r = subprocess.run(["gh", "release", "view", tag, "--repo", repo], capture_output=True)
-        if r.returncode != 0:
-            subprocess.run(["gh", "release", "create", tag, "--repo", repo, "--title", tag,
-                            "--notes", "Training checkpoints, replaced as training runs."], check=False)
-
-    def put(self, name, src):
-        with tempfile.TemporaryDirectory() as d:
-            p = os.path.join(d, name)
-            shutil.copyfile(src, p)
-            for attempt in range(3):
-                r = subprocess.run(["gh", "release", "upload", self.tag, p, "--clobber", "--repo", self.repo],
-                                   capture_output=True)
-                if r.returncode == 0:
-                    return
-                time.sleep(5 * (attempt + 1))
-
-    def get(self, name, dst):
-        url = f"https://github.com/{self.repo}/releases/download/{self.tag}/{name}"
-        try:
-            try:
-                self.opener.open(url, timeout=30)
-                return False
-            except urllib.error.HTTPError as e:
-                target = e.headers.get("Location") if e.code in (301, 302, 303, 307) else None
-            if not target:
-                return False
-            ident = target.split("?")[0]
-            if self.where.get(name) == ident and os.path.exists(dst):
-                return True
-            with urllib.request.urlopen(target, timeout=60) as r, open(dst + ".part", "wb") as f:
-                shutil.copyfileobj(r, f)
-            os.replace(dst + ".part", dst)
-            self.where[name] = ident
-            return True
-        except Exception:
-            return False
+    def mark(self, round_id):
+        """Note which round the file just written belongs to, for whoever
+        carries it to the other members."""
+        tmp = os.path.join(self.path, f".round.{os.getpid()}.tmp")
+        with open(tmp, "w") as f:
+            f.write(f"{round_id}\n")
+        os.replace(tmp, os.path.join(self.path, "round.txt"))
 
 
-def pack(policy, vs, samples, iters, round_id=0, score=0.0, generation=0.0, fresh=False):
+def pack(policy, vs, samples, iters, round_id=0, score=0.0, generation=0.0, fresh=False, origin=0.0):
+    """What a member publishes. It is also a checkpoint that `load_policy`
+    reads, with the weights stored in half precision."""
     sd = {k: v.detach().to(torch.float16) for k, v in policy.state_dict().items()}
     return {"policy": sd, "vs": (vs.var, vs.count), "samples": samples, "iters": iters, "time": time.time(),
-            "round": round_id, "score": score, "generation": generation, "fresh": fresh}
+            "round": round_id, "origin": origin, "score": score, "generation": generation, "fresh": fresh,
+            "obs_dim": policy.enc[0].in_features, "priv_dim": policy.penc[0].in_features,
+            "act_dims": list(policy.act_dims)}
 
 
 class Syncer:
@@ -117,13 +79,16 @@ class Syncer:
     unrelated ones."""
 
     def __init__(self, backend, worker_id, n_workers, every_minutes, wait_seconds=30.0, mode="average",
-                 margin=5.0):
+                 margin=5.0, origin=0.0):
         self.b, self.id, self.n = backend, worker_id, n_workers
         self.every = every_minutes * 60.0
         self.wait = wait_seconds
         self.mode = mode
         self.margin = margin
-        self.round = int(time.time() // self.every)
+        # Round k ends at origin + k * every, on everybody's clock. Files
+        # published under another origin belong to an earlier run.
+        self.origin = origin
+        self.round = self.clock_round()
         self.first_round = self.round
         self.generation, self.fresh = 0.0, False
         self.adopted_score = 0.0
@@ -131,8 +96,19 @@ class Syncer:
         self.tmp = tempfile.mkdtemp(prefix="pvpsync")
         self.peer_samples = {}
 
+    def clock_round(self):
+        # No rounds before the origin.
+        return max(int((time.time() - self.origin) // self.every), -1)
+
     def name(self, i):
         return f"w{i:02d}.pt"
+
+    def publish(self, policy, vs, samples, iters, score=0.0):
+        """Write this member's weights without waiting for anybody."""
+        own_path = os.path.join(self.tmp, "own.pt")
+        torch.save(pack(policy, vs, samples, iters, self.round, score, self.generation, self.fresh, self.origin),
+                   own_path)
+        self.b.put(self.name(self.id), own_path)
 
     def new_generation(self, fresh):
         """Call after loading weights that did not come from this group."""
@@ -194,18 +170,17 @@ class Syncer:
         a short description, and "" / "moved" / "replaced" for whether the
         weights now come from outside this member's own training
         ("replaced" means an unrelated network: reset the optimiser)."""
-        rnd = int(time.time() // self.every)
+        rnd = self.clock_round()
         if rnd <= self.round:
             return None
         self.round = rnd
-        own_path = os.path.join(self.tmp, "own.pt")
-        torch.save(pack(policy, vs, samples, iters, rnd, score, self.generation, self.fresh), own_path)
-        self.b.put(self.name(self.id), own_path)
+        self.publish(policy, vs, samples, iters, score)
+        self.b.mark(rnd)
         deadline = time.time() + self.wait
         current, missing = [], [i for i in range(self.n) if i != self.id]
         while True:
             for c in self.fetch(3 * self.every, missing):
-                if c.get("round", 0) >= rnd:
+                if c.get("round", 0) >= rnd and c.get("origin", 0.0) == self.origin:
                     current.append(c)
                     missing.remove(c["worker"])
                     self.seen[c["worker"]] = rnd

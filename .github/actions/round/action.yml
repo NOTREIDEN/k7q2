@@ -1,0 +1,88 @@
+name: round
+description: >
+  Carry one round of weights between the machines of a run. Waits until the
+  trainer of this machine has published its weights for a new round, uploads
+  them as an artifact of the run and downloads what the other machines
+  uploaded for the same round. Does nothing once the trainer has stopped.
+inputs:
+  machine:
+    description: Number of this machine
+    required: true
+  machines:
+    description: Number of machines in the run
+    required: true
+runs:
+  using: composite
+  steps:
+    - id: wait
+      shell: bash
+      env:
+        MACHINE: ${{ inputs.machine }}
+      run: |
+        # The trainer writes share/out/round.txt after publishing a round.
+        last=$(cat share/carried.txt 2>/dev/null || echo -1)
+        round=
+        while :; do
+          now=$(cat share/out/round.txt 2>/dev/null || echo -1)
+          if [ "$now" -gt "$last" ]; then round=$now; break; fi
+          kill -0 "$(cat share/p0.pid 2>/dev/null)" 2>/dev/null || break
+          [ "$(date +%s)" -lt "$(cat share/deadline.txt 2>/dev/null || echo 0)" ] || break
+          sleep 1
+        done
+        if [ -n "$round" ]; then
+          echo "$round" > share/carried.txt
+          # A few lines of the log travel with the weights, to follow a run while it lasts.
+          { head -n 2 share/p0.log; tail -n 12 share/p0.log; } | tee "share/out/$(printf 'm%02d' "$MACHINE").log"
+        fi
+        echo "round=$round" >> "$GITHUB_OUTPUT"
+    - if: steps.wait.outputs.round != ''
+      uses: actions/upload-artifact@v4
+      continue-on-error: true
+      with:
+        name: w${{ inputs.machine }}-r${{ steps.wait.outputs.round }}
+        path: |
+          share/out/w*.pt
+          share/out/m*.log
+        retention-days: 1
+        compression-level: 0
+    - if: steps.wait.outputs.round != ''
+      shell: bash
+      run: sleep 10
+    - if: steps.wait.outputs.round != ''
+      uses: actions/download-artifact@v4
+      continue-on-error: true
+      with:
+        pattern: w*-r${{ steps.wait.outputs.round }}
+        path: share/dl
+        merge-multiple: true
+    - id: first
+      if: steps.wait.outputs.round != ''
+      shell: bash
+      env:
+        ROUND: ${{ steps.wait.outputs.round }}
+        MACHINES: ${{ inputs.machines }}
+      run: |
+        # Moved into place whole, so that the trainer never reads half a file.
+        n=$(ls share/dl/w*.pt 2>/dev/null | wc -l)
+        mv -f share/dl/w*.pt share/in/ 2>/dev/null || true
+        echo "round $ROUND: weights of $n of $MACHINES machines"
+        if [ "$n" -lt "$MACHINES" ]; then
+          sleep 15
+          echo "again=yes" >> "$GITHUB_OUTPUT"
+        fi
+    - if: steps.first.outputs.again == 'yes'
+      uses: actions/download-artifact@v4
+      continue-on-error: true
+      with:
+        pattern: w*-r${{ steps.wait.outputs.round }}
+        path: share/dl
+        merge-multiple: true
+    - if: steps.first.outputs.again == 'yes'
+      shell: bash
+      env:
+        ROUND: ${{ steps.wait.outputs.round }}
+        MACHINES: ${{ inputs.machines }}
+      run: |
+        n=$(ls share/dl/w*.pt 2>/dev/null | wc -l)
+        mv -f share/dl/w*.pt share/in/ 2>/dev/null || true
+        echo "round $ROUND, second look: weights of $n of $MACHINES machines"

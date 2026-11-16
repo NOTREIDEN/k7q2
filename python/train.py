@@ -45,8 +45,11 @@ def main():
     ap.add_argument("--sync-minutes", type=float, default=0.1)
     ap.add_argument("--sync-wait", type=float, default=5.0, help="seconds to wait for the others each round")
     ap.add_argument("--machine-id", type=int, default=0)
-    ap.add_argument("--machines", type=int, default=1, help="machines that share weights through a release")
-    ap.add_argument("--sync-release", default=None, help="release tag the machines share weights through")
+    ap.add_argument("--machines", type=int, default=1, help="machines that share weights")
+    ap.add_argument("--machine-out", default=None, help="folder this machine publishes its weights in")
+    ap.add_argument("--machine-in", default=None, help="folder the other machines' weights arrive in")
+    ap.add_argument("--round-origin", type=float, default=0.0,
+                    help="clock time (seconds) the machines count their rounds from")
     ap.add_argument("--machine-minutes", type=float, default=5.0)
     ap.add_argument("--machine-wait", type=float, default=60.0)
     ap.add_argument("--machine-mode", default="average", choices=["average", "best"],
@@ -82,35 +85,36 @@ def main():
     opt = torch.optim.Adam(policy.parameters(), lr=args.lr, eps=1e-5)
     vs = RunningScale()
     total_samples, iters = 0, 0
-    if args.init:
-        old, ck, grown = load_policy(args.init, any_env.obs_dim)
-        policy.load_state_dict(old.state_dict())
-        if not grown:
-            opt.load_state_dict(ck["opt"])
-        vs.var, vs.count = ck["vs"]
-        total_samples, iters = ck["samples"], ck["iters"]
 
     # Two levels of sharing: often between the processes of one machine,
     # every few minutes between machines. Only process 0 talks to the other
     # machines; what it brings back reaches the rest through the folder.
     local = remote = None
-    if args.sync_dir or args.sync_release:
-        from pvpai.sync import DirBackend, ReleaseBackend, Syncer
+    loaded = False
+    if args.sync_dir or args.machine_out:
+        from pvpai.sync import DirBackend, Syncer
     if args.sync_dir:
         local = Syncer(DirBackend(args.sync_dir), args.worker_id, args.workers, args.sync_minutes, args.sync_wait)
-    if args.sync_release and args.worker_id == 0:
-        # PVP_RELEASE_DIR swaps the release for a folder, to test this on one machine.
-        fake = os.environ.get("PVP_RELEASE_DIR")
-        backend = DirBackend(fake) if fake else ReleaseBackend(os.environ["GITHUB_REPOSITORY"], args.sync_release)
-        remote = Syncer(backend, args.machine_id, args.machines, args.machine_minutes, args.machine_wait,
-                        args.machine_mode)
-        if not args.init:
-            total_samples, iters, loaded = remote.restore(policy, vs)
-            total_samples //= max(args.workers, 1)
-            if loaded and local is not None:
-                local.new_generation(False)
-            print(f"start: {'continuing from published weights' if loaded else 'nothing published yet'}, "
+    if args.machine_out:
+        group = Syncer(DirBackend(args.machine_out, args.machine_in), args.machine_id, args.machines,
+                       args.machine_minutes, args.machine_wait, args.machine_mode, origin=args.round_origin)
+        # Weights the machines left behind last time come before --init.
+        total_samples, iters, loaded = group.restore(policy, vs)
+        total_samples //= max(args.workers, 1)
+        if args.worker_id == 0:
+            remote = group
+            print(f"start: {'continuing from the weights of the last run' if loaded else 'no earlier weights'}, "
                   f"{total_samples/1e6:.1f}M samples so far", flush=True)
+    if args.init and not loaded:
+        old, ck, grown = load_policy(args.init, any_env.obs_dim)
+        policy.load_state_dict(old.state_dict())
+        if not grown and "opt" in ck:
+            opt.load_state_dict(ck["opt"])
+        vs.var, vs.count = ck["vs"]
+        # Every process counts its own share, so that the shares add up to
+        # the checkpoint's count plus what is trained from here on.
+        total_samples = ck["samples"] // (max(args.workers, 1) * max(args.machines, 1))
+        iters = ck["iters"]
 
     cfg = dict(gamma=args.gamma, lam=0.95, clip=0.2, epochs=args.epochs, minibatches=args.minibatches, vf_coef=0.5,
                ent_coef=args.ent_coef, max_grad_norm=0.5)
@@ -129,9 +133,14 @@ def main():
         obs, priv = e.reset()
         acts[k if k == "bot" else "sp0"] = streams[k if k == "bot" else "sp0"].choose(policy, obs, priv)
 
+    def machine_samples():
+        return local.total_samples(total_samples) if local is not None else total_samples
+
     def save(path):
+        # The count is that of everybody training this network, as far as this process knows.
+        everybody = remote.total_samples(machine_samples()) if remote is not None else machine_samples()
         torch.save({"policy": policy.state_dict(), "opt": opt.state_dict(), "vs": (vs.var, vs.count),
-                    "samples": total_samples, "iters": iters, "args": vars(args),
+                    "samples": everybody, "iters": iters, "args": vars(args),
                     "obs_dim": any_env.obs_dim, "priv_dim": any_env.priv_dim,
                     "act_dims": any_env.act_dims}, path)
 
@@ -167,7 +176,7 @@ def main():
             if sy is None:
                 continue
             # Other machines are told this machine's total, other processes this process's share.
-            count = local.total_samples(total_samples) if (sy is remote and local is not None) else total_samples
+            count = machine_samples() if sy is remote else total_samples
             did = sy.maybe_sync(policy, vs, count, iters, score)
             if did is None:
                 continue
@@ -222,8 +231,9 @@ def main():
                   f"aim {s.get('aim_err_deg', 0):5.1f}", flush=True)
             for name, whats in sync_log.items():
                 sy = remote if name == "machines" else local
+                together = sy.total_samples(machine_samples() if sy is remote else total_samples)
                 print(f"sync between {name}: {len(whats)} rounds, last: {whats[-1]}; together "
-                      f"{sy.total_samples(total_samples)/1e6:.1f}M samples", flush=True)
+                      f"{together/1e6:.1f}M samples", flush=True)
             sync_log.clear()
         now = time.time()
         if now - t_save > args.save_minutes * 60:
@@ -232,6 +242,9 @@ def main():
         if (now - t_start) / 60 >= args.minutes:
             break
     save(os.path.join(args.out, "latest.pt"))
+    if remote is not None:
+        # What the next run continues from.
+        remote.publish(policy, vs, machine_samples(), iters, score)
     print("saved", os.path.join(args.out, "latest.pt"), "samples", total_samples)
 
 

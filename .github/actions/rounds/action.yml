@@ -1,0 +1,60 @@
+name: rounds
+description: Twelve rounds in a row (see ../round).
+inputs:
+  machine:
+    description: Number of this machine
+    required: true
+  machines:
+    description: Number of machines in the run
+    required: true
+runs:
+  using: composite
+  steps:
+    - uses: ./.github/actions/round
+      with:
+        machine: ${{ inputs.machine }}
+        machines: ${{ inputs.machines }}
+    - uses: ./.github/actions/round
+      with:
+        machine: ${{ inputs.machine }}
+        machines: ${{ inputs.machines }}
+    - uses: ./.github/actions/round
+      with:
+        machine: ${{ inputs.machine }}
+        machines: ${{ inputs.machines }}
+    - uses: ./.github/actions/round
+      with:
+        machine: ${{ inputs.machine }}
+        machines: ${{ inputs.machines }}
+    - uses: ./.github/actions/round
+      with:
+        machine: ${{ inputs.machine }}
+        machines: ${{ inputs.machines }}
+    - uses: ./.github/actions/round
+      with:
+        machine: ${{ inputs.machine }}
+        machines: ${{ inputs.machines }}
+    - uses: ./.github/actions/round
+      with:
+        machine: ${{ inputs.machine }}
+        machines: ${{ inputs.machines }}
+    - uses: ./.github/actions/round
+      with:
+        machine: ${{ inputs.machine }}
+        machines: ${{ inputs.machines }}
+    - uses: ./.github/actions/round
+      with:
+        machine: ${{ inputs.machine }}
+        machines: ${{ inputs.machines }}
+    - uses: ./.github/actions/round
+      with:
+        machine: ${{ inputs.machine }}
+        machines: ${{ inputs.machines }}
+    - uses: ./.github/actions/round
+      with:
+        machine: ${{ inputs.machine }}
+        machines: ${{ inputs.machines }}
+    - uses: ./.github/actions/round
+      with:
+        machine: ${{ inputs.machine }}
+        machines: ${{ inputs.machines }}

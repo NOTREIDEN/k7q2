@@ -38,11 +38,24 @@ Check a checkpoint against each scripted bot level:
 ## Train on several machines
 
 `.github/workflows/train.yml` starts a number of machines that all train
-the same agent. Every few minutes each machine publishes its weights as an
-asset of a release and replaces them with the average of everybody's latest
-weights (`python/pvpai/sync.py`). Each run lasts under six hours and starts
-the next one when it ends. To stop, cancel the run and add a file named
-`STOP` to the repository.
+the same agent. Every few minutes each machine publishes its weights and
+replaces them with the average of everybody's weights for that round
+(`python/pvpai/sync.py`). The trainer only writes to and reads from two
+folders; steps of the workflow carry the files between machines as
+artifacts of the run (`.github/actions/round`).
+
+The first run starts from `seed/stage1.pt`. Each run lasts under six hours,
+leaves its weights in an artifact named `weights` and starts the next run,
+which continues from them. To stop, cancel the run and add a file named
+`STOP` to the repository. To continue later, start the workflow with the
+id of the run to continue from.
+
+To look at what a run has learned, download its `weights` artifact (or the
+`w*-r*` artifacts of the latest round while it is still running) and
+average them into one checkpoint:
+
+    python merge.py weights/w*.pt --out merged.pt
+    python evaluate.py merged.pt
 
 The same sharing works on one machine through a folder:
 

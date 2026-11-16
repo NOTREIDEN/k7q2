@@ -9,9 +9,9 @@ on:
       minutes:
         description: Minutes each machine trains before the run ends
         default: "330"
-      tag:
-        description: Release that holds the shared weights
-        default: stage1
+      round_minutes:
+        description: Minutes between exchanges of weights (2.5 or more for a full-length run)
+        default: "5"
       mode:
         description: How machines share weights
         type: choice
@@ -19,6 +19,12 @@ on:
         default: average
       args:
         description: Extra options for train.py
+        default: >-
+          --lr 5e-4 --n-selfplay 128 --n-bot 128 --bot-min 2 --log-every 50
+          --param w_sprint_hit=0.3 --param w_reach_adv=0.03 --param w_combo=0.2
+          --param w_close=0.06 --param close_dist=2.2
+      previous:
+        description: Id of the run to continue from (empty starts from seed/stage1.pt)
         default: ""
       relaunch:
         description: Start the next run when this one ends
@@ -26,31 +32,32 @@ on:
         default: true
 
 permissions:
-  contents: write
+  contents: read
   actions: write
 
 concurrency:
-  group: train-${{ inputs.tag }}
+  group: train
   cancel-in-progress: false
 
 jobs:
   plan:
     runs-on: ubuntu-latest
     outputs:
-      ids: ${{ steps.ids.outputs.ids }}
+      ids: ${{ steps.plan.outputs.ids }}
+      origin: ${{ steps.plan.outputs.origin }}
     steps:
-      - id: ids
+      - id: plan
         env:
           MACHINES: ${{ inputs.machines }}
-        run: echo "ids=$(python3 -c 'import json,sys; print(json.dumps(list(range(int(sys.argv[1])))))' "$MACHINES")" >> "$GITHUB_OUTPUT"
-      - name: Make sure the release for the shared weights exists
-        env:
-          GH_TOKEN: ${{ github.token }}
-          TAG: ${{ inputs.tag }}
+          ROUND: ${{ inputs.round_minutes }}
         run: |
-          gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1 || \
-            gh release create "$TAG" --repo "$GITHUB_REPOSITORY" --prerelease --title "$TAG" \
-              --notes "Training checkpoints, replaced as training runs."
+          python3 - <<'PY' >> "$GITHUB_OUTPUT"
+          import json, os, time
+          print("ids=" + json.dumps(list(range(int(os.environ["MACHINES"])))))
+          # The machines count their rounds from one shared moment. The first
+          # exchange comes about one round after they have started training.
+          print("origin=%d" % (time.time() + 150 + 60 * float(os.environ["ROUND"])))
+          PY
 
   train:
     needs: plan
@@ -65,7 +72,7 @@ jobs:
       - uses: actions/cache@v4
         with:
           path: sim/target
-          key: sim-${{ hashFiles('sim/Cargo.toml', 'sim/src/**', 'sim/tests/**') }}
+          key: sim-${{ hashFiles('sim/Cargo.toml', 'sim/Cargo.lock', 'sim/src/**', 'sim/tests/**') }}
       - name: Build and test the simulator
         run: cd sim && cargo test --release && cargo build --release
       - uses: actions/setup-python@v5
@@ -75,43 +82,168 @@ jobs:
         run: |
           pip install --index-url https://download.pytorch.org/whl/cpu torch
           pip install numpy
-      - name: Train
-        shell: bash
+      - name: Fetch the weights of the run this one continues
+        if: inputs.previous != ''
+        uses: actions/download-artifact@v4
+        with:
+          name: weights
+          path: share/in
+          run-id: ${{ inputs.previous }}
+          github-token: ${{ github.token }}
+      - name: Start the trainers
         env:
-          GH_TOKEN: ${{ github.token }}
           MINUTES: ${{ inputs.minutes }}
           MACHINES: ${{ inputs.machines }}
-          TAG: ${{ inputs.tag }}
+          ROUND: ${{ inputs.round_minutes }}
           MODE: ${{ inputs.mode }}
           EXTRA: ${{ inputs.args }}
           MACHINE: ${{ matrix.machine }}
+          ORIGIN: ${{ needs.plan.outputs.origin }}
         run: |
           # Two processes use the four cores better than one. They average
-          # their weights every few seconds through a folder in memory; the
-          # first one also shares with the other machines through the release.
+          # their weights every few seconds through a folder in memory. The
+          # first one also shares with the other machines: it writes its
+          # weights to share/out and reads the others' from share/in, and the
+          # steps below carry the files between machines. The trainers keep
+          # running in the background while those steps run.
+          S="$GITHUB_WORKSPACE/share"
+          mkdir -p "$S/out" "$S/in" "$S/dl" /dev/shm/pvp
+          echo $(( $(date +%s) + (${MINUTES%.*} + 8) * 60 )) > "$S/deadline.txt"
+          ls -l "$S/in"
           cd python
-          mkdir -p /dev/shm/pvp
-          pids=()
           for p in 0 1; do
-            python train.py --minutes "$MINUTES" --out "runs/m$MACHINE-p$p" --threads 2 \
+            nohup python train.py --minutes "$MINUTES" --out "runs/p$p" --threads 2 \
               --worker-id "$p" --workers 2 --sync-dir /dev/shm/pvp \
-              --machine-id "$MACHINE" --machines "$MACHINES" --sync-release "$TAG" --machine-mode "$MODE" \
-              $EXTRA 2>&1 | sed -u "s/^/[p$p] /" &
-            pids+=($!)
+              --machine-id "$MACHINE" --machines "$MACHINES" --machine-mode "$MODE" \
+              --machine-out "$S/out" --machine-in "$S/in" --round-origin "$ORIGIN" \
+              --machine-minutes "$ROUND" --machine-wait 75 \
+              --init ../seed/stage1.pt $EXTRA > "$S/p$p.log" 2>&1 &
+            echo $! > "$S/p$p.pid"
           done
-          status=0
-          for pid in "${pids[@]}"; do wait "$pid" || status=1; done
-          exit $status
+          sleep 30
+          tail -n 5 "$S/p0.log" "$S/p1.log"
+          kill -0 "$(cat "$S/p0.pid")" && kill -0 "$(cat "$S/p1.pid")"
+      - uses: ./.github/actions/rounds
+        with:
+          machine: ${{ matrix.machine }}
+          machines: ${{ inputs.machines }}
+      - uses: ./.github/actions/rounds
+        with:
+          machine: ${{ matrix.machine }}
+          machines: ${{ inputs.machines }}
+      - uses: ./.github/actions/rounds
+        with:
+          machine: ${{ matrix.machine }}
+          machines: ${{ inputs.machines }}
+      - uses: ./.github/actions/rounds
+        with:
+          machine: ${{ matrix.machine }}
+          machines: ${{ inputs.machines }}
+      - uses: ./.github/actions/rounds
+        with:
+          machine: ${{ matrix.machine }}
+          machines: ${{ inputs.machines }}
+      - uses: ./.github/actions/rounds
+        with:
+          machine: ${{ matrix.machine }}
+          machines: ${{ inputs.machines }}
+      - uses: ./.github/actions/rounds
+        with:
+          machine: ${{ matrix.machine }}
+          machines: ${{ inputs.machines }}
+      - uses: ./.github/actions/rounds
+        with:
+          machine: ${{ matrix.machine }}
+          machines: ${{ inputs.machines }}
+      - uses: ./.github/actions/rounds
+        with:
+          machine: ${{ matrix.machine }}
+          machines: ${{ inputs.machines }}
+      - uses: ./.github/actions/rounds
+        with:
+          machine: ${{ matrix.machine }}
+          machines: ${{ inputs.machines }}
+      - uses: ./.github/actions/rounds
+        with:
+          machine: ${{ matrix.machine }}
+          machines: ${{ inputs.machines }}
+      - uses: ./.github/actions/rounds
+        with:
+          machine: ${{ matrix.machine }}
+          machines: ${{ inputs.machines }}
+      - name: Wait for the trainers and show the end of their logs
+        if: always()
+        env:
+          STATUS: ${{ job.status }}
+        run: |
+          end=$(cat share/deadline.txt 2>/dev/null || echo 0)
+          for p in 0 1; do
+            pid=$(cat "share/p$p.pid" 2>/dev/null || echo)
+            [ -n "$pid" ] || continue
+            if [ "$STATUS" = cancelled ]; then kill "$pid" 2>/dev/null || true; fi
+            while kill -0 "$pid" 2>/dev/null && [ "$(date +%s)" -lt "$end" ] && [ "$STATUS" != cancelled ]; do
+              sleep 2
+            done
+          done
+          tail -n 40 share/p0.log share/p1.log || true
+          grep -q '^saved ' share/p0.log && grep -q '^saved ' share/p1.log
+      - name: Leave the weights for the next run
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: final-m${{ matrix.machine }}
+          path: share/out/w*.pt
+          if-no-files-found: ignore
+          retention-days: 1
+          compression-level: 0
       - name: Keep the logs
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: log-m${{ matrix.machine }}
-          path: python/runs/*/log.jsonl
+          path: |
+            python/runs/*/log.jsonl
+            share/p*.log
           if-no-files-found: ignore
+          retention-days: 7
+
+  collect:
+    needs: train
+    if: ${{ always() }}
+    runs-on: ubuntu-latest
+    outputs:
+      source: ${{ steps.pick.outputs.source }}
+    steps:
+      - uses: actions/download-artifact@v4
+        continue-on-error: true
+        with:
+          pattern: final-m*
+          path: weights
+          merge-multiple: true
+      - id: pick
+        env:
+          PREVIOUS: ${{ inputs.previous }}
+        run: |
+          # The next run continues from this one, or from the one before if
+          # no machine of this one left weights.
+          n=$(ls weights/w*.pt 2>/dev/null | wc -l)
+          echo "$n machines left weights"
+          if [ "$n" -gt 0 ]; then
+            echo "have=yes" >> "$GITHUB_OUTPUT"
+            echo "source=$GITHUB_RUN_ID" >> "$GITHUB_OUTPUT"
+          else
+            echo "source=$PREVIOUS" >> "$GITHUB_OUTPUT"
+          fi
+      - if: steps.pick.outputs.have == 'yes'
+        uses: actions/upload-artifact@v4
+        with:
+          name: weights
+          path: weights/w*.pt
+          retention-days: 7
+          compression-level: 0
 
   relaunch:
-    needs: train
+    needs: collect
     if: ${{ always() && !cancelled() && inputs.relaunch }}
     runs-on: ubuntu-latest
     steps:
@@ -120,9 +252,10 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           MINUTES: ${{ inputs.minutes }}
           MACHINES: ${{ inputs.machines }}
-          TAG: ${{ inputs.tag }}
+          ROUND: ${{ inputs.round_minutes }}
           MODE: ${{ inputs.mode }}
           EXTRA: ${{ inputs.args }}
+          SOURCE: ${{ needs.collect.outputs.source }}
         run: |
           if gh api "repos/$GITHUB_REPOSITORY/contents/STOP" >/dev/null 2>&1; then
             echo "STOP file present, not starting another run"
@@ -137,5 +270,5 @@ jobs:
             exit 1
           fi
           gh workflow run train.yml --repo "$GITHUB_REPOSITORY" --ref "$GITHUB_REF_NAME" \
-            -f machines="$MACHINES" -f minutes="$MINUTES" -f tag="$TAG" -f mode="$MODE" \
-            -f args="$EXTRA" -f relaunch=true
+            -f machines="$MACHINES" -f minutes="$MINUTES" -f round_minutes="$ROUND" -f mode="$MODE" \
+            -f args="$EXTRA" -f previous="$SOURCE" -f relaunch=true
