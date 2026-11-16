@@ -48,8 +48,11 @@ def main():
 
     if args.threads > 0:
         torch.set_num_threads(args.threads)
+    # Every machine starts from the same network (weights can only be
+    # averaged between networks that share a starting point) but plays
+    # different duels.
+    base_seed = args.seed
     args.seed = args.seed + 7919 * args.worker_id
-    torch.manual_seed(args.seed)
     np.random.seed(args.seed)
     os.makedirs(args.out, exist_ok=True)
 
@@ -66,7 +69,9 @@ def main():
             k, v = kv.split("=")
             e.set_param(k, float(v))
 
+    torch.manual_seed(base_seed)
     policy = Policy(any_env.obs_dim, any_env.priv_dim, any_env.act_dims, args.hidden)
+    torch.manual_seed(args.seed)
     opt = torch.optim.Adam(policy.parameters(), lr=args.lr, eps=1e-5)
     vs = RunningScale()
     total_samples, iters = 0, 0

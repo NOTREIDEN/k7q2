@@ -21,3 +21,21 @@ simulator and meant to be driven from a client mod.
 
 Stage 1 trains sword duels with infinite health and Speed II: movement
 keys, mouse, clicks, sprint resets and knockback handling.
+
+Check a checkpoint against each scripted bot level:
+
+    python evaluate.py runs/stage1/latest.pt
+
+## Train on several machines
+
+`.github/workflows/train.yml` starts a number of machines that all train
+the same agent. Every few minutes each machine publishes its weights as an
+asset of a release and replaces them with the average of everybody's latest
+weights (`python/pvpai/sync.py`). Each run lasts under six hours and starts
+the next one when it ends. To stop, cancel the run and add a file named
+`STOP` to the repository.
+
+The same sharing works on one machine through a folder:
+
+    python train.py --worker-id 0 --workers 2 --sync-dir /tmp/share &
+    python train.py --worker-id 1 --workers 2 --sync-dir /tmp/share &

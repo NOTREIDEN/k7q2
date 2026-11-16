@@ -12,6 +12,9 @@ on:
       tag:
         description: Release that holds the shared weights
         default: stage1
+      args:
+        description: Extra options for train.py
+        default: ""
       relaunch:
         description: Start the next run when this one ends
         type: boolean
@@ -32,7 +35,9 @@ jobs:
       ids: ${{ steps.ids.outputs.ids }}
     steps:
       - id: ids
-        run: echo "ids=$(python3 -c 'import json,sys; print(json.dumps(list(range(int(sys.argv[1])))))' '${{ inputs.workers }}')" >> "$GITHUB_OUTPUT"
+        env:
+          WORKERS: ${{ inputs.workers }}
+        run: echo "ids=$(python3 -c 'import json,sys; print(json.dumps(list(range(int(sys.argv[1])))))' "$WORKERS")" >> "$GITHUB_OUTPUT"
 
   train:
     needs: plan
@@ -60,11 +65,15 @@ jobs:
       - name: Train
         env:
           GH_TOKEN: ${{ github.token }}
+          MINUTES: ${{ inputs.minutes }}
+          WORKERS: ${{ inputs.workers }}
+          TAG: ${{ inputs.tag }}
+          EXTRA: ${{ inputs.args }}
+          WORKER: ${{ matrix.worker }}
         run: |
           cd python
-          python train.py --minutes '${{ inputs.minutes }}' --out "runs/w${{ matrix.worker }}" \
-            --worker-id '${{ matrix.worker }}' --workers '${{ inputs.workers }}' \
-            --sync-release '${{ inputs.tag }}'
+          python train.py --minutes "$MINUTES" --out "runs/w$WORKER" \
+            --worker-id "$WORKER" --workers "$WORKERS" --sync-release "$TAG" $EXTRA
       - name: Keep the log
         if: always()
         uses: actions/upload-artifact@v4
@@ -81,11 +90,14 @@ jobs:
       - name: Start the next run unless a STOP file exists in the repository
         env:
           GH_TOKEN: ${{ github.token }}
+          MINUTES: ${{ inputs.minutes }}
+          WORKERS: ${{ inputs.workers }}
+          TAG: ${{ inputs.tag }}
+          EXTRA: ${{ inputs.args }}
         run: |
-          if gh api "repos/${{ github.repository }}/contents/STOP" >/dev/null 2>&1; then
+          if gh api "repos/$GITHUB_REPOSITORY/contents/STOP" >/dev/null 2>&1; then
             echo "STOP file present, not starting another run"
             exit 0
           fi
-          gh workflow run train.yml --repo '${{ github.repository }}' \
-            -f workers='${{ inputs.workers }}' -f minutes='${{ inputs.minutes }}' \
-            -f tag='${{ inputs.tag }}' -f relaunch=true
+          gh workflow run train.yml --repo "$GITHUB_REPOSITORY" --ref "$GITHUB_REF_NAME" \
+            -f workers="$WORKERS" -f minutes="$MINUTES" -f tag="$TAG" -f args="$EXTRA" -f relaunch=true
