@@ -14,7 +14,7 @@ import numpy as np
 import torch
 
 from pvpai.env import BOT, SELF_PLAY, VecEnv
-from pvpai.model import Policy
+from pvpai.model import Policy, load_policy
 from pvpai.ppo import RunningScale, Stream, ppo_update
 
 
@@ -83,9 +83,10 @@ def main():
     vs = RunningScale()
     total_samples, iters = 0, 0
     if args.init:
-        ck = torch.load(args.init, map_location="cpu", weights_only=False)
-        policy.load_state_dict(ck["policy"])
-        opt.load_state_dict(ck["opt"])
+        old, ck, grown = load_policy(args.init, any_env.obs_dim)
+        policy.load_state_dict(old.state_dict())
+        if not grown:
+            opt.load_state_dict(ck["opt"])
         vs.var, vs.count = ck["vs"]
         total_samples, iters = ck["samples"], ck["iters"]
 

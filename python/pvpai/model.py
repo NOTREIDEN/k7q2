@@ -92,3 +92,22 @@ class Policy(nn.Module):
             logp = logp + d.log_prob(actions[..., i])
             ent = ent + d.entropy()
         return logp, ent, self.value(hs, priv)
+
+
+def load_policy(path, obs_dim=None):
+    """The policy stored in a checkpoint, with the checkpoint itself and
+    whether inputs were added. If the simulator now gives more observation
+    values than the checkpoint was trained with, the new ones start with
+    zero weight: the policy plays as before until it learns to use them."""
+    ck = torch.load(path, map_location="cpu", weights_only=False)
+    sd = {k: v.float() for k, v in ck["policy"].items()}
+    hidden = sd["lstm.weight_hh_l0"].shape[1]
+    old = sd["enc.0.weight"].shape[1]
+    n = max(obs_dim or old, old)
+    if n > old:
+        w = torch.zeros(hidden, n)
+        w[:, :old] = sd["enc.0.weight"]
+        sd["enc.0.weight"] = w
+    policy = Policy(n, ck["priv_dim"], ck["act_dims"], hidden)
+    policy.load_state_dict(sd)
+    return policy, ck, n > old

@@ -7,8 +7,8 @@ import argparse
 import numpy as np
 import torch
 
-from pvpai.env import BOT, VecEnv
-from pvpai.model import Policy
+from pvpai.env import BOT, VecEnv, sim_obs_dim
+from pvpai.model import load_policy
 
 
 def main():
@@ -21,10 +21,7 @@ def main():
     ap.add_argument("--param", action="append", default=[])
     args = ap.parse_args()
 
-    ck = torch.load(args.checkpoint, map_location="cpu", weights_only=False)
-    hidden = ck["policy"]["lstm.weight_hh_l0"].shape[1]
-    policy = Policy(ck["obs_dim"], ck["priv_dim"], ck["act_dims"], hidden)
-    policy.load_state_dict({k: v.float() for k, v in ck["policy"].items()})
+    policy, ck, _ = load_policy(args.checkpoint, sim_obs_dim())
     policy.eval()
     ticks = int(args.seconds * 20)
     print(f"checkpoint with {ck.get('samples', 0)/1e6:.1f}M samples; {args.duels} duels of {args.seconds:.0f} s per level")

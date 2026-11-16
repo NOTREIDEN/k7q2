@@ -24,7 +24,7 @@ pub const YAW_BINS: [i32; 27] = [
 ];
 pub const PITCH_BINS: [i32; 21] = [-89, -55, -34, -21, -13, -8, -5, -3, -2, -1, 0, 1, 2, 3, 5, 8, 13, 21, 34, 55, 89];
 
-pub const OBS_DIM: usize = 60;
+pub const OBS_DIM: usize = 63;
 pub const PRIV_DIM: usize = 32;
 pub const STATS_DIM: usize = 16;
 /// Floats per player and in total written by `Env::write_view`.
@@ -47,6 +47,24 @@ pub struct Params {
     pub speed_amp: i8,
     pub ping_min_ms: f64,
     pub ping_max_ms: f64,
+    /// Ping range of player 0, the side that stands for the agent as it
+    /// will be used. A negative minimum means the common range above. In
+    /// self-play player 1 keeps the common range and plays the opponent
+    /// with an ordinary connection.
+    pub agent_ping_min_ms: f64,
+    pub agent_ping_max_ms: f64,
+    /// Clicks per second player 0 can make, drawn per duel from this
+    /// range. Below twenty it is a budget: a click that would go over it is
+    /// not made, and no second of play holds more than the rate rounded up.
+    /// Twenty or more means a click every tick is allowed.
+    pub cps_min: f64,
+    pub cps_max: f64,
+    /// The same for player 1, the opponent. Above twenty the opponent also
+    /// clicks twice in some ticks, and scripted bots click on every tick
+    /// they are on target. A negative minimum means: a self-play copy
+    /// follows the range above and bots click as their level says.
+    pub opp_cps_min: f64,
+    pub opp_cps_max: f64,
     pub jitter_max_ms: f64,
     pub start_dist_min: f64,
     pub start_dist_max: f64,
@@ -105,6 +123,12 @@ impl Default for Params {
             speed_amp: 1,
             ping_min_ms: 10.0,
             ping_max_ms: 120.0,
+            agent_ping_min_ms: 160.0,
+            agent_ping_max_ms: 230.0,
+            cps_min: 14.0,
+            cps_max: 16.9,
+            opp_cps_min: 20.0,
+            opp_cps_max: 24.0,
             jitter_max_ms: 2.0,
             start_dist_min: 2.0,
             start_dist_max: 10.0,
@@ -186,6 +210,12 @@ impl Params {
             39 => self.w_combo = v as f32,
             40 => self.w_close = v as f32,
             41 => self.close_dist = v,
+            42 => self.agent_ping_min_ms = v,
+            43 => self.agent_ping_max_ms = v,
+            44 => self.cps_min = v,
+            45 => self.cps_max = v,
+            46 => self.opp_cps_min = v,
+            47 => self.opp_cps_max = v,
             _ => return false,
         }
         true
@@ -200,6 +230,7 @@ pub fn decode_action(a: &[i32]) -> Input {
         jump: a[2] != 0,
         sprint_key: a[3] != 0,
         attack: a[4] != 0,
+        extra_clicks: 0,
         dx: YAW_BINS[pick(a[5], 27)],
         dy: PITCH_BINS[pick(a[6], 21)],
     }
@@ -309,6 +340,10 @@ pub struct Env {
     stash_obs: [[f32; OBS_DIM]; 2],
     stash_priv: [[f32; PRIV_DIM]; 2],
     ping_ms: [f64; 2],
+    /// Click rate of each player in this duel and what is left of its
+    /// budget.
+    cps: [f64; 2],
+    click_tokens: [f64; 2],
 }
 
 pub fn new_match(p: &Params, rng: &mut Rng, mode: Mode) -> (Match, [f64; 2], BotParams) {
@@ -340,7 +375,12 @@ pub fn new_match(p: &Params, rng: &mut Rng, mode: Mode) -> (Match, [f64; 2], Bot
     let mut ping = [0.0; 2];
     let mut net = NetCfg { up_us: [0; 2], down_us: [0; 2], jitter_us: [0; 2] };
     for i in 0..2 {
-        ping[i] = rng.range(p.ping_min_ms, p.ping_max_ms.max(p.ping_min_ms));
+        let (lo, hi) = if i == 0 && p.agent_ping_min_ms >= 0.0 {
+            (p.agent_ping_min_ms, p.agent_ping_max_ms)
+        } else {
+            (p.ping_min_ms, p.ping_max_ms)
+        };
+        ping[i] = rng.range(lo, hi.max(lo));
         let half = (ping[i] * 500.0) as i64;
         net.up_us[i] = half.max(1);
         net.down_us[i] = half.max(1);
@@ -377,13 +417,16 @@ pub fn new_match(p: &Params, rng: &mut Rng, mode: Mode) -> (Match, [f64; 2], Bot
     };
     let seed = rng.next_u64();
     let m = Match::new(world, spawns, p.speed_amp, kb, scfg, ccfg, net, [0, c1, sv], seed);
-    let bot = if mode == Mode::Bot {
+    let mut bot = if mode == Mode::Bot {
         let lo = p.bot_level[0].round() as i64;
         let hi = (p.bot_level[1].round() as i64).max(lo);
         BotParams::level((lo + (rng.next_u64() % (hi - lo + 1) as u64) as i64) as u8)
     } else {
         BotParams::level(0)
     };
+    if p.opp_cps_min >= 20.0 && bot.click_prob > 0.0 {
+        bot.click_prob = 1.0;
+    }
     (m, ping, bot)
 }
 
@@ -413,6 +456,8 @@ impl Env {
             stash_obs: [[0.0; OBS_DIM]; 2],
             stash_priv: [[0.0; PRIV_DIM]; 2],
             ping_ms: ping,
+            cps: [20.0; 2],
+            click_tokens: [2.0; 2],
         };
         e.begin();
         e
@@ -428,6 +473,13 @@ impl Env {
         self.max_combo = [0; 2];
         self.ep = Stats::default();
         self.bot_state = BotState::default();
+        let own = self.rng.range(p.cps_min, p.cps_max.max(p.cps_min));
+        let (lo, hi) = if p.opp_cps_min < 0.0 { (p.cps_min, p.cps_max) } else { (p.opp_cps_min, p.opp_cps_max) };
+        let other = self.rng.range(lo, hi.max(lo));
+        self.cps = [own.max(1.0), other.max(1.0)];
+        for a in 0..2 {
+            self.click_tokens[a] = 1.0 + (self.cps[a] / 20.0).min(1.0);
+        }
         self.pending = self.m.advance();
         debug_assert_eq!(self.pending, 0);
         for a in 0..2 {
@@ -494,6 +546,32 @@ impl Env {
         let eye = c.lp.eye();
         let ebb = c.rp.bb.expand(0.1, 0.1, 0.1);
         dist(eye, ebb.closest_point(eye)) <= 3.0
+    }
+
+    /// Clicks player `id` can still make on its next tick.
+    fn clicks_available(&self, id: usize) -> f64 {
+        let r = (self.cps[id] / 20.0).min(1.0);
+        (self.click_tokens[id] + r).min(1.0 + r)
+    }
+
+    /// Apply the click rate of player `id` to what it asked for: drop a
+    /// click the budget does not cover, or add the second click of a tick
+    /// for a rate above twenty.
+    fn limit_clicks(&mut self, id: usize, inp: &mut Input) {
+        let c = self.cps[id];
+        if c >= 20.0 {
+            if inp.attack && c > 20.0 && self.rng.chance((c - 20.0) / 20.0) {
+                inp.extra_clicks = 1;
+            }
+            return;
+        }
+        let t = self.clicks_available(id);
+        if inp.attack && t >= 1.0 - 1e-9 {
+            self.click_tokens[id] = t - 1.0;
+        } else {
+            inp.attack = false;
+            self.click_tokens[id] = t;
+        }
     }
 
     /// Shaping terms and statistics for the tick `id` just made.
@@ -565,7 +643,8 @@ impl Env {
     /// again. Returns that agent's index.
     pub fn step(&mut self, action: &[i32]) -> usize {
         let id = self.pending;
-        let inp = decode_action(action);
+        let mut inp = decode_action(action);
+        self.limit_clicks(id, &mut inp);
         let out = self.m.client_tick(id, &inp);
         self.account(id, &inp, &out);
         let mut round_done = id == 1;
@@ -573,7 +652,10 @@ impl Env {
         self.collect_hits();
         if self.mode == Mode::Bot {
             while next == 1 {
-                let b = bot::act(&self.m.c[1], &self.m.world, &self.m.ccfg, &self.bot, &mut self.bot_state, &mut self.rng);
+                let mut b = bot::act(&self.m.c[1], &self.m.world, &self.m.ccfg, &self.bot, &mut self.bot_state, &mut self.rng);
+                if self.params.opp_cps_min >= 0.0 {
+                    self.limit_clicks(1, &mut b);
+                }
                 let o = self.m.client_tick(1, &b);
                 self.account(1, &b, &o);
                 next = self.m.advance();
@@ -741,6 +823,10 @@ impl Env {
         o[57] = clip(pi.dx as f64 * dpc / 30.0, 2.0);
         o[58] = clip(pi.dy as f64 * dpc / 15.0, 1.0);
         o[59] = (self.combo[id] as f32 / 10.0).min(2.0) - (self.combo[1 - id] as f32 / 10.0).min(2.0);
+        let avail = self.clicks_available(id);
+        o[60] = (avail >= 1.0 - 1e-9) as u8 as f32;
+        o[61] = (avail / 2.0) as f32;
+        o[62] = (self.cps[id] / 20.0) as f32;
     }
 
     /// Extra inputs for the value function only: things a client cannot see.

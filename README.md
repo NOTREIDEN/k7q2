@@ -25,6 +25,12 @@ simulator and meant to be driven from a client mod.
 Stage 1 trains sword duels with infinite health and Speed II: movement
 keys, mouse, clicks, sprint resets and knockback handling.
 
+The agent is trained for the conditions it will play under: a ping of 160
+to 230 ms and 14 to 17 clicks per second, against opponents with an
+ordinary connection that click 20 to 24 times per second. These are the
+defaults of the simulator (`agent_ping_*`, `cps_*`, `opp_cps_*` in
+`sim/src/env.rs`) and can be changed with `--param name=value`.
+
 Check a checkpoint against each scripted bot level:
 
     python evaluate.py runs/stage1/latest.pt

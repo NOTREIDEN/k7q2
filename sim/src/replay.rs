@@ -342,6 +342,7 @@ fn replay_client(lines: &[Line], world: &World, speed: i8, sens: f32, o: &Option
                     attack: n(5) != 0,
                     dx: n(6),
                     dy: -n(7),
+                    extra_clicks: 0,
                 };
                 let t = c.tick(world, &inp, &cfg, &mut out);
                 rep.count("clicks", inp.attack as usize);

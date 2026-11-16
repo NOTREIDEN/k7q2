@@ -12,15 +12,12 @@ import argparse
 import numpy as np
 import torch
 
-from pvpai.env import BOT, SELF_PLAY, VIEW_GLOBAL, VIEW_PLAYER, VecEnv
-from pvpai.model import Policy
+from pvpai.env import BOT, SELF_PLAY, VIEW_GLOBAL, VIEW_PLAYER, VecEnv, sim_obs_dim
+from pvpai.model import load_policy
 
 
-def load(path):
-    ck = torch.load(path, map_location="cpu", weights_only=False)
-    hidden = ck["policy"]["lstm.weight_hh_l0"].shape[1]
-    policy = Policy(ck["obs_dim"], ck["priv_dim"], ck["act_dims"], hidden)
-    policy.load_state_dict({k: v.float() for k, v in ck["policy"].items()})
+def load(path, lib=None):
+    policy, ck, _ = load_policy(path, sim_obs_dim(lib))
     policy.eval()
     return policy, ck.get("samples", 0)
 
@@ -40,7 +37,7 @@ def main():
     args = ap.parse_args()
 
     torch.manual_seed(args.seed)
-    policy, samples = load(args.checkpoint)
+    policy, samples = load(args.checkpoint, args.lib)
     ticks = int(args.seconds * 20)
     bot = args.against.startswith("bot:")
     env = VecEnv(args.duels, BOT if bot else SELF_PLAY, args.seed, args.lib)
@@ -54,7 +51,7 @@ def main():
     elif args.against == "self":
         other, names = policy, ["IA", "IA (copia)"]
     else:
-        other, osamples = load(args.against)
+        other, osamples = load(args.against, args.lib)
         names = ["IA", f"IA anterior ({osamples/1e6:.0f}M)"]
     for kv in args.param:
         k, v = kv.split("=")

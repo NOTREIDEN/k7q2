@@ -18,6 +18,10 @@ pub struct Input {
     pub sprint_key: bool,
     /// One full left click (press and release) inside this tick.
     pub attack: bool,
+    /// Further full clicks inside the same tick, after the one above. A
+    /// mouse clicked more than twenty times a second sends two in some
+    /// ticks.
+    pub extra_clicks: u8,
     /// Mouse counts since the previous tick. Positive x turns right,
     /// positive y looks down.
     pub dx: i32,
@@ -480,23 +484,28 @@ impl Client {
 
         // clickMouse. The button is released again inside the same tick, so
         // leftClickCounter is back at zero before the next one.
-        if inp.attack {
+        // Every click of the tick runs clickMouse against the same pick. A
+        // click into the air sets leftClickCounter, which swallows the
+        // clicks that follow it in this tick.
+        let clicks = if inp.attack { 1 + inp.extra_clicks } else { 0 };
+        for _ in 0..clicks {
             out.push(C2S::Swing);
             t.swung = true;
             lp.ticks_since_swing = 0;
-            if t.pick.entity {
-                out.push(C2S::Attack);
-                t.attacked = true;
-                lp.ticks_since_attack = 0;
-                // attackTargetEntityWithCurrentItem on the client: the copy
-                // of the other player always reports a successful hit.
-                let i = cfg.kb_ench + if lp.l.sprinting { 1 } else { 0 };
-                if i > 0 {
-                    lp.l.body.motion[0] *= 0.6;
-                    lp.l.body.motion[2] *= 0.6;
-                    lp.set_sprinting(false);
-                    t.sprint_attack = true;
-                }
+            if !t.pick.entity {
+                break;
+            }
+            out.push(C2S::Attack);
+            t.attacked = true;
+            lp.ticks_since_attack = 0;
+            // attackTargetEntityWithCurrentItem on the client: the copy
+            // of the other player always reports a successful hit.
+            let i = cfg.kb_ench + if lp.l.sprinting { 1 } else { 0 };
+            if i > 0 {
+                lp.l.body.motion[0] *= 0.6;
+                lp.l.body.motion[2] *= 0.6;
+                lp.set_sprinting(false);
+                t.sprint_attack = true;
             }
         }
 

@@ -16,6 +16,8 @@ PARAM = {
     "sensitivity": 33, "damage": 34, "kb_ench": 35, "floor_y": 36,
     "w_sprint_hit": 37, "w_reach_adv": 38,
     "w_combo": 39, "w_close": 40, "close_dist": 41,
+    "agent_ping_min_ms": 42, "agent_ping_max_ms": 43,
+    "cps_min": 44, "cps_max": 45, "opp_cps_min": 46, "opp_cps_max": 47,
 }
 
 STAT_NAMES = [
@@ -59,6 +61,11 @@ def _load(path):
     lib.pvp_act_dims.argtypes = [ctypes.POINTER(ctypes.c_int32)]
     lib.pvp_vec_view.argtypes = [ctypes.c_void_p, ctypes.c_int32, f32p]
     return lib
+
+
+def sim_obs_dim(lib_path=None):
+    """Number of observation values the simulator library gives."""
+    return int(_load(lib_path or default_lib_path()).pvp_obs_dim())
 
 
 class VecEnv:
