@@ -3,7 +3,7 @@ name: train
 on:
   workflow_dispatch:
     inputs:
-      workers:
+      machines:
         description: Number of machines
         default: "20"
       minutes:
@@ -12,6 +12,11 @@ on:
       tag:
         description: Release that holds the shared weights
         default: stage1
+      mode:
+        description: How machines share weights
+        type: choice
+        options: [average, best]
+        default: average
       args:
         description: Extra options for train.py
         default: ""
@@ -36,8 +41,16 @@ jobs:
     steps:
       - id: ids
         env:
-          WORKERS: ${{ inputs.workers }}
-        run: echo "ids=$(python3 -c 'import json,sys; print(json.dumps(list(range(int(sys.argv[1])))))' "$WORKERS")" >> "$GITHUB_OUTPUT"
+          MACHINES: ${{ inputs.machines }}
+        run: echo "ids=$(python3 -c 'import json,sys; print(json.dumps(list(range(int(sys.argv[1])))))' "$MACHINES")" >> "$GITHUB_OUTPUT"
+      - name: Make sure the release for the shared weights exists
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ inputs.tag }}
+        run: |
+          gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1 || \
+            gh release create "$TAG" --repo "$GITHUB_REPOSITORY" --prerelease --title "$TAG" \
+              --notes "Training checkpoints, replaced as training runs."
 
   train:
     needs: plan
@@ -46,7 +59,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        worker: ${{ fromJSON(needs.plan.outputs.ids) }}
+        machine: ${{ fromJSON(needs.plan.outputs.ids) }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/cache@v4
@@ -63,23 +76,38 @@ jobs:
           pip install --index-url https://download.pytorch.org/whl/cpu torch
           pip install numpy
       - name: Train
+        shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
           MINUTES: ${{ inputs.minutes }}
-          WORKERS: ${{ inputs.workers }}
+          MACHINES: ${{ inputs.machines }}
           TAG: ${{ inputs.tag }}
+          MODE: ${{ inputs.mode }}
           EXTRA: ${{ inputs.args }}
-          WORKER: ${{ matrix.worker }}
+          MACHINE: ${{ matrix.machine }}
         run: |
+          # Two processes use the four cores better than one. They average
+          # their weights every few seconds through a folder in memory; the
+          # first one also shares with the other machines through the release.
           cd python
-          python train.py --minutes "$MINUTES" --out "runs/w$WORKER" \
-            --worker-id "$WORKER" --workers "$WORKERS" --sync-release "$TAG" $EXTRA
-      - name: Keep the log
+          mkdir -p /dev/shm/pvp
+          pids=()
+          for p in 0 1; do
+            python train.py --minutes "$MINUTES" --out "runs/m$MACHINE-p$p" --threads 2 \
+              --worker-id "$p" --workers 2 --sync-dir /dev/shm/pvp \
+              --machine-id "$MACHINE" --machines "$MACHINES" --sync-release "$TAG" --machine-mode "$MODE" \
+              $EXTRA 2>&1 | sed -u "s/^/[p$p] /" &
+            pids+=($!)
+          done
+          status=0
+          for pid in "${pids[@]}"; do wait "$pid" || status=1; done
+          exit $status
+      - name: Keep the logs
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: log-w${{ matrix.worker }}
-          path: python/runs/w${{ matrix.worker }}/log.jsonl
+          name: log-m${{ matrix.machine }}
+          path: python/runs/*/log.jsonl
           if-no-files-found: ignore
 
   relaunch:
@@ -91,13 +119,23 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           MINUTES: ${{ inputs.minutes }}
-          WORKERS: ${{ inputs.workers }}
+          MACHINES: ${{ inputs.machines }}
           TAG: ${{ inputs.tag }}
+          MODE: ${{ inputs.mode }}
           EXTRA: ${{ inputs.args }}
         run: |
           if gh api "repos/$GITHUB_REPOSITORY/contents/STOP" >/dev/null 2>&1; then
             echo "STOP file present, not starting another run"
             exit 0
           fi
+          # A run that ended long before its time broke somewhere: stop
+          # instead of starting broken runs one after another.
+          started=$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID" --jq .run_started_at)
+          elapsed=$(( ($(date +%s) - $(date -d "$started" +%s)) / 60 ))
+          if [ "$elapsed" -lt $(( ${MINUTES%.*} / 2 )) ]; then
+            echo "Run lasted $elapsed minutes of $MINUTES, not starting another run"
+            exit 1
+          fi
           gh workflow run train.yml --repo "$GITHUB_REPOSITORY" --ref "$GITHUB_REF_NAME" \
-            -f workers="$WORKERS" -f minutes="$MINUTES" -f tag="$TAG" -f args="$EXTRA" -f relaunch=true
+            -f machines="$MACHINES" -f minutes="$MINUTES" -f tag="$TAG" -f mode="$MODE" \
+            -f args="$EXTRA" -f relaunch=true

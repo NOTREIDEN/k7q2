@@ -39,11 +39,18 @@ def main():
     ap.add_argument("--minibatches", type=int, default=4)
     ap.add_argument("--epochs", type=int, default=3)
     ap.add_argument("--param", action="append", default=[], help="name=value for the simulator")
-    ap.add_argument("--worker-id", type=int, default=0)
-    ap.add_argument("--workers", type=int, default=1, help="how many machines share weights")
-    ap.add_argument("--sync-dir", default=None, help="folder to share weights through")
-    ap.add_argument("--sync-release", default=None, help="release tag to share weights through")
-    ap.add_argument("--sync-minutes", type=float, default=5.0)
+    ap.add_argument("--worker-id", type=int, default=0, help="process number inside one machine")
+    ap.add_argument("--workers", type=int, default=1, help="processes on this machine that share weights")
+    ap.add_argument("--sync-dir", default=None, help="folder the processes of this machine share weights through")
+    ap.add_argument("--sync-minutes", type=float, default=0.1)
+    ap.add_argument("--sync-wait", type=float, default=5.0, help="seconds to wait for the others each round")
+    ap.add_argument("--machine-id", type=int, default=0)
+    ap.add_argument("--machines", type=int, default=1, help="machines that share weights through a release")
+    ap.add_argument("--sync-release", default=None, help="release tag the machines share weights through")
+    ap.add_argument("--machine-minutes", type=float, default=5.0)
+    ap.add_argument("--machine-wait", type=float, default=60.0)
+    ap.add_argument("--machine-mode", default="average", choices=["average", "best"],
+                    help="average all machines, or let each train its own network and adopt the best when far behind")
     args = ap.parse_args()
 
     if args.threads > 0:
@@ -52,7 +59,7 @@ def main():
     # averaged between networks that share a starting point) but plays
     # different duels.
     base_seed = args.seed
-    args.seed = args.seed + 7919 * args.worker_id
+    args.seed = args.seed + 7919 * args.worker_id + 104729 * args.machine_id
     np.random.seed(args.seed)
     os.makedirs(args.out, exist_ok=True)
 
@@ -82,13 +89,27 @@ def main():
         vs.var, vs.count = ck["vs"]
         total_samples, iters = ck["samples"], ck["iters"]
 
-    syncer = None
+    # Two levels of sharing: often between the processes of one machine,
+    # every few minutes between machines. Only process 0 talks to the other
+    # machines; what it brings back reaches the rest through the folder.
+    local = remote = None
     if args.sync_dir or args.sync_release:
         from pvpai.sync import DirBackend, ReleaseBackend, Syncer
-        backend = DirBackend(args.sync_dir) if args.sync_dir else ReleaseBackend(os.environ["GITHUB_REPOSITORY"], args.sync_release)
-        syncer = Syncer(backend, args.worker_id, args.workers, args.sync_minutes)
+    if args.sync_dir:
+        local = Syncer(DirBackend(args.sync_dir), args.worker_id, args.workers, args.sync_minutes, args.sync_wait)
+    if args.sync_release and args.worker_id == 0:
+        # PVP_RELEASE_DIR swaps the release for a folder, to test this on one machine.
+        fake = os.environ.get("PVP_RELEASE_DIR")
+        backend = DirBackend(fake) if fake else ReleaseBackend(os.environ["GITHUB_REPOSITORY"], args.sync_release)
+        remote = Syncer(backend, args.machine_id, args.machines, args.machine_minutes, args.machine_wait,
+                        args.machine_mode)
         if not args.init:
-            total_samples, iters = syncer.restore(policy, vs)
+            total_samples, iters, loaded = remote.restore(policy, vs)
+            total_samples //= max(args.workers, 1)
+            if loaded and local is not None:
+                local.new_generation(False)
+            print(f"start: {'continuing from published weights' if loaded else 'nothing published yet'}, "
+                  f"{total_samples/1e6:.1f}M samples so far", flush=True)
 
     cfg = dict(gamma=args.gamma, lam=0.95, clip=0.2, epochs=args.epochs, minibatches=args.minibatches, vf_coef=0.5,
                ent_coef=args.ent_coef, max_grad_norm=0.5)
@@ -117,6 +138,7 @@ def main():
     t_start = time.time()
     t_save = t_start
     window = {}
+    score, sync_log = 0.0, {}
     g, vsc = cfg["gamma"], None
     while True:
         t0 = time.time()
@@ -140,11 +162,25 @@ def main():
         t2 = time.time()
         iters += 1
         total_samples += info["samples"]
-        if syncer is not None:
-            n_peers = syncer.maybe_sync(policy, vs, total_samples, iters)
-            if n_peers is not None:
-                print(f"sync: averaged with {n_peers} other machines, all machines together "
-                      f"{syncer.total_samples(total_samples)/1e6:.1f}M samples", flush=True)
+        for name, sy in (("machines", remote), ("processes", local)):
+            if sy is None:
+                continue
+            # Other machines are told this machine's total, other processes this process's share.
+            count = local.total_samples(total_samples) if (sy is remote and local is not None) else total_samples
+            did = sy.maybe_sync(policy, vs, count, iters, score)
+            if did is None:
+                continue
+            what, changed = did
+            if changed == "replaced":
+                # An unrelated network: the optimiser's running averages no longer apply.
+                opt = torch.optim.Adam(policy.parameters(), lr=args.lr, eps=1e-5)
+                if sy is remote:
+                    score = remote.adopted_score
+            if changed and sy is remote and local is not None:
+                local.new_generation(changed == "replaced")
+            if sy is remote and not changed and what.startswith("averaged") and local is not None:
+                local.new_generation(False)
+            sync_log.setdefault(name, []).append(what)
         row = dict(info)
         row.update(iter=iters, samples=total_samples, minutes=(t2 - t_start) / 60,
                    sps=info["samples"] / (t2 - t0), rollout_s=t1 - t0, update_s=t2 - t1)
@@ -153,6 +189,10 @@ def main():
             acc = window.setdefault(k, {})
             for name, v in st.items():
                 acc[name] = acc.get(name, 0.0) + v
+            if k == "bot" and st.get("ticks0", 0) > 0:
+                # Hits landed minus hits taken per minute against the bots,
+                # smoothed: how machines compare themselves with each other.
+                score += 0.05 * ((st["hits0"] - st["hits1"]) / (st["ticks0"] / 1200.0) - score)
         if iters % args.log_every == 0 or iters == 1:
             for k, st in window.items():
                 if st.get("episodes", 0) > 0:
@@ -179,6 +219,11 @@ def main():
                   f"taken {b.get('taken_per_min', 0):5.1f} on-target {b.get('on_target', 0):.2f} aim {b.get('aim_err_deg', 0):5.1f} "
                   f"sprint {b.get('sprint_hit_frac', 0):.2f} | self: hit/min {s.get('hits_per_min', 0):5.1f} combo {s.get('max_combo', 0):.1f} "
                   f"aim {s.get('aim_err_deg', 0):5.1f}", flush=True)
+            for name, whats in sync_log.items():
+                sy = remote if name == "machines" else local
+                print(f"sync between {name}: {len(whats)} rounds, last: {whats[-1]}; together "
+                      f"{sy.total_samples(total_samples)/1e6:.1f}M samples", flush=True)
+            sync_log.clear()
         now = time.time()
         if now - t_save > args.save_minutes * 60:
             save(os.path.join(args.out, "latest.pt"))
