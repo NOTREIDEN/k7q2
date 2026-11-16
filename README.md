@@ -31,6 +31,15 @@ ordinary connection that click 20 to 24 times per second. These are the
 defaults of the simulator (`agent_ping_*`, `cps_*`, `opp_cps_*` in
 `sim/src/env.rs`) and can be changed with `--param name=value`.
 
+Servers do not all push players the way the plain game does, and some
+opponents have more than the game gives them. Training can mix both in:
+`kb_random` is the share of duels with a server-style knockback (the
+game's formula with other numbers, or the ground and air numbers, height
+limit and time between hits that plugins of the KnockbackManager kind
+set), and `opp_edge_prob` the share in which the opponent has a longer
+reach, takes less knockback or can still hit the agent where it was a
+moment ago (backtrack). The agent is not told which duel it is in.
+
 Check a checkpoint against each scripted bot level:
 
     python evaluate.py runs/stage1/latest.pt

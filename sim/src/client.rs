@@ -300,15 +300,43 @@ pub struct TickOut {
     pub jumped: bool,
 }
 
+/// Ways a client can depart from the plain game. They stand for what some
+/// opponents on real servers have, so that the agent meets them in
+/// training. The default is the plain game.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Edge {
+    /// Attack reach from the eye, in blocks (the game: 3.0).
+    pub reach: f64,
+    /// Share of the horizontal knockback the client takes (the game: 1.0).
+    pub kb_taken: f64,
+    /// The client may still hit the other player where it showed them up
+    /// to this many ticks ago (the game: 0). This is what holding back the
+    /// other player's movement packets gives.
+    pub backtrack: u8,
+}
+
+impl Default for Edge {
+    fn default() -> Self {
+        Edge { reach: 3.0, kb_taken: 1.0, backtrack: 0 }
+    }
+}
+
+/// Longest backtrack an `Edge` can ask for, in ticks.
+pub const MAX_BACKTRACK: usize = 8;
+
 #[derive(Clone, Debug)]
 pub struct Client {
     pub lp: LocalPlayer,
     pub rp: RemotePlayer,
+    pub edge: Edge,
+    /// Where the other player was shown at the picks of the last ticks,
+    /// newest first.
+    shown: [Aabb; MAX_BACKTRACK],
 }
 
 /// `EntityRenderer.getMouseOver(1.0F)` for a world that holds one other
 /// player. `yaw` is whichever yaw the caller wants the ray to use.
-pub fn pick_with(world: &World, eye: V3, own_bb: &Aabb, pitch: f32, yaw: f32, remote_bb: &Aabb) -> Pick {
+pub fn pick_with(world: &World, eye: V3, own_bb: &Aabb, pitch: f32, yaw: f32, remote_bb: &Aabb, reach_limit: f64) -> Pick {
     let d0 = 4.5f32 as f64;
     let look = mth::look_vec(pitch, yaw);
     let end = [eye[0] + look[0] * d0, eye[1] + look[1] * d0, eye[2] + look[2] * d0];
@@ -344,7 +372,7 @@ pub fn pick_with(world: &World, eye: V3, own_bb: &Aabb, pitch: f32, yaw: f32, re
         }
     }
     let reach = dist(eye, vec33);
-    if pointed && reach > 3.0 {
+    if pointed && reach > reach_limit {
         pointed = false;
     }
     if pointed && (d2 < d1 || trace == RayHit::None) {
@@ -394,16 +422,34 @@ fn push_out_of_blocks(world: &World, motion: &mut V3, x: f64, y: f64, z: f64) {
 
 impl Client {
     pub fn new(pos: V3, yaw: f32, pitch: f32, speed_amp: i8, other_pos: V3, other_yaw: f32, other_pitch: f32) -> Self {
-        Client {
-            lp: LocalPlayer::new(pos, yaw, pitch, speed_amp),
-            rp: RemotePlayer::spawn(other_pos, other_yaw, other_pitch, true),
-        }
+        let rp = RemotePlayer::spawn(other_pos, other_yaw, other_pitch, true);
+        let shown = [rp.bb; MAX_BACKTRACK];
+        Client { lp: LocalPlayer::new(pos, yaw, pitch, speed_amp), rp, edge: Edge::default(), shown }
     }
 
     /// The pick the next tick would make if the mouse did not move.
     pub fn pick(&self, world: &World, cfg: &ClientCfg) -> Pick {
         let yaw = if cfg.mouse_delay_fix { self.lp.l.yaw } else { self.lp.yaw_head };
-        pick_with(world, self.lp.eye(), &self.lp.l.body.bb, self.lp.l.pitch, yaw, &self.rp.bb)
+        self.pick_ray(world, self.lp.l.pitch, yaw)
+    }
+
+    /// The pick for a ray with the given angles: against the other player
+    /// where this client shows them now and, for a client with a backtrack
+    /// edge, where it showed them on its last ticks.
+    pub fn pick_ray(&self, world: &World, pitch: f32, yaw: f32) -> Pick {
+        let eye = self.lp.eye();
+        let own = &self.lp.l.body.bb;
+        let now = pick_with(world, eye, own, pitch, yaw, &self.rp.bb, self.edge.reach);
+        if now.entity {
+            return now;
+        }
+        for old in self.shown.iter().take(self.edge.backtrack as usize) {
+            let p = pick_with(world, eye, own, pitch, yaw, old, self.edge.reach);
+            if p.entity {
+                return p;
+            }
+        }
+        now
     }
 
     /// A packet handler of `NetHandlerPlayClient`, run on the main thread
@@ -428,7 +474,8 @@ impl Client {
             }
             S2C::Velocity { own, v } => {
                 if own {
-                    let m = [v[0] as f64 / 8000.0, v[1] as f64 / 8000.0, v[2] as f64 / 8000.0];
+                    let k = self.edge.kb_taken;
+                    let m = [v[0] as f64 / 8000.0 * k, v[1] as f64 / 8000.0, v[2] as f64 / 8000.0 * k];
                     self.lp.l.body.motion = m;
                     self.lp.last_kb = m;
                     self.lp.ticks_since_kb = 0;
@@ -471,16 +518,18 @@ impl Client {
     /// One `Minecraft.runTick`: mouse, pick, click, then the entity updates.
     pub fn tick(&mut self, world: &World, inp: &Input, cfg: &ClientCfg, out: &mut Vec<C2S>) -> TickOut {
         let mut t = TickOut::default();
-        let lp = &mut self.lp;
 
         // Mouse movement accumulated since the previous tick.
         if inp.dx != 0 || inp.dy != 0 {
-            lp.set_angles(inp.dx as f32 * cfg.mouse_f1, -(inp.dy as f32 * cfg.mouse_f1));
+            self.lp.set_angles(inp.dx as f32 * cfg.mouse_f1, -(inp.dy as f32 * cfg.mouse_f1));
         }
 
         // getMouseOver(1.0F)
-        let ray_yaw = if cfg.mouse_delay_fix { lp.l.yaw } else { lp.yaw_head };
-        t.pick = pick_with(world, lp.eye(), &lp.l.body.bb, lp.l.pitch, ray_yaw, &self.rp.bb);
+        let ray_yaw = if cfg.mouse_delay_fix { self.lp.l.yaw } else { self.lp.yaw_head };
+        t.pick = self.pick_ray(world, self.lp.l.pitch, ray_yaw);
+        self.shown.copy_within(0..MAX_BACKTRACK - 1, 1);
+        self.shown[0] = self.rp.bb;
+        let lp = &mut self.lp;
 
         // clickMouse. The button is released again inside the same tick, so
         // leftClickCounter is back at zero before the next one.

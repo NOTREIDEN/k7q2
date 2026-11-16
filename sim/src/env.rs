@@ -9,9 +9,9 @@
 //! the reward that agent earned since its previous action.
 use crate::aabb::{dist, Aabb, V3};
 use crate::bot::{self, BotParams, BotState};
-use crate::client::{ClientCfg, Input, TickOut};
+use crate::client::{ClientCfg, Edge, Input, TickOut, MAX_BACKTRACK};
 use crate::mth::{self, Rng};
-use crate::server::{KbProfile, ServerCfg};
+use crate::server::{KbPlugin, KbProfile, ServerCfg};
 use crate::sim::{Match, NetCfg, Spawn, TICK_US};
 use crate::world::World;
 
@@ -29,7 +29,7 @@ pub const PRIV_DIM: usize = 32;
 pub const STATS_DIM: usize = 16;
 /// Floats per player and in total written by `Env::write_view`.
 pub const VIEW_PLAYER: usize = 20;
-pub const VIEW_DIM: usize = 2 * VIEW_PLAYER + 8;
+pub const VIEW_DIM: usize = 2 * VIEW_PLAYER + 16;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Mode {
@@ -65,6 +65,26 @@ pub struct Params {
     /// follows the range above and bots click as their level says.
     pub opp_cps_min: f64,
     pub opp_cps_max: f64,
+    /// Chance that a duel gives player 1, the opponent, an edge over the
+    /// plain game, drawn from the three ranges below: a longer attack
+    /// reach in blocks, a smaller share of the horizontal knockback taken,
+    /// and hits that still land where the agent was shown up to so many
+    /// milliseconds ago (backtrack). The agent is not told; it has to
+    /// notice from how the duel goes.
+    pub opp_edge_prob: f64,
+    pub opp_reach: [f64; 2],
+    pub opp_kb_taken: [f64; 2],
+    pub opp_backtrack_ms: [f64; 2],
+    /// Among the duels that `kb_random` gives a knockback other than the
+    /// game's, the share that get it the way server plugins set it
+    /// (`KbPlugin`: separate numbers on the ground and in the air, an
+    /// optional height limit, sprint knockback with or without a sprint
+    /// reset). The rest get the game's formula with other numbers. All of
+    /// them may also get a shorter time between hits.
+    pub kb_plugin: f64,
+    /// 0 draws the knockback as described above. 1 always uses the profile
+    /// the KnockbackManager plugin ships with.
+    pub kb_preset: i32,
     pub jitter_max_ms: f64,
     pub start_dist_min: f64,
     pub start_dist_max: f64,
@@ -129,6 +149,12 @@ impl Default for Params {
             cps_max: 16.9,
             opp_cps_min: 20.0,
             opp_cps_max: 24.0,
+            opp_edge_prob: 0.0,
+            opp_reach: [3.0, 3.5],
+            opp_kb_taken: [0.6, 1.0],
+            opp_backtrack_ms: [0.0, 200.0],
+            kb_plugin: 0.5,
+            kb_preset: 0,
             jitter_max_ms: 2.0,
             start_dist_min: 2.0,
             start_dist_max: 10.0,
@@ -216,6 +242,15 @@ impl Params {
             45 => self.cps_max = v,
             46 => self.opp_cps_min = v,
             47 => self.opp_cps_max = v,
+            48 => self.opp_edge_prob = v,
+            49 => self.opp_reach[0] = v,
+            50 => self.opp_reach[1] = v,
+            51 => self.opp_kb_taken[0] = v,
+            52 => self.opp_kb_taken[1] = v,
+            53 => self.opp_backtrack_ms[0] = v,
+            54 => self.opp_backtrack_ms[1] = v,
+            55 => self.kb_plugin = v,
+            56 => self.kb_preset = v as i32,
             _ => return false,
         }
         true
@@ -392,19 +427,41 @@ pub fn new_match(p: &Params, rng: &mut Rng, mode: Mode) -> (Match, [f64; 2], Bot
     if sv == c1 {
         sv = if c1 > 1 { c1 - 1 } else { c1 + 1 };
     }
-    let kb = if rng.chance(p.kb_random) {
-        let v = rng.range(p.kb_v[0], p.kb_v[1]);
-        KbProfile {
-            friction: rng.range(p.kb_friction[0], p.kb_friction[1]),
-            horizontal: rng.range(p.kb_h[0], p.kb_h[1]),
-            vertical: v,
-            vertical_limit: v,
-            extra_horizontal: rng.range(p.kb_extra_h[0], p.kb_extra_h[1]) as f32,
-            extra_vertical: rng.range(p.kb_extra_v[0], p.kb_extra_v[1]),
+    let mut kb = KbProfile::VANILLA;
+    let mut plugin = None;
+    let mut max_no_damage = 20;
+    if p.kb_preset == 1 {
+        plugin = Some(KbPlugin::DEFAULT);
+    } else if rng.chance(p.kb_random) {
+        if rng.chance(p.kb_plugin) {
+            let hg = rng.range(0.28, 0.46);
+            let vg = rng.range(0.30, 0.40);
+            plugin = Some(KbPlugin {
+                h_ground: hg,
+                h_air: hg * rng.range(0.8, 1.1),
+                h_sprint: rng.range(0.3, 0.6),
+                v_ground: vg,
+                v_air: vg * rng.range(0.6, 1.0),
+                v_sprint: rng.range(0.0, 0.12),
+                stop_sprint: rng.chance(0.7),
+                y_limit: if rng.chance(0.6) { rng.range(0.5, 1.2) } else { -1.0 },
+                v_after_limit: rng.range(-0.15, 0.0),
+            });
+        } else {
+            let v = rng.range(p.kb_v[0], p.kb_v[1]);
+            kb = KbProfile {
+                friction: rng.range(p.kb_friction[0], p.kb_friction[1]),
+                horizontal: rng.range(p.kb_h[0], p.kb_h[1]),
+                vertical: v,
+                vertical_limit: v.max(KbProfile::VANILLA.vertical_limit),
+                extra_horizontal: rng.range(p.kb_extra_h[0], p.kb_extra_h[1]) as f32,
+                extra_vertical: rng.range(p.kb_extra_v[0], p.kb_extra_v[1]),
+            };
         }
-    } else {
-        KbProfile::VANILLA
-    };
+        if rng.chance(0.25) {
+            max_no_damage = 16 + (rng.next_u64() % 4) as i32;
+        }
+    }
     let mut ccfg = ClientCfg::with_sensitivity(p.sensitivity);
     ccfg.mouse_delay_fix = p.mouse_delay_fix;
     ccfg.kb_ench = p.kb_ench;
@@ -414,9 +471,19 @@ pub fn new_match(p: &Params, rng: &mut Rng, mode: Mode) -> (Match, [f64; 2], Bot
         kb_ench: p.kb_ench,
         infinite_health: p.infinite_health,
         fall_damage: p.fall_damage,
+        max_no_damage,
     };
     let seed = rng.next_u64();
-    let m = Match::new(world, spawns, p.speed_amp, kb, scfg, ccfg, net, [0, c1, sv], seed);
+    let mut m = Match::new(world, spawns, p.speed_amp, kb, scfg, ccfg, net, [0, c1, sv], seed);
+    m.s.plugin = plugin;
+    if rng.chance(p.opp_edge_prob) {
+        let ms = rng.range(p.opp_backtrack_ms[0], p.opp_backtrack_ms[1].max(p.opp_backtrack_ms[0]));
+        m.c[1].edge = Edge {
+            reach: rng.range(p.opp_reach[0], p.opp_reach[1].max(p.opp_reach[0])),
+            kb_taken: rng.range(p.opp_kb_taken[0], p.opp_kb_taken[1].max(p.opp_kb_taken[0])),
+            backtrack: ((ms / 50.0).round().max(0.0) as usize).min(MAX_BACKTRACK) as u8,
+        };
+    }
     let mut bot = if mode == Mode::Bot {
         let lo = p.bot_level[0].round() as i64;
         let hi = (p.bot_level[1].round() as i64).max(lo);
@@ -696,8 +763,11 @@ impl Env {
     /// A snapshot for drawing the duel: for each player its own position
     /// and view angles, state flags, the keys it held on its last tick (for
     /// the attack key, how many times it clicked), its running hit counts, and where it currently sees the other player;
-    /// then the episode clock, arena size, the two pings and the two
-    /// click rates of this duel.
+    /// then the episode clock, arena size, the two pings, the two click
+    /// rates of this duel, the opponent's edge (reach, share of knockback
+    /// taken, backtrack in milliseconds) and the server's knockback (0 the
+    /// game's, 1 the game's formula with other numbers, 2 plugin style;
+    /// horizontal, vertical, friction; ticks of `maxHurtResistantTime`).
     pub fn write_view(&self, o: &mut [f32]) {
         for id in 0..2 {
             let c = &self.m.c[id];
@@ -734,6 +804,27 @@ impl Env {
         o[g + 5] = self.ping_ms[1] as f32;
         o[g + 6] = self.cps[0] as f32;
         o[g + 7] = self.cps[1] as f32;
+        let e = &self.m.c[1].edge;
+        o[g + 8] = e.reach as f32;
+        o[g + 9] = e.kb_taken as f32;
+        o[g + 10] = e.backtrack as f32 * 50.0;
+        let s = &self.m.s;
+        match s.plugin {
+            Some(k) => {
+                o[g + 11] = 2.0;
+                o[g + 12] = k.h_ground as f32;
+                o[g + 13] = k.v_ground as f32;
+                o[g + 14] = 0.0;
+            }
+            None => {
+                let vanilla = s.kb.horizontal == KbProfile::VANILLA.horizontal && s.kb.friction == 2.0;
+                o[g + 11] = if vanilla { 0.0 } else { 1.0 };
+                o[g + 12] = s.kb.horizontal as f32;
+                o[g + 13] = s.kb.vertical as f32;
+                o[g + 14] = s.kb.friction as f32;
+            }
+        }
+        o[g + 15] = s.cfg.max_no_damage as f32;
     }
 
     /// What agent `id` can know from its own client.

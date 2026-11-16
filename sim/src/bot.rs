@@ -2,7 +2,7 @@
 //! produce the same kind of input as the learning agent. They give early
 //! training a target, and later serve as fixed yardsticks.
 use crate::aabb::V3;
-use crate::client::{pick_with, Client, ClientCfg, Input};
+use crate::client::{Client, ClientCfg, Input};
 use crate::mth::{self, Rng};
 use crate::world::World;
 
@@ -130,7 +130,7 @@ pub fn act(c: &Client, world: &World, cfg: &ClientCfg, p: &BotParams, st: &mut B
     let new_yaw = (lp.l.yaw as f64 + inp.dx as f64 * deg_per_count) as f32;
     let new_pitch = ((lp.l.pitch as f64 + inp.dy as f64 * deg_per_count) as f32).clamp(-90.0, 90.0);
     let ray_yaw = if cfg.mouse_delay_fix { new_yaw } else { lp.yaw_head };
-    let pk = pick_with(world, eye, &lp.l.body.bb, new_pitch, ray_yaw, &rp.bb);
+    let pk = c.pick_ray(world, new_pitch, ray_yaw);
     if pk.entity && rng.chance(p.click_prob) {
         inp.attack = true;
     }

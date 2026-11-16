@@ -260,7 +260,20 @@ def hud(img, seg, t, fonts, inset_box):
         cps = seg.g("cps" + str(p))
         x = 28 if p == 0 else w - 28
         anchor = "la" if p == 0 else "ra"
-        d.rectangle([x - 14 if p == 0 else x - 330, 16, x + 330 if p == 0 else x + 14, 168], fill=(0, 0, 0, 96))
+        # What the opponent has over the plain game, if anything.
+        edge = []
+        if p == 1 and "reach1" in seg.gi:
+            if seg.g("reach1") > 3.001:
+                edge.append(f"alcance {seg.g('reach1'):.2f}")
+            if seg.g("kb_taken1") < 0.999:
+                edge.append(f"KB {100 * seg.g('kb_taken1'):.0f} %")
+            if seg.g("backtrack1_ms") > 0:
+                edge.append(f"backtrack {seg.g('backtrack1_ms'):.0f} ms")
+        box_w = 330 if not edge else 470
+        d.rectangle([x - 14 if p == 0 else x - box_w, 16, x + 330 if p == 0 else x + 14, 198 if edge else 168],
+                    fill=(0, 0, 0, 96))
+        if edge:
+            text(d, (x, 158), "Ventaja: " + ", ".join(edge), small, (255, 214, 120), anchor)
         text(d, (x, 22), seg.names[p], mid, TEAM[p]["ui"], anchor)
         text(d, (x, 60), f"Golpes: {hits}", mid, (255, 255, 255), anchor)
         text(d, (x, 98), f"Con sprint: {100 * sprint // max(hits, 1)} %   CPS: {cps:.1f}", small, (225, 225, 225), anchor)
@@ -282,8 +295,13 @@ def hud(img, seg, t, fonts, inset_box):
         d.rectangle([bx, by, bx + 116, by + 40], fill=(255, 255, 255, 215) if on else (0, 0, 0, 110))
         d.text((bx + 58, by + 20), label, font=small, fill=(20, 20, 20) if on else (235, 235, 235), anchor="mm")
     secs = tick / 20.0
-    text(d, (w // 2, h - 40), f"{int(secs) // 60:02d}:{int(secs) % 60:02d}   Simulador de 1.8.9, Speed II, vida infinita", small,
-         (255, 255, 255), "ma")
+    kb = ""
+    if "kb_kind" in seg.gi and seg.g("kb_kind") > 0:
+        kb = f", KB de servidor {seg.g('kb_h'):.2f} / {seg.g('kb_v'):.2f}"
+        if seg.g("hit_delay") != 20:
+            kb += f", hit delay {seg.g('hit_delay'):.0f}"
+    text(d, (w // 2, h - 40), f"{int(secs) // 60:02d}:{int(secs) % 60:02d}   Simulador de 1.8.9, Speed II, vida infinita{kb}",
+         small, (255, 255, 255), "ma")
     x1, y1, x2, y2 = inset_box
     d.rectangle([x1 - 3, y1 - 3, x2 + 3, y2 + 3], outline=(255, 255, 255, 230), width=3)
     text(d, (x1 + 8, y1 + 6), f"Lo que ve la {seg.names[0]}", small, (255, 255, 255))

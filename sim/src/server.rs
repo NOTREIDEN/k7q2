@@ -32,6 +32,46 @@ impl KbProfile {
     };
 }
 
+/// Knockback as server plugins of the KnockbackManager kind set it: the
+/// velocity sent to the victim is built from the hit alone, with one set of
+/// numbers for a victim on the ground and one for a victim in the air,
+/// instead of from the victim's own motion.
+#[derive(Clone, Copy, Debug)]
+pub struct KbPlugin {
+    pub h_ground: f64,
+    pub h_air: f64,
+    /// Added along the attacker's view per sprint or Knockback level.
+    pub h_sprint: f64,
+    pub v_ground: f64,
+    pub v_air: f64,
+    pub v_sprint: f64,
+    /// `true`: sprint knockback follows the server's sprint flag, which a
+    /// hit clears, so it needs a sprint reset as in the plain game.
+    /// `false`: it follows what the client last said, so every hit of a
+    /// sprinting attacker carries it.
+    pub stop_sprint: bool,
+    /// Once the victim is higher than this above the last ground it
+    /// touched, vertical knockback is `v_after_limit` until it lands.
+    /// Negative turns the limit off.
+    pub y_limit: f64,
+    pub v_after_limit: f64,
+}
+
+impl KbPlugin {
+    /// The profile the plugin ships with.
+    pub const DEFAULT: KbPlugin = KbPlugin {
+        h_ground: 0.4,
+        h_air: 0.4,
+        h_sprint: 0.5,
+        v_ground: 0.36075,
+        v_air: 0.24775,
+        v_sprint: 0.1,
+        stop_sprint: true,
+        y_limit: 0.675,
+        v_after_limit: 0.0,
+    };
+}
+
 #[derive(Clone, Copy, Debug)]
 pub struct ServerCfg {
     /// `generic.attackDamage` with the held sword.
@@ -41,12 +81,15 @@ pub struct ServerCfg {
     pub kb_ench: i32,
     pub infinite_health: bool,
     pub fall_damage: bool,
+    /// `maxHurtResistantTime`: a player can be hit again once half of it
+    /// has passed (the game: 20, a hit every 10 ticks). Servers lower it.
+    pub max_no_damage: i32,
 }
 
 impl Default for ServerCfg {
     fn default() -> Self {
         // Diamond sword in 1.8: 1 (hand) + 7.
-        ServerCfg { damage: 8.0, ench_damage: 0.0, kb_ench: 0, infinite_health: true, fall_damage: true }
+        ServerCfg { damage: 8.0, ench_damage: 0.0, kb_ench: 0, infinite_health: true, fall_damage: true, max_no_damage: 20 }
     }
 }
 
@@ -94,6 +137,13 @@ pub struct ServerPlayer {
     /// is refreshed once per world tick, and other entities look a player
     /// up through it.
     pub chunk: [i32; 3],
+    // What a knockback plugin keeps about this player.
+    /// Sprint state as the client last reported it; a hit does not clear it.
+    pub client_sprint: bool,
+    /// Height of the last position the client reported standing on.
+    pub last_ground_y: f64,
+    /// Went above the plugin's height limit and has not landed since.
+    pub touched_top: bool,
 }
 
 /// `chunkCoordX/Y/Z` for a position.
@@ -128,6 +178,9 @@ impl ServerPlayer {
             net_ticks: 0,
             last_move_tick: 0,
             chunk: chunk_of(pos),
+            client_sprint: false,
+            last_ground_y: pos[1],
+            touched_top: false,
         }
     }
 
@@ -179,6 +232,8 @@ pub fn encode_velocity(m: V3) -> [i32; 3] {
 pub struct Server {
     pub p: [ServerPlayer; 2],
     pub kb: KbProfile,
+    /// When set, the velocity a hit sends comes from this instead of `kb`.
+    pub plugin: Option<KbPlugin>,
     pub cfg: ServerCfg,
     /// Hits registered since the caller last drained this list.
     pub hits: Vec<Hit>,
@@ -191,7 +246,7 @@ pub type Outbox = Vec<(usize, S2C)>;
 
 impl Server {
     pub fn new(p0: ServerPlayer, p1: ServerPlayer, kb: KbProfile, cfg: ServerCfg) -> Self {
-        Server { p: [p0, p1], kb, cfg, hits: Vec::with_capacity(4), attacks_received: [0; 2] }
+        Server { p: [p0, p1], kb, plugin: None, cfg, hits: Vec::with_capacity(4), attacks_received: [0; 2] }
     }
 
     /// A packet handler, run at the start of a server tick in arrival order.
@@ -206,7 +261,10 @@ impl Server {
                 }
             }
             C2S::Attack => self.use_entity_attack(from, world, rng, out),
-            C2S::Sprint(s) => self.p[from].set_sprinting(s),
+            C2S::Sprint(s) => {
+                self.p[from].set_sprinting(s);
+                self.p[from].client_sprint = s;
+            }
             C2S::Player { pos, rot, on_ground } => self.process_player(from, pos, rot, on_ground, world, rng, out),
         }
     }
@@ -216,6 +274,7 @@ impl Server {
         let p = &mut self.p[i];
         p.has_moved = false;
         p.last_pos = pos;
+        p.last_ground_y = pos[1];
         p.set_position_and_rotation(pos, yaw, pitch);
         out.push((i, S2C::PosLook { pos, yaw, pitch }));
     }
@@ -292,6 +351,11 @@ impl Server {
             return;
         }
         p.l.body.on_ground = pkt_ground;
+        // The plugin's note of where the player last stood (its move handler).
+        if pkt_ground && pos.is_some() && d != last {
+            p.last_ground_y = d[1];
+            p.touched_top = false;
+        }
 
         // EntityPlayerMP.handleFalling -> Entity.updateFallState
         let y = p.l.body.pos[1] - d7;
@@ -408,14 +472,22 @@ impl Server {
                     self.p[a].set_sprinting(false);
                 }
                 if self.p[v].velocity_changed {
-                    let m = self.p[v].l.body.motion;
+                    let mut m = self.p[v].l.body.motion;
+                    let mut sprint_kb = i > 0;
+                    if let (Some(k), true) = (self.plugin, self.hits.len() > n_hits) {
+                        // The plugin replaces the velocity in the event
+                        // the server raises before sending it.
+                        let (vel, sp) = self.plugin_velocity(&k, a, v, i > self.cfg.kb_ench, rng);
+                        m = vel;
+                        sprint_kb = sp;
+                    }
                     let enc = encode_velocity(m);
                     out.push((v, S2C::Velocity { own: true, v: enc }));
                     self.p[v].velocity_changed = false;
                     self.p[v].l.body.motion = saved;
                     if self.hits.len() > n_hits {
                         let h = self.hits.last_mut().unwrap();
-                        h.sprint = i > 0;
+                        h.sprint = sprint_kb;
                         h.crit = crit;
                         h.kb = [enc[0] as f64 / 8000.0, enc[1] as f64 / 8000.0, enc[2] as f64 / 8000.0];
                         h.dist = dsq.sqrt();
@@ -425,6 +497,41 @@ impl Server {
         }
     }
 
+    /// The velocity a `KbPlugin` sends for a hit of `a` on `v`, and whether
+    /// it carried sprint knockback. `server_sprint` is the attacker's
+    /// server-side sprint flag as it was when the hit was made.
+    fn plugin_velocity(&mut self, k: &KbPlugin, a: usize, v: usize, server_sprint: bool, rng: &mut Rng) -> (V3, bool) {
+        let pa = self.p[a].l.body.pos;
+        let pv = self.p[v].l.body.pos;
+        let (mut dx, mut dz) = (pv[0] - pa[0], pv[2] - pa[2]);
+        while (dx * dx + dz * dz).sqrt() < 1.0E-4 {
+            let r = (rng.f64() - rng.f64()) * 0.01;
+            dx = r;
+            dz = r;
+        }
+        let dist = (dx * dx + dz * dz).sqrt();
+        // The ground state is the one the victim's client last reported.
+        let (h, up) = if self.p[v].l.body.on_ground { (k.h_ground, k.v_ground) } else { (k.h_air, k.v_air) };
+        let mut vel = [dx / dist * h, up, dz / dist * h];
+        let sprint = if k.stop_sprint { server_sprint } else { self.p[a].client_sprint };
+        let level = self.cfg.kb_ench + sprint as i32;
+        if level > 0 {
+            let yaw = (self.p[a].l.yaw * 0.017453292f32) as f64;
+            vel[0] -= yaw.sin() * level as f64 * k.h_sprint;
+            vel[1] += k.v_sprint;
+            vel[2] += yaw.cos() * level as f64 * k.h_sprint;
+        }
+        if k.y_limit >= 0.0 {
+            if pv[1] - self.p[v].last_ground_y > k.y_limit {
+                self.p[v].touched_top = true;
+            }
+            if self.p[v].touched_top {
+                vel[1] = k.v_after_limit;
+            }
+        }
+        (vel, level > 0)
+    }
+
     /// `EntityLivingBase.attackEntityFrom` as reached through
     /// `EntityPlayerMP` and `EntityPlayer`.
     fn attack_entity_from(&mut self, v: usize, amount: f32, attacker: Option<usize>, rng: &mut Rng, out: &mut Outbox) -> bool {
@@ -432,7 +539,8 @@ impl Server {
             return false;
         }
         let mut flag = true;
-        if (self.p[v].hurt_resistant_time as f32) > 20.0f32 / 2.0f32 {
+        let max = self.cfg.max_no_damage;
+        if (self.p[v].hurt_resistant_time as f32) > max as f32 / 2.0f32 {
             if amount <= self.p[v].last_damage {
                 return false;
             }
@@ -442,7 +550,7 @@ impl Server {
             flag = false;
         } else {
             self.p[v].last_damage = amount;
-            self.p[v].hurt_resistant_time = 20;
+            self.p[v].hurt_resistant_time = max;
             self.damage_entity(v, amount);
             self.p[v].hurt_time = 10;
         }

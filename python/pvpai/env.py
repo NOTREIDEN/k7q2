@@ -18,6 +18,10 @@ PARAM = {
     "w_combo": 39, "w_close": 40, "close_dist": 41,
     "agent_ping_min_ms": 42, "agent_ping_max_ms": 43,
     "cps_min": 44, "cps_max": 45, "opp_cps_min": 46, "opp_cps_max": 47,
+    "opp_edge_prob": 48, "opp_reach_min": 49, "opp_reach_max": 50,
+    "opp_kb_taken_min": 51, "opp_kb_taken_max": 52,
+    "opp_backtrack_min_ms": 53, "opp_backtrack_max_ms": 54,
+    "kb_plugin": 55, "kb_preset": 56,
 }
 
 STAT_NAMES = [
@@ -32,7 +36,9 @@ VIEW_PLAYER = [
     "forward", "strafe", "jump", "sprint_key", "attack", "hits", "combo", "sprint_hits",
     "seen_x", "seen_y", "seen_z",
 ]
-VIEW_GLOBAL = ["ticks_left", "ep_len", "arena_half", "floor_y", "ping0", "ping1", "cps0", "cps1"]
+VIEW_GLOBAL = ["ticks_left", "ep_len", "arena_half", "floor_y", "ping0", "ping1", "cps0", "cps1",
+               "reach1", "kb_taken1", "backtrack1_ms",
+               "kb_kind", "kb_h", "kb_v", "kb_friction", "hit_delay"]
 
 SELF_PLAY = 0
 BOT = 1
