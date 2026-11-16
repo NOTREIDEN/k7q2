@@ -1,0 +1,13 @@
+[package]
+name = "pvpsim"
+version = "0.1.0"
+edition = "2021"
+description = "Headless Minecraft 1.8.9 PvP combat simulator: two clients, one server, latency in between"
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
