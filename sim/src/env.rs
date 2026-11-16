@@ -64,6 +64,12 @@ pub struct Params {
     /// training points the agent at sprint resets, which pay off through
     /// the hits the opponent then cannot return.
     pub w_sprint_hit: f32,
+    /// Reward per own tick for having the opponent within reach (as this
+    /// client sees it) while being out of the opponent's reach (as that
+    /// client sees it), and the same amount taken away in the opposite
+    /// case. It is the spacing that makes a combo, paid directly. Zero
+    /// turns it off.
+    pub w_reach_adv: f32,
     pub mouse_delay_fix: bool,
     pub infinite_health: bool,
     pub fall_damage: bool,
@@ -101,6 +107,7 @@ impl Default for Params {
             w_range: 0.5,
             w_swing_miss: 0.0,
             w_sprint_hit: 0.0,
+            w_reach_adv: 0.0,
             mouse_delay_fix: true,
             infinite_health: true,
             fall_damage: true,
@@ -161,6 +168,7 @@ impl Params {
             35 => self.kb_ench = v as i32,
             36 => self.floor_y = v,
             37 => self.w_sprint_hit = v as f32,
+            38 => self.w_reach_adv = v as f32,
             _ => return false,
         }
         true
@@ -460,6 +468,14 @@ impl Env {
         (p.w_aim * aim as f32 + p.w_range * range as f32, ang)
     }
 
+    /// Is the other player within attack reach of `id`, in `id`'s own view?
+    fn in_reach(&self, id: usize) -> bool {
+        let c = &self.m.c[id];
+        let eye = c.lp.eye();
+        let ebb = c.rp.bb.expand(0.1, 0.1, 0.1);
+        dist(eye, ebb.closest_point(eye)) <= 3.0
+    }
+
     /// Shaping terms and statistics for the tick `id` just made.
     fn account(&mut self, id: usize, inp: &Input, out: &TickOut) {
         let (phi, ang) = self.potential(id);
@@ -472,6 +488,15 @@ impl Env {
         }
         if out.swung && !out.attacked {
             r -= p.w_swing_miss;
+        }
+        if p.w_reach_adv != 0.0 {
+            let mine = self.in_reach(id);
+            let theirs = self.in_reach(1 - id);
+            if mine && !theirs {
+                r += p.w_reach_adv;
+            } else if theirs && !mine {
+                r -= p.w_reach_adv;
+            }
         }
         self.rew_acc[id] += r;
         self.ep.agent_ticks[id] += 1.0;
