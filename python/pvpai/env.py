@@ -15,6 +15,7 @@ PARAM = {
     "kb_extra_v_min": 29, "kb_extra_v_max": 30, "bot_level_min": 31, "bot_level_max": 32,
     "sensitivity": 33, "damage": 34, "kb_ench": 35, "floor_y": 36,
     "w_sprint_hit": 37, "w_reach_adv": 38,
+    "w_combo": 39, "w_close": 40, "close_dist": 41,
 }
 
 STAT_NAMES = [

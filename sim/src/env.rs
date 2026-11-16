@@ -70,6 +70,17 @@ pub struct Params {
     /// case. It is the spacing that makes a combo, paid directly. Zero
     /// turns it off.
     pub w_reach_adv: f32,
+    /// Extra reward for each hit after the first in an unanswered run, per
+    /// hit already in the run (at most five), and the same amount taken
+    /// from the player on the receiving end. Zero leaves every hit worth
+    /// the same.
+    pub w_combo: f32,
+    /// Cost per own tick of standing closer to the opponent than
+    /// `close_dist`, growing to the full amount at zero distance. Fights
+    /// at arm's length are where nobody can be kept out of reach; this
+    /// points early training away from them. Zero turns it off.
+    pub w_close: f32,
+    pub close_dist: f64,
     pub mouse_delay_fix: bool,
     pub infinite_health: bool,
     pub fall_damage: bool,
@@ -108,6 +119,9 @@ impl Default for Params {
             w_swing_miss: 0.0,
             w_sprint_hit: 0.0,
             w_reach_adv: 0.0,
+            w_combo: 0.0,
+            w_close: 0.0,
+            close_dist: 2.0,
             mouse_delay_fix: true,
             infinite_health: true,
             fall_damage: true,
@@ -169,6 +183,9 @@ impl Params {
             36 => self.floor_y = v,
             37 => self.w_sprint_hit = v as f32,
             38 => self.w_reach_adv = v as f32,
+            39 => self.w_combo = v as f32,
+            40 => self.w_close = v as f32,
+            41 => self.close_dist = v,
             _ => return false,
         }
         true
@@ -294,7 +311,7 @@ pub struct Env {
     ping_ms: [f64; 2],
 }
 
-fn new_match(p: &Params, rng: &mut Rng, mode: Mode) -> (Match, [f64; 2], BotParams) {
+pub fn new_match(p: &Params, rng: &mut Rng, mode: Mode) -> (Match, [f64; 2], BotParams) {
     let world = World::arena(p.floor_y, p.arena_half, p.walls);
     let lim = (p.arena_half - 2.0).max(1.0);
     let mut a;
@@ -442,6 +459,9 @@ impl Env {
                 self.ep.sprint_hits[h.attacker] += 1.0;
                 self.rew_acc[h.attacker] += self.params.w_sprint_hit;
             }
+            let run = self.combo[h.attacker].min(5) as f32 * self.params.w_combo;
+            self.rew_acc[h.attacker] += run;
+            self.rew_acc[h.victim] -= run;
             self.combo[h.attacker] += 1;
             self.combo[h.victim] = 0;
             if self.combo[h.attacker] > self.max_combo[h.attacker] {
@@ -496,6 +516,14 @@ impl Env {
                 r += p.w_reach_adv;
             } else if theirs && !mine {
                 r -= p.w_reach_adv;
+            }
+        }
+        if p.w_close != 0.0 {
+            let a = &self.m.c[0].lp.l.body.pos;
+            let b = &self.m.c[1].lp.l.body.pos;
+            let d = ((a[0] - b[0]).powi(2) + (a[2] - b[2]).powi(2)).sqrt();
+            if d < p.close_dist {
+                r -= p.w_close * ((p.close_dist - d) / p.close_dist) as f32;
             }
         }
         self.rew_acc[id] += r;
