@@ -1,5 +1,5 @@
 //! C interface used by the Python trainer through `ctypes`.
-use crate::env::{Mode, VecEnv, ACT_DIMS, ACT_HEADS, OBS_DIM, PRIV_DIM, STATS_DIM};
+use crate::env::{Mode, VecEnv, ACT_DIMS, ACT_HEADS, OBS_DIM, PRIV_DIM, STATS_DIM, VIEW_DIM};
 use std::slice;
 
 #[no_mangle]
@@ -92,4 +92,19 @@ pub unsafe extern "C" fn pvp_vec_step(
 #[no_mangle]
 pub unsafe extern "C" fn pvp_vec_take_stats(p: *mut VecEnv, out: *mut f64) {
     (*p).take_stats(slice::from_raw_parts_mut(out, STATS_DIM));
+}
+
+#[no_mangle]
+pub extern "C" fn pvp_view_dim() -> i32 {
+    VIEW_DIM as i32
+}
+
+/// Snapshot of duel `index` for drawing it; see `Env::write_view`.
+///
+/// # Safety
+/// `out` must hold `pvp_view_dim()` floats and `index` must be a valid duel.
+#[no_mangle]
+pub unsafe extern "C" fn pvp_vec_view(p: *mut VecEnv, index: i32, out: *mut f32) {
+    let v = &*p;
+    v.envs[index as usize].write_view(slice::from_raw_parts_mut(out, VIEW_DIM));
 }

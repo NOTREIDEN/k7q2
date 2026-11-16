@@ -22,6 +22,14 @@ STAT_NAMES = [
     "aim_err_sum0", "max_combo_sum0", "reward_sum0",
 ]
 
+# Per-player fields of VecEnv.view(), then the fields that follow both players.
+VIEW_PLAYER = [
+    "x", "y", "z", "yaw", "pitch", "on_ground", "sprinting", "hurt_time", "ticks_since_swing",
+    "forward", "strafe", "jump", "sprint_key", "attack", "hits", "combo", "sprint_hits",
+    "seen_x", "seen_y", "seen_z",
+]
+VIEW_GLOBAL = ["ticks_left", "ep_len", "arena_half", "floor_y", "ping0", "ping1"]
+
 SELF_PLAY = 0
 BOT = 1
 
@@ -47,6 +55,7 @@ def _load(path):
     lib.pvp_vec_step.restype = ctypes.c_int32
     lib.pvp_vec_take_stats.argtypes = [ctypes.c_void_p, ctypes.POINTER(ctypes.c_double)]
     lib.pvp_act_dims.argtypes = [ctypes.POINTER(ctypes.c_int32)]
+    lib.pvp_vec_view.argtypes = [ctypes.c_void_p, ctypes.c_int32, f32p]
     return lib
 
 
@@ -98,6 +107,13 @@ class VecEnv:
             self.done.ctypes.data_as(ctypes.POINTER(ctypes.c_uint8)),
             self._f(self.fobs), self._f(self.fpriv),
         )
+
+    def view(self, index=0):
+        """Snapshot of one duel for drawing it: VIEW_PLAYER fields for each
+        player, then VIEW_GLOBAL."""
+        out = np.zeros(self.lib.pvp_view_dim(), np.float32)
+        self.lib.pvp_vec_view(self.h, index, self._f(out))
+        return out
 
     def take_stats(self):
         self.lib.pvp_vec_take_stats(self.h, self._stats.ctypes.data_as(ctypes.POINTER(ctypes.c_double)))

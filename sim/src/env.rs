@@ -27,6 +27,9 @@ pub const PITCH_BINS: [i32; 21] = [-89, -55, -34, -21, -13, -8, -5, -3, -2, -1, 
 pub const OBS_DIM: usize = 60;
 pub const PRIV_DIM: usize = 32;
 pub const STATS_DIM: usize = 16;
+/// Floats per player and in total written by `Env::write_view`.
+pub const VIEW_PLAYER: usize = 20;
+pub const VIEW_DIM: usize = 2 * VIEW_PLAYER + 6;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Mode {
@@ -545,6 +548,46 @@ impl Env {
             self.ep.reward_sum[a] += r as f64;
             (r, 0)
         }
+    }
+
+    /// A snapshot for drawing the duel: for each player its own position
+    /// and view angles, state flags, the keys it held on its last tick, its
+    /// running hit counts, and where it currently sees the other player;
+    /// then the episode clock, arena size and the two pings.
+    pub fn write_view(&self, o: &mut [f32]) {
+        for id in 0..2 {
+            let c = &self.m.c[id];
+            let lp = &c.lp;
+            let inp = &self.prev_inp[id];
+            let b = id * VIEW_PLAYER;
+            o[b] = lp.l.body.pos[0] as f32;
+            o[b + 1] = lp.l.body.pos[1] as f32;
+            o[b + 2] = lp.l.body.pos[2] as f32;
+            o[b + 3] = lp.l.yaw;
+            o[b + 4] = lp.l.pitch;
+            o[b + 5] = lp.l.body.on_ground as i32 as f32;
+            o[b + 6] = lp.l.sprinting as i32 as f32;
+            o[b + 7] = lp.hurt_time as f32;
+            o[b + 8] = lp.ticks_since_swing as f32;
+            o[b + 9] = inp.forward as f32;
+            o[b + 10] = inp.strafe as f32;
+            o[b + 11] = inp.jump as i32 as f32;
+            o[b + 12] = inp.sprint_key as i32 as f32;
+            o[b + 13] = inp.attack as i32 as f32;
+            o[b + 14] = self.ep.hits[id] as f32;
+            o[b + 15] = self.combo[id] as f32;
+            o[b + 16] = self.ep.sprint_hits[id] as f32;
+            o[b + 17] = c.rp.pos[0] as f32;
+            o[b + 18] = c.rp.pos[1] as f32;
+            o[b + 19] = c.rp.pos[2] as f32;
+        }
+        let g = 2 * VIEW_PLAYER;
+        o[g] = self.ticks_left as f32;
+        o[g + 1] = self.ep_len as f32;
+        o[g + 2] = self.params.arena_half as f32;
+        o[g + 3] = self.params.floor_y as f32;
+        o[g + 4] = self.ping_ms[0] as f32;
+        o[g + 5] = self.ping_ms[1] as f32;
     }
 
     /// What agent `id` can know from its own client.
