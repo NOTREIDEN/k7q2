@@ -7,6 +7,12 @@ inputs:
   machines:
     description: Number of machines in the run
     required: true
+  round-minutes:
+    description: Minutes between rounds
+    required: true
+  snapshot-every:
+    description: See ../round
+    default: "0"
 runs:
   using: composite
   steps:
@@ -14,47 +20,71 @@ runs:
       with:
         machine: ${{ inputs.machine }}
         machines: ${{ inputs.machines }}
+        round-minutes: ${{ inputs.round-minutes }}
+        snapshot-every: ${{ inputs.snapshot-every }}
     - uses: ./.github/actions/round
       with:
         machine: ${{ inputs.machine }}
         machines: ${{ inputs.machines }}
+        round-minutes: ${{ inputs.round-minutes }}
+        snapshot-every: ${{ inputs.snapshot-every }}
     - uses: ./.github/actions/round
       with:
         machine: ${{ inputs.machine }}
         machines: ${{ inputs.machines }}
+        round-minutes: ${{ inputs.round-minutes }}
+        snapshot-every: ${{ inputs.snapshot-every }}
     - uses: ./.github/actions/round
       with:
         machine: ${{ inputs.machine }}
         machines: ${{ inputs.machines }}
+        round-minutes: ${{ inputs.round-minutes }}
+        snapshot-every: ${{ inputs.snapshot-every }}
     - uses: ./.github/actions/round
       with:
         machine: ${{ inputs.machine }}
         machines: ${{ inputs.machines }}
+        round-minutes: ${{ inputs.round-minutes }}
+        snapshot-every: ${{ inputs.snapshot-every }}
     - uses: ./.github/actions/round
       with:
         machine: ${{ inputs.machine }}
         machines: ${{ inputs.machines }}
+        round-minutes: ${{ inputs.round-minutes }}
+        snapshot-every: ${{ inputs.snapshot-every }}
     - uses: ./.github/actions/round
       with:
         machine: ${{ inputs.machine }}
         machines: ${{ inputs.machines }}
+        round-minutes: ${{ inputs.round-minutes }}
+        snapshot-every: ${{ inputs.snapshot-every }}
     - uses: ./.github/actions/round
       with:
         machine: ${{ inputs.machine }}
         machines: ${{ inputs.machines }}
+        round-minutes: ${{ inputs.round-minutes }}
+        snapshot-every: ${{ inputs.snapshot-every }}
     - uses: ./.github/actions/round
       with:
         machine: ${{ inputs.machine }}
         machines: ${{ inputs.machines }}
+        round-minutes: ${{ inputs.round-minutes }}
+        snapshot-every: ${{ inputs.snapshot-every }}
     - uses: ./.github/actions/round
       with:
         machine: ${{ inputs.machine }}
         machines: ${{ inputs.machines }}
+        round-minutes: ${{ inputs.round-minutes }}
+        snapshot-every: ${{ inputs.snapshot-every }}
     - uses: ./.github/actions/round
       with:
         machine: ${{ inputs.machine }}
         machines: ${{ inputs.machines }}
+        round-minutes: ${{ inputs.round-minutes }}
+        snapshot-every: ${{ inputs.snapshot-every }}
     - uses: ./.github/actions/round
       with:
         machine: ${{ inputs.machine }}
         machines: ${{ inputs.machines }}
+        round-minutes: ${{ inputs.round-minutes }}
+        snapshot-every: ${{ inputs.snapshot-every }}

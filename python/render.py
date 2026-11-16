@@ -256,14 +256,14 @@ def hud(img, seg, t, fonts, inset_box):
         hits = int(seg.col(p, "hits")[tick])
         combo = int(seg.col(p, "combo")[tick])
         sprint = int(seg.col(p, "sprint_hits")[tick])
-        lo = max(0, tick - 19)
-        cps = float(seg.col(p, "attack")[lo:tick + 1].sum()) * 20.0 / (tick + 1 - lo)
+        # The rate this player clicks at while attacking, fixed for the duel.
+        cps = seg.g("cps" + str(p))
         x = 28 if p == 0 else w - 28
         anchor = "la" if p == 0 else "ra"
         d.rectangle([x - 14 if p == 0 else x - 330, 16, x + 330 if p == 0 else x + 14, 168], fill=(0, 0, 0, 96))
         text(d, (x, 22), seg.names[p], mid, TEAM[p]["ui"], anchor)
         text(d, (x, 60), f"Golpes: {hits}", mid, (255, 255, 255), anchor)
-        text(d, (x, 98), f"Con sprint: {100 * sprint // max(hits, 1)} %   Clics/s: {cps:.0f}", small, (225, 225, 225), anchor)
+        text(d, (x, 98), f"Con sprint: {100 * sprint // max(hits, 1)} %   CPS: {cps:.1f}", small, (225, 225, 225), anchor)
         text(d, (x, 128), f"Ping: {seg.g('ping' + str(p)):.0f} ms", small, (225, 225, 225), anchor)
         if combo >= 3:
             text(d, (w // 2, 30 + 64 * p), f"COMBO x{combo}", big, TEAM[p]["ui"], "ma")

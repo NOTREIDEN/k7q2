@@ -50,12 +50,17 @@ which continues from them. To stop, cancel the run and add a file named
 `STOP` to the repository. To continue later, start the workflow with the
 id of the run to continue from.
 
-To look at what a run has learned, download its `weights` artifact (or the
-`w*-r*` artifacts of the latest round while it is still running) and
-average them into one checkpoint:
+While a run lasts, machine 0 pushes the average of all machines to the
+branch `weights` every few rounds, with a few lines of its log. The branch
+always holds a single commit:
 
-    python merge.py weights/w*.pt --out merged.pt
-    python evaluate.py merged.pt
+    git fetch origin weights
+    git show origin/weights:status.txt
+    git show origin/weights:latest.pt > latest.pt
+    python evaluate.py latest.pt
+
+The `weights` artifact of a finished run holds one file per machine;
+`python merge.py weights/w*.pt --out merged.pt` averages them the same way.
 
 The same sharing works on one machine through a folder:
 

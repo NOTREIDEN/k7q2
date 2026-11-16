@@ -32,7 +32,7 @@ VIEW_PLAYER = [
     "forward", "strafe", "jump", "sprint_key", "attack", "hits", "combo", "sprint_hits",
     "seen_x", "seen_y", "seen_z",
 ]
-VIEW_GLOBAL = ["ticks_left", "ep_len", "arena_half", "floor_y", "ping0", "ping1"]
+VIEW_GLOBAL = ["ticks_left", "ep_len", "arena_half", "floor_y", "ping0", "ping1", "cps0", "cps1"]
 
 SELF_PLAY = 0
 BOT = 1

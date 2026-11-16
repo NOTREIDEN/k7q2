@@ -190,7 +190,12 @@ def main():
                 local.new_generation(changed == "replaced")
             if sy is remote and not changed and what.startswith("averaged") and local is not None:
                 local.new_generation(False)
-            sync_log.setdefault(name, []).append(what)
+            if sy is remote:
+                # Rare enough to report each one as it happens.
+                print(f"sync between machines, round {remote.round}: {what}; together "
+                      f"{remote.total_samples(machine_samples())/1e6:.1f}M samples", flush=True)
+            else:
+                sync_log.setdefault(name, []).append(what)
         row = dict(info)
         row.update(iter=iters, samples=total_samples, minutes=(t2 - t_start) / 60,
                    sps=info["samples"] / (t2 - t0), rollout_s=t1 - t0, update_s=t2 - t1)
@@ -230,10 +235,8 @@ def main():
                   f"sprint {b.get('sprint_hit_frac', 0):.2f} | self: hit/min {s.get('hits_per_min', 0):5.1f} combo {s.get('max_combo', 0):.1f} "
                   f"aim {s.get('aim_err_deg', 0):5.1f}", flush=True)
             for name, whats in sync_log.items():
-                sy = remote if name == "machines" else local
-                together = sy.total_samples(machine_samples() if sy is remote else total_samples)
                 print(f"sync between {name}: {len(whats)} rounds, last: {whats[-1]}; together "
-                      f"{together/1e6:.1f}M samples", flush=True)
+                      f"{local.total_samples(total_samples)/1e6:.1f}M samples", flush=True)
             sync_log.clear()
         now = time.time()
         if now - t_save > args.save_minutes * 60:

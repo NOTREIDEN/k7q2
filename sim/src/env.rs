@@ -29,7 +29,7 @@ pub const PRIV_DIM: usize = 32;
 pub const STATS_DIM: usize = 16;
 /// Floats per player and in total written by `Env::write_view`.
 pub const VIEW_PLAYER: usize = 20;
-pub const VIEW_DIM: usize = 2 * VIEW_PLAYER + 6;
+pub const VIEW_DIM: usize = 2 * VIEW_PLAYER + 8;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Mode {
@@ -696,7 +696,8 @@ impl Env {
     /// A snapshot for drawing the duel: for each player its own position
     /// and view angles, state flags, the keys it held on its last tick (for
     /// the attack key, how many times it clicked), its running hit counts, and where it currently sees the other player;
-    /// then the episode clock, arena size and the two pings.
+    /// then the episode clock, arena size, the two pings and the two
+    /// click rates of this duel.
     pub fn write_view(&self, o: &mut [f32]) {
         for id in 0..2 {
             let c = &self.m.c[id];
@@ -731,6 +732,8 @@ impl Env {
         o[g + 3] = self.params.floor_y as f32;
         o[g + 4] = self.ping_ms[0] as f32;
         o[g + 5] = self.ping_ms[1] as f32;
+        o[g + 6] = self.cps[0] as f32;
+        o[g + 7] = self.cps[1] as f32;
     }
 
     /// What agent `id` can know from its own client.

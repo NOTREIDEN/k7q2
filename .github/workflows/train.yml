@@ -12,6 +12,9 @@ on:
       round_minutes:
         description: Minutes between exchanges of weights (2.5 or more for a full-length run)
         default: "5"
+      snapshot_rounds:
+        description: Push the averaged weights to the branch "weights" every this many rounds (0 for never)
+        default: "6"
       mode:
         description: How machines share weights
         type: choice
@@ -32,7 +35,7 @@ on:
         default: true
 
 permissions:
-  contents: read
+  contents: write
   actions: write
 
 concurrency:
@@ -127,50 +130,74 @@ jobs:
         with:
           machine: ${{ matrix.machine }}
           machines: ${{ inputs.machines }}
+          round-minutes: ${{ inputs.round_minutes }}
+          snapshot-every: ${{ inputs.snapshot_rounds }}
       - uses: ./.github/actions/rounds
         with:
           machine: ${{ matrix.machine }}
           machines: ${{ inputs.machines }}
+          round-minutes: ${{ inputs.round_minutes }}
+          snapshot-every: ${{ inputs.snapshot_rounds }}
       - uses: ./.github/actions/rounds
         with:
           machine: ${{ matrix.machine }}
           machines: ${{ inputs.machines }}
+          round-minutes: ${{ inputs.round_minutes }}
+          snapshot-every: ${{ inputs.snapshot_rounds }}
       - uses: ./.github/actions/rounds
         with:
           machine: ${{ matrix.machine }}
           machines: ${{ inputs.machines }}
+          round-minutes: ${{ inputs.round_minutes }}
+          snapshot-every: ${{ inputs.snapshot_rounds }}
       - uses: ./.github/actions/rounds
         with:
           machine: ${{ matrix.machine }}
           machines: ${{ inputs.machines }}
+          round-minutes: ${{ inputs.round_minutes }}
+          snapshot-every: ${{ inputs.snapshot_rounds }}
       - uses: ./.github/actions/rounds
         with:
           machine: ${{ matrix.machine }}
           machines: ${{ inputs.machines }}
+          round-minutes: ${{ inputs.round_minutes }}
+          snapshot-every: ${{ inputs.snapshot_rounds }}
       - uses: ./.github/actions/rounds
         with:
           machine: ${{ matrix.machine }}
           machines: ${{ inputs.machines }}
+          round-minutes: ${{ inputs.round_minutes }}
+          snapshot-every: ${{ inputs.snapshot_rounds }}
       - uses: ./.github/actions/rounds
         with:
           machine: ${{ matrix.machine }}
           machines: ${{ inputs.machines }}
+          round-minutes: ${{ inputs.round_minutes }}
+          snapshot-every: ${{ inputs.snapshot_rounds }}
       - uses: ./.github/actions/rounds
         with:
           machine: ${{ matrix.machine }}
           machines: ${{ inputs.machines }}
+          round-minutes: ${{ inputs.round_minutes }}
+          snapshot-every: ${{ inputs.snapshot_rounds }}
       - uses: ./.github/actions/rounds
         with:
           machine: ${{ matrix.machine }}
           machines: ${{ inputs.machines }}
+          round-minutes: ${{ inputs.round_minutes }}
+          snapshot-every: ${{ inputs.snapshot_rounds }}
       - uses: ./.github/actions/rounds
         with:
           machine: ${{ matrix.machine }}
           machines: ${{ inputs.machines }}
+          round-minutes: ${{ inputs.round_minutes }}
+          snapshot-every: ${{ inputs.snapshot_rounds }}
       - uses: ./.github/actions/rounds
         with:
           machine: ${{ matrix.machine }}
           machines: ${{ inputs.machines }}
+          round-minutes: ${{ inputs.round_minutes }}
+          snapshot-every: ${{ inputs.snapshot_rounds }}
       - name: Wait for the trainers and show the end of their logs
         if: always()
         env:
@@ -253,6 +280,7 @@ jobs:
           MINUTES: ${{ inputs.minutes }}
           MACHINES: ${{ inputs.machines }}
           ROUND: ${{ inputs.round_minutes }}
+          SNAPSHOT: ${{ inputs.snapshot_rounds }}
           MODE: ${{ inputs.mode }}
           EXTRA: ${{ inputs.args }}
           SOURCE: ${{ needs.collect.outputs.source }}
@@ -270,5 +298,6 @@ jobs:
             exit 1
           fi
           gh workflow run train.yml --repo "$GITHUB_REPOSITORY" --ref "$GITHUB_REF_NAME" \
-            -f machines="$MACHINES" -f minutes="$MINUTES" -f round_minutes="$ROUND" -f mode="$MODE" \
+            -f machines="$MACHINES" -f minutes="$MINUTES" -f round_minutes="$ROUND" -f snapshot_rounds="$SNAPSHOT" \
+            -f mode="$MODE" \
             -f args="$EXTRA" -f previous="$SOURCE" -f relaunch=true
