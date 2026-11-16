@@ -1,0 +1,13 @@
+# name      generator  seed  options
+basic       basic      1
+move        move       1
+nospeed     nospeed    2
+walls1      walls      31
+fight1      fight      11
+fight2      fight      12    sensitivity=0.83
+fight3      fight      13    speed=0
+fight4      fight      14    speed=-1 sensitivity=0.2
+long1       long       21
+wall1       wall       41
+wall2       wall       42
+wall3       wall       43

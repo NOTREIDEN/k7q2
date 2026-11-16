@@ -83,6 +83,23 @@ pub struct ServerPlayer {
     pub update_counter: i32,
     pub ticks_since_teleport: i32,
     pub tracker_on_ground: bool,
+    // NetHandlerPlayServer for this player.
+    /// False from a server teleport until the client answers from there.
+    pub has_moved: bool,
+    pub last_pos: V3,
+    pub net_ticks: i32,
+    /// `networkTickCount` when a movement packet was last accepted.
+    pub last_move_tick: i32,
+    /// Chunk and 16-block slice the world has this player filed under. It
+    /// is refreshed once per world tick, and other entities look a player
+    /// up through it.
+    pub chunk: [i32; 3],
+}
+
+/// `chunkCoordX/Y/Z` for a position.
+#[inline]
+pub fn chunk_of(p: V3) -> [i32; 3] {
+    [mth::floor_d(p[0] / 16.0), mth::floor_d(p[1] / 16.0).clamp(0, 15), mth::floor_d(p[2] / 16.0)]
 }
 
 impl ServerPlayer {
@@ -106,6 +123,11 @@ impl ServerPlayer {
             update_counter: 1,
             ticks_since_teleport: 0,
             tracker_on_ground: true,
+            has_moved: true,
+            last_pos: pos,
+            net_ticks: 0,
+            last_move_tick: 0,
+            chunk: chunk_of(pos),
         }
     }
 
@@ -189,6 +211,15 @@ impl Server {
         }
     }
 
+    /// `NetHandlerPlayServer.setPlayerLocation` with no relative flags.
+    fn set_player_location(&mut self, i: usize, pos: V3, yaw: f32, pitch: f32, out: &mut Outbox) {
+        let p = &mut self.p[i];
+        p.has_moved = false;
+        p.last_pos = pos;
+        p.set_position_and_rotation(pos, yaw, pitch);
+        out.push((i, S2C::PosLook { pos, yaw, pitch }));
+    }
+
     /// `NetHandlerPlayServer.processPlayer`, walking branch.
     fn process_player(
         &mut self,
@@ -200,7 +231,27 @@ impl Server {
         rng: &mut Rng,
         out: &mut Outbox,
     ) {
+        {
+            let p = &mut self.p[i];
+            if let Some(d) = pos {
+                let d3 = dist_sq(p.last_pos, d);
+                if !p.has_moved && d3 < 0.25 {
+                    p.has_moved = true;
+                }
+            }
+            if !p.has_moved {
+                // Waiting for the client to answer a teleport: the packet is
+                // dropped, and the teleport repeated once a second.
+                if p.net_ticks - p.last_move_tick > 20 {
+                    let (lp, yaw, pitch) = (p.last_pos, p.l.yaw, p.l.pitch);
+                    self.set_player_location(i, lp, yaw, pitch, out);
+                }
+                return;
+            }
+            p.last_move_tick = p.net_ticks;
+        }
         let last = self.p[i].l.body.pos;
+        self.p[i].last_pos = last;
         let d7 = last[1];
         let d = pos.unwrap_or(last);
         let (f1, f2) = rot.unwrap_or((self.p[i].l.yaw, self.p[i].l.pitch));
@@ -212,14 +263,34 @@ impl Server {
         let d11 = d[0] - p.l.body.pos[0];
         let d12 = d[1] - p.l.body.pos[1];
         let d13 = d[2] - p.l.body.pos[2];
+        let m = p.l.body.motion;
+        let d14 = m[0] * m[0] + m[1] * m[1] + m[2] * m[2];
+        let d15 = d11 * d11 + d12 * d12 + d13 * d13;
+        if d15 - d14 > 100.0 {
+            // "moved too quickly!"
+            let (yaw, pitch) = (p.l.yaw, p.l.pitch);
+            self.set_player_location(i, last, yaw, pitch, out);
+            return;
+        }
+        let f3 = 0.0625f32 as f64;
+        let flag = !world.collides(&p.l.body.bb.contract(f3, f3, f3));
         if p.l.body.on_ground && !pkt_ground && d12 > 0.0 {
             p.l.jump();
             p.is_airborne = true;
         }
         p.l.body.move_entity(world, d11, d12, d13, false);
         p.l.body.on_ground = pkt_ground;
-        let (yaw, pitch) = (p.l.yaw, p.l.pitch);
-        p.set_position_and_rotation(d, yaw, pitch);
+        // The vertical difference is thrown away by a condition that is
+        // always true in the original.
+        let e11 = d[0] - p.l.body.pos[0];
+        let e13 = d[2] - p.l.body.pos[2];
+        let flag1 = e11 * e11 + 0.0 + e13 * e13 > 0.0625; // "moved wrongly!"
+        p.set_position_and_rotation(d, f1, f2);
+        let flag2 = !world.collides(&p.l.body.bb.contract(f3, f3, f3));
+        if flag && (flag1 || !flag2) {
+            self.set_player_location(i, last, f1, f2, out);
+            return;
+        }
         p.l.body.on_ground = pkt_ground;
 
         // EntityPlayerMP.handleFalling -> Entity.updateFallState
@@ -264,7 +335,16 @@ impl Server {
         // collideWithNearbyEntities: exists only on the server in 1.8.
         let j = 1 - i;
         let q = self.p[i].l.body.bb.expand(0.20000000298023224, 0.0, 0.20000000298023224);
-        if self.p[j].l.body.bb.intersects(&q) {
+        // getEntitiesInAABBexcluding looks through the chunks within two
+        // blocks of the box, where a player is filed by its position at the
+        // last world tick.
+        let c = self.p[j].chunk;
+        let near = |lo: f64, hi: f64, v: i32| mth::floor_d((lo - 2.0) / 16.0) <= v && v <= mth::floor_d((hi + 2.0) / 16.0);
+        let filed = near(q.min[0], q.max[0], c[0])
+            && near(q.min[2], q.max[2], c[2])
+            && mth::floor_d((q.min[1] - 2.0) / 16.0).clamp(0, 15) <= c[1]
+            && c[1] <= mth::floor_d((q.max[1] + 2.0) / 16.0).clamp(0, 15);
+        if filed && self.p[j].l.body.bb.intersects(&q) {
             // other.applyEntityCollision(this)
             let mut d0 = self.p[i].l.body.pos[0] - self.p[j].l.body.pos[0];
             let mut d1 = self.p[i].l.body.pos[2] - self.p[j].l.body.pos[2];
@@ -418,15 +498,21 @@ impl Server {
     }
 
     /// The part of a server tick after the packet handlers:
-    /// `EntityPlayerMP.onUpdate` for both players, then the entity tracker.
+    /// `EntityPlayerMP.onUpdate` for both players, the entity tracker, then
+    /// the network tick.
     pub fn tick(&mut self, out: &mut Outbox) {
         for p in self.p.iter_mut() {
             if p.hurt_resistant_time > 0 {
                 p.hurt_resistant_time -= 1;
             }
+            p.chunk = chunk_of(p.l.body.pos);
         }
         for i in 0..2 {
             self.tracker_update(i, out);
+        }
+        // NetHandlerPlayServer.update
+        for p in self.p.iter_mut() {
+            p.net_ticks += 1;
         }
     }
 

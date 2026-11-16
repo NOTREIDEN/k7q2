@@ -36,6 +36,9 @@ pub enum S2C {
     Props { own: bool, base: f64, speed_amp: i8, sprint: bool },
     /// S0B animation 0 (arm swing) of the other player.
     Swing,
+    /// S08 player position and look with no relative flags: the server
+    /// puts the player back where it last accepted it.
+    PosLook { pos: V3, yaw: f32, pitch: f32 },
 }
 
 /// One direction of a TCP connection: packets keep their order, each one

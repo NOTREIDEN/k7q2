@@ -59,6 +59,11 @@ pub struct Params {
     pub w_ontarget: f32,
     pub w_range: f32,
     pub w_swing_miss: f32,
+    /// Extra reward for a hit that carried sprint knockback. Zero leaves
+    /// the reward as hits dealt minus hits taken; a small value early in
+    /// training points the agent at sprint resets, which pay off through
+    /// the hits the opponent then cannot return.
+    pub w_sprint_hit: f32,
     pub mouse_delay_fix: bool,
     pub infinite_health: bool,
     pub fall_damage: bool,
@@ -95,6 +100,7 @@ impl Default for Params {
             w_ontarget: 0.005,
             w_range: 0.5,
             w_swing_miss: 0.0,
+            w_sprint_hit: 0.0,
             mouse_delay_fix: true,
             infinite_health: true,
             fall_damage: true,
@@ -154,6 +160,7 @@ impl Params {
             34 => self.damage = v as f32,
             35 => self.kb_ench = v as i32,
             36 => self.floor_y = v,
+            37 => self.w_sprint_hit = v as f32,
             _ => return false,
         }
         true
@@ -425,6 +432,7 @@ impl Env {
             self.ep.hits[h.attacker] += 1.0;
             if h.sprint {
                 self.ep.sprint_hits[h.attacker] += 1.0;
+                self.rew_acc[h.attacker] += self.params.w_sprint_hit;
             }
             self.combo[h.attacker] += 1;
             self.combo[h.victim] = 0;

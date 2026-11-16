@@ -12,6 +12,8 @@ pub struct Body {
     pub collided_h: bool,
     pub collided_v: bool,
     pub fall_distance: f32,
+    /// Block boxes of the move in progress, kept to avoid allocating.
+    scratch: Vec<Aabb>,
 }
 
 impl Body {
@@ -24,6 +26,7 @@ impl Body {
             collided_h: false,
             collided_v: false,
             fall_distance: 0.0,
+            scratch: Vec::new(),
         }
     }
 
@@ -39,20 +42,23 @@ impl Body {
     /// on a flat floor, which is all the arena contains.
     pub fn move_entity(&mut self, world: &World, mut x: f64, mut y: f64, mut z: f64, track_fall: bool) {
         let (d3, d4, d5) = (x, y, z);
-        let query = self.bb.add_coord(x, y, z);
+        let mut list = std::mem::take(&mut self.scratch);
+        list.clear();
+        world.colliding_boxes(&self.bb.add_coord(x, y, z), &mut list);
 
-        for s in world.solids.iter().filter(|s| s.intersects(&query)) {
+        for s in list.iter() {
             y = s.calc_y_offset(&self.bb, y);
         }
         self.bb = self.bb.offset(0.0, y, 0.0);
-        for s in world.solids.iter().filter(|s| s.intersects(&query)) {
+        for s in list.iter() {
             x = s.calc_x_offset(&self.bb, x);
         }
         self.bb = self.bb.offset(x, 0.0, 0.0);
-        for s in world.solids.iter().filter(|s| s.intersects(&query)) {
+        for s in list.iter() {
             z = s.calc_z_offset(&self.bb, z);
         }
         self.bb = self.bb.offset(0.0, 0.0, z);
+        self.scratch = list;
 
         // resetPositionToBB
         self.pos = [

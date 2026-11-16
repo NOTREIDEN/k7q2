@@ -350,6 +350,44 @@ pub fn pick_with(world: &World, eye: V3, own_bb: &Aabb, pitch: f32, yaw: f32, re
     }
 }
 
+/// `EntityPlayerSP.pushOutOfBlocks`.
+#[inline]
+fn push_out_of_blocks(world: &World, motion: &mut V3, x: f64, y: f64, z: f64) {
+    let (bx, by, bz) = (mth::floor_d(x), mth::floor_d(y), mth::floor_d(z));
+    // isOpenBlockSpace: neither this block nor the one above is a full cube.
+    let open = |x: i32, z: i32| !world.solid(x, by, z) && !world.solid(x, by + 1, z);
+    if open(bx, bz) {
+        return;
+    }
+    let d0 = x - bx as f64;
+    let d1 = z - bz as f64;
+    let mut i = -1;
+    let mut d2 = 9999.0f64;
+    if open(bx - 1, bz) && d0 < d2 {
+        d2 = d0;
+        i = 0;
+    }
+    if open(bx + 1, bz) && 1.0 - d0 < d2 {
+        d2 = 1.0 - d0;
+        i = 1;
+    }
+    if open(bx, bz - 1) && d1 < d2 {
+        d2 = d1;
+        i = 4;
+    }
+    if open(bx, bz + 1) && 1.0 - d1 < d2 {
+        i = 5;
+    }
+    let f = 0.1f32;
+    match i {
+        0 => motion[0] = -f as f64,
+        1 => motion[0] = f as f64,
+        4 => motion[2] = -f as f64,
+        5 => motion[2] = f as f64,
+        _ => {}
+    }
+}
+
 impl Client {
     pub fn new(pos: V3, yaw: f32, pitch: f32, speed_amp: i8, other_pos: V3, other_yaw: f32, other_pitch: f32) -> Self {
         Client {
@@ -366,8 +404,24 @@ impl Client {
 
     /// A packet handler of `NetHandlerPlayClient`, run on the main thread
     /// before the next tick.
-    pub fn handle(&mut self, p: S2C) {
+    ///
+    /// The answer to a server teleport is sent from inside the handler, so
+    /// it leaves before the packets of the next tick; it goes to `out`.
+    pub fn handle(&mut self, p: S2C, out: &mut Vec<C2S>) {
         match p {
+            S2C::PosLook { pos, yaw, pitch } => {
+                // handlePlayerPosLook, then Entity.setPositionAndRotation.
+                let lp = &mut self.lp;
+                lp.l.body.motion = [0.0; 3];
+                lp.l.body.set_position(pos);
+                lp.l.yaw = yaw % 360.0f32;
+                lp.l.pitch = pitch % 360.0f32;
+                out.push(C2S::Player {
+                    pos: Some([lp.l.body.pos[0], lp.l.body.bb.min[1], lp.l.body.pos[2]]),
+                    rot: Some((lp.l.yaw, lp.l.pitch)),
+                    on_ground: false,
+                });
+            }
             S2C::Velocity { own, v } => {
                 if own {
                     let m = [v[0] as f64 / 8000.0, v[1] as f64 / 8000.0, v[2] as f64 / 8000.0];
@@ -479,6 +533,15 @@ impl Client {
             lp.mi_strafe -= 1.0;
         }
         lp.mi_jump = inp.jump;
+        // pushOutOfBlocks at four points around the feet. They are inside
+        // the player's own box, so this only acts on a player that has got
+        // into a wall (which a server teleport next to one can do).
+        let w = 0.6f32 as f64 * 0.35;
+        let (px, py, pz) = (lp.l.body.pos[0], lp.l.body.bb.min[1] + 0.5, lp.l.body.pos[2]);
+        push_out_of_blocks(world, &mut lp.l.body.motion, px - w, py, pz + w);
+        push_out_of_blocks(world, &mut lp.l.body.motion, px - w, py, pz - w);
+        push_out_of_blocks(world, &mut lp.l.body.motion, px + w, py, pz - w);
+        push_out_of_blocks(world, &mut lp.l.body.motion, px + w, py, pz + w);
         if lp.l.body.on_ground && !flag2 && lp.mi_forward >= f && !lp.l.sprinting {
             if lp.sprint_toggle_timer <= 0 && !inp.sprint_key {
                 lp.sprint_toggle_timer = 7;

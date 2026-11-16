@@ -10,6 +10,7 @@ pub mod ffi;
 pub mod living;
 pub mod mth;
 pub mod net;
+pub mod replay;
 pub mod server;
 pub mod sim;
 pub mod world;

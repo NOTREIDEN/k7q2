@@ -1,22 +1,25 @@
 //! The arena: a flat floor of full blocks with optional full-height walls.
 //!
-//! Movement collides against a handful of merged boxes. Vanilla collides
-//! against one box per block, which gives the same result for full cubes on
-//! a grid. The crosshair ray is different: `World.rayTraceBlocks` walks the
-//! block grid cell by cell and its result depends on where the ray crosses
-//! cell borders, so that walk is ported as it is.
+//! Movement collides against one box per block, found the way
+//! `World.getCollidingBoundingBoxes` finds them. Merging blocks into larger
+//! boxes gives the same answer almost always, but not when a player's box
+//! overlaps a wall by one unit in the last place (which the float width of
+//! the box does produce): then the next wall block along the way stops the
+//! player, and the server calls it "moved wrongly". The crosshair ray walks
+//! the block grid cell by cell like `World.rayTraceBlocks`.
 use crate::aabb::{dist_sq, Aabb, V3};
 use crate::mth::floor_d;
 
 #[derive(Clone, Debug)]
 pub struct World {
-    pub solids: Vec<Aabb>,
     pub floor_y: f64,
     pub half: f64,
     floor_i: i32,
     half_i: i32,
     top_i: i32,
     walls: bool,
+    /// Single full cubes placed on top of the floor (parity scenarios).
+    extra: Vec<[i32; 3]>,
 }
 
 /// Result of `World.rayTraceBlocks`.
@@ -38,17 +41,16 @@ impl World {
         let floor_i = floor_y.round() as i32;
         let half_i = half.round() as i32;
         let (floor_y, half) = (floor_i as f64, half_i as f64);
-        let far = half + 64.0;
         let top_i = floor_i + 32;
-        let mut solids = vec![Aabb::new([-far, floor_y - 8.0, -far], [far, floor_y, far])];
-        if walls {
-            let top = top_i as f64;
-            solids.push(Aabb::new([half, floor_y, -far], [far, top, far]));
-            solids.push(Aabb::new([-far, floor_y, -far], [-half, top, far]));
-            solids.push(Aabb::new([-far, floor_y, half], [far, top, far]));
-            solids.push(Aabb::new([-far, floor_y, -far], [far, top, -half]));
-        }
-        World { solids, floor_y, half, floor_i, half_i, top_i, walls }
+        World { floor_y, half, floor_i, half_i, top_i, walls, extra: Vec::new() }
+    }
+
+    /// A flat floor with single full cubes at the given block coordinates.
+    /// Used to rebuild the scenery of a recording made in the real game.
+    pub fn with_blocks(floor_y: f64, blocks: &[[i32; 3]]) -> World {
+        let mut w = World::arena(floor_y, 4096.0, false);
+        w.extra.extend_from_slice(blocks);
+        w
     }
 
     /// Is the block at these block coordinates a full solid cube?
@@ -57,7 +59,51 @@ impl World {
         if y < self.floor_i {
             return true;
         }
+        if !self.extra.is_empty() && self.extra.contains(&[x, y, z]) {
+            return true;
+        }
         self.walls && y < self.top_i && (x >= self.half_i || x < -self.half_i || z >= self.half_i || z < -self.half_i)
+    }
+
+    /// `World.getCollidingBoundingBoxes`: the boxes of the solid blocks
+    /// that overlap `bb`, appended to `out`.
+    pub fn colliding_boxes(&self, bb: &Aabb, out: &mut Vec<Aabb>) {
+        let (i, j) = (floor_d(bb.min[0]), floor_d(bb.max[0] + 1.0));
+        let (k, l) = (floor_d(bb.min[1]), floor_d(bb.max[1] + 1.0));
+        let (i1, j1) = (floor_d(bb.min[2]), floor_d(bb.max[2] + 1.0));
+        for x in i..j {
+            for z in i1..j1 {
+                for y in (k - 1)..l {
+                    if self.solid(x, y, z) {
+                        let lo = [x as f64, y as f64, z as f64];
+                        let b = Aabb::new(lo, [lo[0] + 1.0, lo[1] + 1.0, lo[2] + 1.0]);
+                        if bb.intersects(&b) {
+                            out.push(b);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// `!getCollidingBoundingBoxes(bb).isEmpty()`.
+    pub fn collides(&self, bb: &Aabb) -> bool {
+        let (i, j) = (floor_d(bb.min[0]), floor_d(bb.max[0] + 1.0));
+        let (k, l) = (floor_d(bb.min[1]), floor_d(bb.max[1] + 1.0));
+        let (i1, j1) = (floor_d(bb.min[2]), floor_d(bb.max[2] + 1.0));
+        for x in i..j {
+            for z in i1..j1 {
+                for y in (k - 1)..l {
+                    if self.solid(x, y, z) {
+                        let lo = [x as f64, y as f64, z as f64];
+                        if bb.intersects(&Aabb::new(lo, [lo[0] + 1.0, lo[1] + 1.0, lo[2] + 1.0])) {
+                            return true;
+                        }
+                    }
+                }
+            }
+        }
+        false
     }
 
     /// `Vec3.getIntermediateWith{X,Y,Z}Value`.

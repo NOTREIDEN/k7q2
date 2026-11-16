@@ -113,8 +113,16 @@ impl Match {
                 continue;
             }
             let t = self.next_client[id];
-            while let Some(p) = self.s2c[id].pop_ready(t) {
-                self.c[id].handle(p);
+            while let Some(at) = self.s2c[id].peek_time().filter(|&a| a <= t) {
+                let p = self.s2c[id].pop_ready(t).unwrap();
+                self.out_c.clear();
+                self.c[id].handle(p, &mut self.out_c);
+                // A handler's own packets leave when the packet is handled,
+                // which is the frame it arrived in, not the next tick.
+                for k in 0..self.out_c.len() {
+                    let d = self.net.up_us[id] + Self::jitter(&mut self.rng, self.net.jitter_us[id]);
+                    self.c2s[id].push(at + d, self.out_c[k]);
+                }
             }
             return id;
         }

@@ -6,6 +6,9 @@ simulator and meant to be driven from a client mod.
 - `sim/`: the simulator (Rust). Two clients, one server and the network
   between them, ported from the 1.8.9 game code. See `sim/PARITY.md`.
 - `python/`: the trainer (PyTorch, PPO with a recurrent policy).
+- `parity/`: the rig that records the real game tick by tick. The
+  simulator has to reproduce those recordings bit for bit
+  (`sim/tests/parity.rs`).
 
 ## Build and test
 

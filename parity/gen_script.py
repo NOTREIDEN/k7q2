@@ -1,0 +1,202 @@
+"""Write input scripts for the parity rig.
+
+    python gen_script.py NAME SEED OUT [speed=N] [sensitivity=X]
+
+speed is the amplifier of the Speed effect (1 = Speed II, -1 = none);
+sensitivity is the mouse slider from 0 to 1.
+
+A script holds one line per client tick (C forward strafe jump sprint attack
+dx dy) and, when a second player is present, its actions keyed by server
+tick (F tick ACTION ...)."""
+import math, random, sys
+
+def hold(rng, n, lo, hi, choices, weights=None):
+    """A sequence of n values where each value is held for lo..hi ticks."""
+    out = []
+    while len(out) < n:
+        v = rng.choices(choices, weights)[0]
+        out += [v] * rng.randint(lo, hi)
+    return out[:n]
+
+def movement(rng, n, mouse=True, clicks=False, jumps=0.25):
+    fwd = hold(rng, n, 3, 40, [1, 0, -1], [6, 2, 1])
+    strafe = hold(rng, n, 3, 30, [0, 1, -1], [4, 1, 1])
+    jump = hold(rng, n, 1, 25, [0, 1], [1 - jumps, jumps])
+    sprint = hold(rng, n, 2, 50, [1, 0], [3, 1])
+    att = [1 if clicks and rng.random() < 0.5 else 0 for _ in range(n)]
+    dx = hold(rng, n, 1, 12, [0, 3, -3, 20, -20, 1, -1, 90, -90, 377, -377]) if mouse else [0] * n
+    dy = hold(rng, n, 1, 12, [0, 0, 2, -2, 9, -9, 40, -40]) if mouse else [0] * n
+    return [(fwd[i], strafe[i], jump[i], sprint[i], att[i], dx[i], dy[i]) for i in range(n)]
+
+def jump_arc():
+    """Heights above the floor on the airborne ticks of one jump."""
+    ys, y, vy = [], 0.0, 0.42
+    while True:
+        y += vy
+        if y <= 0:
+            return ys
+        ys.append(y)
+        vy = (vy - 0.08) * 0.98
+
+def pen(lines, half=4, height=4):
+    """A walled square so that nobody wanders off: inside is [-half, half) on both axes."""
+    for y in range(4, 4 + height):
+        for k in range(-half - 1, half + 1):
+            for b in ((half, y, k), (-half - 1, y, k), (k, y, half), (k, y, -half - 1)):
+                line = "block %d %d %d" % b
+                if line not in lines:
+                    lines.append(line)
+    lines.append("pen %.2f %.2f" % (-half + 0.4, half - 0.4))
+
+def fight_inputs(rng, n, jumps=True, wild=True, per_count=0.15):
+    """Keys, clicks and mouse of the real client in a fight. The pitch is steered so that the
+    crosshair is on the other player much of the time (it stands in front of this one)."""
+    seq, pitch = [], 0.0
+    while len(seq) < n:
+        mode = rng.choices(["calm", "rush", "stand", "wild"], [3, 4, 2, 1 if wild else 0])[0]
+        length = rng.randint(20, 80)
+        base = movement(rng, length, mouse=False, jumps=0.2 if jumps else 0.0)
+        tap_every, tap_len = rng.randint(4, 14), rng.randint(1, 3)
+        strafe = hold(rng, length, 5, 30, [0, 1, -1], [3, 1, 1])
+        dxs = hold(rng, length, 1, 10, [0, 0, 1, -1, 3, -3, 8, -8, 25, -25])
+        want = rng.choice([0.0, 8.0, 15.0, 25.0, -30.0 if wild else 5.0])
+        for i in range(length):
+            if mode == "stand":
+                fwd, st, jump, sprint = 0, 0, 0, 0
+                att = rng.random() < 0.6
+            elif mode == "rush":
+                fwd = 0 if i % tap_every < tap_len else 1
+                st, sprint = strafe[i], 1 if rng.random() < 0.95 else 0
+                jump = 1 if jumps and rng.random() < 0.08 else 0
+                att = rng.random() < 0.8
+            else:
+                fwd, st, jump, sprint = base[i][0], base[i][1], base[i][2], base[i][3]
+                att = rng.random() < 0.5
+            dx = dxs[i]
+            if mode == "wild" and rng.random() < 0.15:
+                dx = rng.choice([90, -90, 377, -377, 600, -600])
+            # Each mouse count lowers the pitch by per_count degrees.
+            dy = max(-40, min(40, int(round((pitch - want) / per_count))))
+            if rng.random() < 0.7:
+                dy = max(-6, min(6, dy))
+            pitch = max(-90.0, min(90.0, pitch - dy * per_count))
+            seq.append((fwd, st, jump, sprint, 1 if att else 0, dx, dy))
+    return seq[:n]
+
+def fight_fake(rng, n, lines, hops=True, attacks=True):
+    """What the scripted player does on each server tick."""
+    arc, air = jump_arc(), []
+    dist, angle = 2.5, 0.0
+    t = 0
+    while t < n:
+        mode = rng.choices(["front", "free", "still"], [6, 2, 1])[0]
+        length = rng.randint(15, 90)
+        want_d = rng.choice([0.2, 0.6, 1.5, 2.0, 2.5, 2.8, 3.0, 3.2, 3.6, 4.4])
+        want_a = rng.choice([0, 0, 0, 5, -5, 12, -12, 30, -30])
+        goal = (rng.uniform(-3.5, 3.5), rng.uniform(-3.5, 3.5))
+        noise = rng.choice([0, 0, 3, -3, 40, 180])
+        fpitch = rng.choice([0, 0, 10, -20, 60])
+        for _ in range(length):
+            if attacks:
+                r = rng.random()
+                if r < 0.25:
+                    lines.append("F %d SWING" % t)
+                    lines.append("F %d ATTACK" % t)
+                elif r < 0.28:
+                    lines.append("F %d ATTACK" % t)
+                elif r < 0.31:
+                    lines.append("F %d SWING" % t)
+            r = rng.random()
+            if r < 0.10:
+                lines.append("F %d SPRINT 1" % t)
+            elif r < 0.14:
+                lines.append("F %d SPRINT 0" % t)
+            if hops and not air and rng.random() < 0.04:
+                air = list(arc)
+            up = air.pop(0) if air else 0.0
+            if mode == "front":
+                dist += max(-0.25, min(0.25, want_d - dist))
+                angle += max(-6.0, min(6.0, want_a - angle))
+                lines.append("F %d FRONT %r %r %r %d %d" % (t, dist, angle, up, noise, fpitch))
+            elif mode == "free":
+                lines.append("F %d GOTO %r %r %r %r %d %d" % (t, goal[0], goal[1], rng.choice([0.1, 0.2806, 0.45]), up, noise, fpitch))
+            elif up > 0.0 or rng.random() < 0.5:
+                lines.append("F %d GOTO %r %r 0.0 %r %d %d" % (t, goal[0], goal[1], up, noise, fpitch))
+            t += 1
+
+def main():
+    name, seed, out = sys.argv[1], int(sys.argv[2]), sys.argv[3]
+    opts = dict(a.split("=") for a in sys.argv[4:])
+    rng = random.Random(seed)
+    lines, idle = [], [(0, 0, 0, 0, 0, 0, 0)] * 12
+    per_count = 0.15
+    if "speed" in opts:
+        lines.append("speed " + opts["speed"])
+    if "sensitivity" in opts:
+        lines.append("sensitivity " + opts["sensitivity"])
+        f = float(opts["sensitivity"]) * 0.6 + 0.2
+        per_count = 0.15 * f * f * f * 8.0
+    if name == "basic":
+        seq = idle + [(1, 0, 0, 0, 0, 0, 0)] * 25 + [(1, 0, 0, 1, 0, 0, 0)] * 40 + [(1, 0, 1, 1, 0, 0, 0)] * 40 \
+            + [(0, 0, 0, 0, 0, 0, 0)] * 15 + [(1, 1, 0, 1, 0, 4, 0)] * 30 + [(0, -1, 1, 0, 0, -10, 3)] * 30 \
+            + [(-1, 0, 0, 0, 0, 0, -5)] * 20 + [(0, 0, 0, 0, 0, 0, 0)] * 20
+    elif name == "move":
+        seq = idle + movement(rng, 600)
+    elif name == "nospeed":
+        lines.append("speed -1")
+        seq = idle + movement(rng, 400)
+    elif name == "walls":
+        # A stone corner next to the start, to run and jump into.
+        for y in (4, 5, 6):
+            for k in range(-3, 6):
+                lines.append(f"block {k} {y} 5")
+                lines.append(f"block 4 {y} {k}")
+        seq = idle + movement(rng, 600, jumps=0.4)
+    elif name == "fight":
+        pen(lines)
+        lines.append("fake 0.5 4 3.0 180 0")
+        seq = idle + fight_inputs(rng, 1000, per_count=per_count)
+        fight_fake(rng, len(seq) + 60, lines)
+    elif name == "long":
+        # Nobody leaves the ground and the scripted player never hits back, so that the
+        # entity tracker reaches its periodic full position update.
+        pen(lines)
+        lines.append("fake 0.5 4 3.0 180 0")
+        seq = idle + fight_inputs(rng, 1000, jumps=False, wild=False, per_count=per_count)
+        fight_fake(rng, len(seq) + 60, lines, hops=False, attacks=False)
+    elif name == "wall":
+        # The real player leans on the east wall while the other one knocks it along the wall,
+        # north and south in turns: fast slides along a wall are what the server objects to.
+        # It steps back and returns now and then, and looks at the wall from changing angles,
+        # so that it comes to rest against the wall in many slightly different ways.
+        pen(lines)
+        lines.append("start 3.0 4 -3.0 %d 0" % rng.randint(-120, -60))
+        lines.append("fake 3.0 4 -1.0 180 0")
+        n = 1000
+        strafe = hold(rng, n, 5, 40, [0, 1, -1], [2, 1, 1])
+        sprint = hold(rng, n, 5, 60, [1, 0], [2, 1])
+        jump = hold(rng, n, 1, 12, [0, 1], [5, 1])
+        fwd = hold(rng, n, 6, 60, [1, -1], [5, 1])
+        dx = hold(rng, n, 1, 20, [0, 0, 0, 7, -7, 40, -40])
+        yaw, seq = 0.0, list(idle)
+        for i in range(n):
+            d = dx[i] if abs(yaw + dx[i] * per_count) < 50 else 0
+            yaw += d * per_count
+            seq.append((fwd[i], strafe[i], jump[i], sprint[i], 0, d, 0))
+        t = 0
+        while t < len(seq) + 60:
+            angle = rng.choice([250, 270, 270, 290, 70, 90, 90, 110])
+            for _ in range(rng.randint(30, 70)):
+                if rng.random() < 0.3:
+                    lines.append("F %d SPRINT 1" % t)
+                    lines.append("F %d SWING" % t)
+                    lines.append("F %d ATTACK" % t)
+                lines.append("F %d FRONT %r %r 0.0 0 0" % (t, rng.choice([1.2, 1.5, 2.0]), float(angle)))
+                t += 1
+    else:
+        raise SystemExit("unknown script " + name)
+    lines += ["C %d %d %d %d %d %d %d" % s for s in seq]
+    open(out, "w").write("\n".join(lines) + "\n")
+    print(out, len(seq), "ticks")
+
+main()

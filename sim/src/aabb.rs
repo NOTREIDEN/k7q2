@@ -54,6 +54,15 @@ impl Aabb {
         }
     }
 
+    /// `contract(x, y, z)`.
+    #[inline]
+    pub fn contract(&self, x: f64, y: f64, z: f64) -> Self {
+        Aabb {
+            min: [self.min[0] + x, self.min[1] + y, self.min[2] + z],
+            max: [self.max[0] - x, self.max[1] - y, self.max[2] - z],
+        }
+    }
+
     #[inline]
     pub fn add_coord(&self, x: f64, y: f64, z: f64) -> Self {
         let mut r = *self;
