@@ -39,10 +39,16 @@ def main():
     ap.add_argument("--minibatches", type=int, default=4)
     ap.add_argument("--epochs", type=int, default=3)
     ap.add_argument("--param", action="append", default=[], help="name=value for the simulator")
+    ap.add_argument("--worker-id", type=int, default=0)
+    ap.add_argument("--workers", type=int, default=1, help="how many machines share weights")
+    ap.add_argument("--sync-dir", default=None, help="folder to share weights through")
+    ap.add_argument("--sync-release", default=None, help="release tag to share weights through")
+    ap.add_argument("--sync-minutes", type=float, default=5.0)
     args = ap.parse_args()
 
     if args.threads > 0:
         torch.set_num_threads(args.threads)
+    args.seed = args.seed + 7919 * args.worker_id
     torch.manual_seed(args.seed)
     np.random.seed(args.seed)
     os.makedirs(args.out, exist_ok=True)
@@ -70,6 +76,14 @@ def main():
         opt.load_state_dict(ck["opt"])
         vs.var, vs.count = ck["vs"]
         total_samples, iters = ck["samples"], ck["iters"]
+
+    syncer = None
+    if args.sync_dir or args.sync_release:
+        from pvpai.sync import DirBackend, ReleaseBackend, Syncer
+        backend = DirBackend(args.sync_dir) if args.sync_dir else ReleaseBackend(os.environ["GITHUB_REPOSITORY"], args.sync_release)
+        syncer = Syncer(backend, args.worker_id, args.workers, args.sync_minutes)
+        if not args.init:
+            total_samples, iters = syncer.restore(policy, vs)
 
     cfg = dict(gamma=args.gamma, lam=0.95, clip=0.2, epochs=args.epochs, minibatches=args.minibatches, vf_coef=0.5,
                ent_coef=args.ent_coef, max_grad_norm=0.5)
@@ -121,6 +135,11 @@ def main():
         t2 = time.time()
         iters += 1
         total_samples += info["samples"]
+        if syncer is not None:
+            n_peers = syncer.maybe_sync(policy, vs, total_samples, iters)
+            if n_peers is not None:
+                print(f"sync: averaged with {n_peers} other machines, all machines together "
+                      f"{syncer.total_samples(total_samples)/1e6:.1f}M samples", flush=True)
         row = dict(info)
         row.update(iter=iters, samples=total_samples, minutes=(t2 - t_start) / 60,
                    sps=info["samples"] / (t2 - t0), rollout_s=t1 - t0, update_s=t2 - t1)

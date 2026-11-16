@@ -5,7 +5,7 @@ use crate::aabb::{dist, Aabb, V3, EYE_HEIGHT};
 use crate::living::Living;
 use crate::mth;
 use crate::net::{C2S, S2C};
-use crate::world::World;
+use crate::world::{RayHit, World};
 
 /// Keys and mouse for one client tick.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
@@ -308,10 +308,13 @@ pub fn pick_with(world: &World, eye: V3, own_bb: &Aabb, pitch: f32, yaw: f32, re
     let d0 = 4.5f32 as f64;
     let look = mth::look_vec(pitch, yaw);
     let end = [eye[0] + look[0] * d0, eye[1] + look[1] * d0, eye[2] + look[2] * d0];
-    let block = world.raytrace(eye, end);
-    let d1 = match block {
-        Some(h) => dist(h, eye),
-        None => d0,
+    // objectMouseOver from the block ray. In open air this is usually a
+    // MISS placed where the ray entered its last cell, and the distance to
+    // that point is the limit an entity has to beat.
+    let trace = world.ray_trace_blocks(eye, end, true);
+    let d1 = match trace {
+        RayHit::Block(h) | RayHit::Miss(h) => dist(h, eye),
+        RayHit::None => d0,
     };
     let query = own_bb.add_coord(look[0] * d0, look[1] * d0, look[2] * d0).expand(1.0, 1.0, 1.0);
     let mut pointed = false;
@@ -340,7 +343,7 @@ pub fn pick_with(world: &World, eye: V3, own_bb: &Aabb, pitch: f32, yaw: f32, re
     if pointed && reach > 3.0 {
         pointed = false;
     }
-    if pointed && (d2 < d1 || block.is_none()) {
+    if pointed && (d2 < d1 || trace == RayHit::None) {
         Pick { entity: true, dist: reach }
     } else {
         Pick { entity: false, dist: reach }

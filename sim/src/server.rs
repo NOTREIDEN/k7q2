@@ -295,9 +295,7 @@ impl Server {
         self.attacks_received[a] += 1;
         let pa = self.p[a].l.body.pos;
         let pv = self.p[v].l.body.pos;
-        let seen = world
-            .raytrace([pa[0], pa[1] + EYE_HEIGHT, pa[2]], [pv[0], pv[1] + EYE_HEIGHT, pv[2]])
-            .is_none();
+        let seen = !world.blocked([pa[0], pa[1] + EYE_HEIGHT, pa[2]], [pv[0], pv[1] + EYE_HEIGHT, pv[2]]);
         let limit = if seen { 36.0 } else { 9.0 };
         let dsq = dist_sq(pa, pv);
         if !(dsq < limit) {

@@ -47,9 +47,9 @@ pub struct Living {
     /// Sprint bit of the entity flags (`DataWatcher` index 0, bit 3).
     pub sprinting: bool,
     pub attr: Attr,
-    /// `landMovementFactor` (`getAIMoveSpeed`), refreshed at the end of each
-    /// living update, so a sprint change reaches ground speed a tick late.
-    pub land_factor: f32,
+    /// `jumpMovementFactor`, refreshed at the end of each living update, so
+    /// a sprint change reaches air control a tick late. Ground speed has no
+    /// such lag: `EntityPlayer.getAIMoveSpeed` reads the attribute directly.
     pub jump_factor: f32,
     pub jump_ticks: i32,
 }
@@ -67,7 +67,6 @@ impl Living {
             pitch,
             sprinting: false,
             attr,
-            land_factor: attr.value() as f32,
             jump_factor: 0.02,
             jump_ticks: 0,
         }
@@ -109,7 +108,7 @@ impl Living {
             f4 = 0.6f32 * 0.91f32;
         }
         let f = 0.16277136f32 / (f4 * f4 * f4);
-        let f5 = if self.body.on_ground { self.land_factor * f } else { self.jump_factor };
+        let f5 = if self.body.on_ground { self.attr.value() as f32 * f } else { self.jump_factor };
         self.move_flying(strafe, forward, f5);
         f4 = 0.91f32;
         if self.body.on_ground {
@@ -157,6 +156,5 @@ impl Living {
         if self.sprinting {
             self.jump_factor = (self.jump_factor as f64 + 0.02f32 as f64 * 0.3) as f32;
         }
-        self.land_factor = self.attr.value() as f32;
     }
 }

@@ -574,7 +574,7 @@ impl Env {
         o[13] = clip(b.pos[0] / p.arena_half, 1.5);
         o[14] = clip(b.pos[2] / p.arena_half, 1.5);
         o[15] = clip((b.pos[1] - p.floor_y) / 3.0, 2.0);
-        o[16] = lp.l.land_factor / 0.2;
+        o[16] = lp.l.attr.value() as f32 / 0.2;
         let (kf, kr) = local(yaw, lp.last_kb[0], lp.last_kb[2]);
         let kb_on = lp.ticks_since_kb < 40;
         o[17] = if kb_on { clip(kf / 0.5, 3.0) } else { 0.0 };

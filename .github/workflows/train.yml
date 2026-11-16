@@ -1,0 +1,91 @@
+name: train
+
+on:
+  workflow_dispatch:
+    inputs:
+      workers:
+        description: Number of machines
+        default: "20"
+      minutes:
+        description: Minutes each machine trains before the run ends
+        default: "330"
+      tag:
+        description: Release that holds the shared weights
+        default: stage1
+      relaunch:
+        description: Start the next run when this one ends
+        type: boolean
+        default: true
+
+permissions:
+  contents: write
+  actions: write
+
+concurrency:
+  group: train-${{ inputs.tag }}
+  cancel-in-progress: false
+
+jobs:
+  plan:
+    runs-on: ubuntu-latest
+    outputs:
+      ids: ${{ steps.ids.outputs.ids }}
+    steps:
+      - id: ids
+        run: echo "ids=$(python3 -c 'import json,sys; print(json.dumps(list(range(int(sys.argv[1])))))' '${{ inputs.workers }}')" >> "$GITHUB_OUTPUT"
+
+  train:
+    needs: plan
+    runs-on: ubuntu-latest
+    timeout-minutes: 355
+    strategy:
+      fail-fast: false
+      matrix:
+        worker: ${{ fromJSON(needs.plan.outputs.ids) }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/cache@v4
+        with:
+          path: sim/target
+          key: sim-${{ hashFiles('sim/Cargo.toml', 'sim/src/**', 'sim/tests/**') }}
+      - name: Build and test the simulator
+        run: cd sim && cargo test --release && cargo build --release
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install trainer dependencies
+        run: |
+          pip install --index-url https://download.pytorch.org/whl/cpu torch
+          pip install numpy
+      - name: Train
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          cd python
+          python train.py --minutes '${{ inputs.minutes }}' --out "runs/w${{ matrix.worker }}" \
+            --worker-id '${{ matrix.worker }}' --workers '${{ inputs.workers }}' \
+            --sync-release '${{ inputs.tag }}'
+      - name: Keep the log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: log-w${{ matrix.worker }}
+          path: python/runs/w${{ matrix.worker }}/log.jsonl
+          if-no-files-found: ignore
+
+  relaunch:
+    needs: train
+    if: ${{ always() && !cancelled() && inputs.relaunch }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Start the next run unless a STOP file exists in the repository
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if gh api "repos/${{ github.repository }}/contents/STOP" >/dev/null 2>&1; then
+            echo "STOP file present, not starting another run"
+            exit 0
+          fi
+          gh workflow run train.yml --repo '${{ github.repository }}' \
+            -f workers='${{ inputs.workers }}' -f minutes='${{ inputs.minutes }}' \
+            -f tag='${{ inputs.tag }}' -f relaunch=true
