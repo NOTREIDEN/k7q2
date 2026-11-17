@@ -32,6 +32,7 @@ on:
           --param w_speed=5 --param w_fed=5
           --param refill_prob=0.5 --param w_stock=2 --param lesson_prob=0.3
           --param lesson_dist_min=12 --param lesson_dist_max=28
+          --param w_miss=1.5
       previous:
         description: Id of the run to continue from (empty starts from seed/stage1.pt)
         default: ""

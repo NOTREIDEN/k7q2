@@ -234,6 +234,40 @@ fn a_potion_at_full_health_costs_its_thrower() {
     assert!((a + b + 0.5 * 8.0 / hh).abs() < 0.2, "paid {}", a + b);
 }
 
+/// What a potion did not offer its thrower costs more with `w_miss`, needed
+/// or not.
+#[test]
+fn the_part_of_a_potion_that_missed_its_thrower_costs_more() {
+    let throw = |miss: f32, hurt: bool| {
+        let mut p = params();
+        p.start_hurt = if hurt { 1.0 } else { 0.0 };
+        p.start_health = [6.0, 6.0];
+        p.w_miss = miss;
+        let mut e = Env::new(Mode::SelfPlay, p, 3);
+        run(&mut e, 2, |_, _| with(6, DOWN));
+        let (a, _) = run(&mut e, 1, |_, _| with(9, 1));
+        let (b, _) = run(&mut e, 30, |_, _| IDLE);
+        assert_eq!(e.episode().pot_offer[0], 7.0, "thrown at its feet, standing: seven of the eight");
+        (a + b, e.m.s.cfg.hit_health())
+    };
+    for hurt in [false, true] {
+        let ((plain, hh), (strict, _)) = (throw(0.0, hurt), throw(2.0, hurt));
+        assert!((plain - strict - 2.0 * 1.0 / hh).abs() < 1e-3, "{plain} {strict}");
+    }
+    // Thrown ahead, where it reaches nobody: two points are counted, not eight.
+    let far = |miss: f32| {
+        let mut p = params();
+        p.w_miss = miss;
+        let mut e = Env::new(Mode::SelfPlay, p, 3);
+        let (a, _) = run(&mut e, 1, |_, _| with(9, 1));
+        let (b, _) = run(&mut e, 40, |_, _| IDLE);
+        assert_eq!((e.episode().splashes[0], e.episode().pot_offer[0]), (1.0, 0.0));
+        (a + b, e.m.s.cfg.hit_health())
+    };
+    let ((plain, hh), (strict, _)) = (far(0.0), far(2.0));
+    assert!((plain - strict - 2.0 * 2.0 / hh).abs() < 1e-3, "{plain} {strict}");
+}
+
 #[test]
 fn the_opponent_sees_a_potion_coming_and_what_it_would_give() {
     let mut p = params();

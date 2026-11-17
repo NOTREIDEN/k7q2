@@ -50,6 +50,8 @@ pub const PITCH_BINS: [i32; 29] = [
 ];
 
 pub const OBS_DIM: usize = 151;
+/// How many of the points a potion did not offer its thrower `w_miss` counts.
+pub const MISS_POINTS: f32 = 2.0;
 pub const PRIV_DIM: usize = 71;
 pub const STATS_DIM: usize = 86;
 /// Floats per player and in total written by `Env::write_view`.
@@ -210,6 +212,14 @@ pub struct Params {
     /// Cost of the part of an own potion that gave its thrower nothing, in
     /// the same unit: thrown with little health missing, or too far away.
     pub w_waste: f32,
+    /// Further cost of the part of an own potion that never reached its
+    /// thrower, whether it was needed or not: a potion that breaks a step
+    /// away offers seven of its eight points, one caught in the air all of
+    /// them. It counts the first `MISS_POINTS` points only, so it tells a
+    /// near miss from a perfect throw without making a potion that was
+    /// knocked out of reach cost more than the potion. Nothing can be
+    /// earned with it: the best a throw can do is to lose none.
+    pub w_miss: f32,
     /// Scales how readily scripted bots heal themselves. 0 turns it off.
     pub bot_potion: f64,
     /// Running, jumping and fighting use up food.
@@ -355,6 +365,7 @@ impl Default for Params {
             w_win: 10.0,
             w_heal: 1.0,
             w_waste: 0.5,
+            w_miss: 0.0,
             bot_potion: 1.0,
             hunger: false,
             hurt_who: 0,
@@ -497,6 +508,7 @@ impl Params {
             107 => self.lesson_dist[0] = v,
             108 => self.lesson_dist[1] = v,
             109 => self.drink_window_s = v,
+            110 => self.w_miss = v as f32,
             _ => return false,
         }
         true
@@ -1306,6 +1318,7 @@ impl Env {
             }
             let t = s.thrower;
             self.rew_acc[t] -= p.w_waste * (POTION_HEAL - s.healed[t]).max(0.0) / hh;
+            self.rew_acc[t] -= p.w_miss * (POTION_HEAL - s.offered[t]).clamp(0.0, MISS_POINTS) / hh;
             self.ep.splashes[t] += 1.0;
             self.ep.heal_self[t] += s.healed[t] as f64;
             self.ep.heal_gift[t] += s.healed[1 - t] as f64;
