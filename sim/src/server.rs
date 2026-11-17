@@ -1,11 +1,12 @@
 //! The server side of a duel: `NetHandlerPlayServer` packet handlers, the
 //! parts of `EntityPlayerMP` that decide hits and knockback, the ender
-//! pearls in flight (`EntityEnderPearl`), and the `EntityTrackerEntry` that
-//! tells each client where the other player and the pearls are.
+//! pearls and potions in flight (`EntityEnderPearl`, `EntityPotion`), and
+//! the `EntityTrackerEntry` that tells each client where the other player
+//! and those are.
 use crate::aabb::{dist_sq, Aabb, V3, EYE_HEIGHT};
 use crate::living::Living;
 use crate::mth::{self, JavaRandom, Rng};
-use crate::net::{Item, PearlEv, C2S, S2C, SLOT_PEARL, SLOT_SWORD};
+use crate::net::{Item, Kind, ThrownEv, C2S, S2C, SLOT_PEARL, SLOT_SWORD};
 use crate::world::{RayHit, World};
 use std::collections::VecDeque;
 
@@ -185,10 +186,12 @@ impl Food {
     }
 }
 
-/// An ender pearl in flight (`EntityEnderPearl`) with its tracker entry.
+/// An ender pearl or a splash potion in flight (`EntityThrowable`) with its
+/// tracker entry.
 #[derive(Clone, Debug)]
-pub struct Pearl {
+pub struct Thrown {
     pub id: u32,
+    pub kind: Kind,
     pub thrower: usize,
     pub pos: V3,
     pub motion: V3,
@@ -198,7 +201,7 @@ pub struct Pearl {
     pub prev_pitch: f32,
     pub ticks_in_air: i32,
     pub dead: bool,
-    // EntityTrackerEntry for this pearl.
+    // EntityTrackerEntry for it.
     pub enc_pos: [i32; 3],
     pub enc_yaw: i32,
     pub enc_pitch: i32,
@@ -223,11 +226,43 @@ pub struct Landing {
     pub ticks: i32,
 }
 
-/// `new EntityEnderPearl(world, thrower)` up to the random part of
-/// `setThrowableHeading`: where a pearl thrown by a player standing at
-/// `feet` with this view starts, and the direction it is thrown in (length
-/// one).
-pub fn pearl_heading(feet: V3, yaw: f32, pitch: f32) -> (V3, V3) {
+/// A potion that broke.
+#[derive(Clone, Copy, Debug)]
+pub struct Splash {
+    pub thrower: usize,
+    /// Where it was at the start of the tick in which it hit: distances to
+    /// the players are measured from here.
+    pub pos: V3,
+    /// The player it hit, if it was not a block.
+    pub on_player: Option<usize>,
+    /// Ticks it flew.
+    pub ticks: i32,
+    /// Health it offered each player, and health each one got from it.
+    pub offered: [f32; 2],
+    pub healed: [f32; 2],
+}
+
+/// Health a splash potion of Instant Health II gives at full strength.
+pub const POTION_HEAL: f32 = 8.0;
+
+/// `EntityPotion.onImpact` and `Potion.affectEntity` for Instant Health II:
+/// the health a potion breaking at `at` offers a player whose feet are at
+/// `feet`. A player the potion hit itself gets all of it.
+#[inline]
+pub fn splash_heal(at: V3, feet: V3, direct: bool) -> f32 {
+    let d0 = dist_sq(at, feet);
+    if !(d0 < 16.0) {
+        return 0.0;
+    }
+    let d1 = if direct { 1.0 } else { 1.0 - d0.sqrt() / 4.0 };
+    (d1 * (4 << 1) as f64 + 0.5) as i32 as f32
+}
+
+/// `new EntityThrowable(world, thrower)` up to the random part of
+/// `setThrowableHeading`: where a pearl or potion thrown by a player
+/// standing at `feet` with this view starts, and the direction it is thrown
+/// in (length one).
+pub fn throw_heading(kind: Kind, feet: V3, yaw: f32, pitch: f32) -> (V3, V3) {
     let rad = mth::PI_F;
     let mut pos = [feet[0], feet[1] + EYE_HEIGHT, feet[2]];
     pos[0] -= (mth::cos(yaw / 180.0f32 * rad) * 0.16f32) as f64;
@@ -236,8 +271,8 @@ pub fn pearl_heading(feet: V3, yaw: f32, pitch: f32) -> (V3, V3) {
     let f = 0.4f32;
     let mx = (-mth::sin(yaw / 180.0f32 * rad) * mth::cos(pitch / 180.0f32 * rad) * f) as f64;
     let mz = (mth::cos(yaw / 180.0f32 * rad) * mth::cos(pitch / 180.0f32 * rad) * f) as f64;
-    let my = (-mth::sin((pitch + 0.0f32) / 180.0f32 * rad) * f) as f64;
-    // setThrowableHeading(x, y, z, 1.5F, 1.0F)
+    let my = (-mth::sin((pitch + kind.pitch_offset()) / 180.0f32 * rad) * f) as f64;
+    // setThrowableHeading(x, y, z, getVelocity(), 1.0F)
     let len = mth::sqrt_d(mx * mx + my * my + mz * mz) as f64;
     (pos, [mx / len, my / len, mz / len])
 }
@@ -361,13 +396,15 @@ pub struct ServerPlayer {
     pub held: u8,
     /// Ender pearls left in the second hotbar slot.
     pub pearls: u8,
+    /// The hotbar slots that hold a splash potion, one bit each.
+    pub potions: u16,
     /// Damage value of the sword: the hits that have cost it durability.
     pub sword_wear: u32,
     /// `previousEquipment[0]`: what this player held when it was last
     /// updated. The damage of its attacks comes from this item, and the
     /// other player is told when it changes.
     pub equip: (Item, u32),
-    /// Pearls that are gone, reported on the next tick
+    /// Pearls and potions that are gone, reported on the next tick
     /// (`destroyedItemsNetCache`).
     pub gone: Vec<u32>,
     /// Ticks until the server lets this player throw the next pearl.
@@ -422,6 +459,7 @@ impl ServerPlayer {
             was_hungry: false,
             held: SLOT_SWORD,
             pearls: 0,
+            potions: 0,
             sword_wear: 0,
             equip: (Item::Sword, 0),
             gone: Vec::new(),
@@ -429,13 +467,13 @@ impl ServerPlayer {
         }
     }
 
-    /// The stack in hand: which item, and its wear (a sword) or its size
-    /// (pearls).
+    /// The stack in hand: which item, and its wear (a sword) or its size.
     #[inline]
     pub fn in_hand(&self) -> (Item, u32) {
         match self.held {
             SLOT_SWORD => (Item::Sword, self.sword_wear),
             SLOT_PEARL if self.pearls > 0 => (Item::Pearl, self.pearls as u32),
+            s if self.potions >> s & 1 != 0 => (Item::Potion, 1),
             _ => (Item::Empty, 0),
         }
     }
@@ -547,21 +585,24 @@ pub struct Server {
     pub hits: Vec<Hit>,
     /// Attack packets that reached the server, per attacker.
     pub attacks_received: [u32; 2],
-    /// Ender pearls in flight, oldest first.
-    pub pearls: Vec<Pearl>,
-    pub next_pearl_id: u32,
+    /// Ender pearls and potions in flight, oldest first.
+    pub thrown: Vec<Thrown>,
+    pub next_thrown_id: u32,
     /// Pearls that moved their thrower since the caller last drained this.
     pub landings: Vec<Landing>,
-    /// Pearls thrown, per player.
+    /// Potions that broke since the caller last drained this.
+    pub splashes: Vec<Splash>,
+    /// Pearls thrown, per player, and potions.
     pub throws: [u32; 2],
-    /// Replaying a recording: the exact motion of the next pearls thrown,
-    /// which in the game has a random part.
-    pub pearl_motions: VecDeque<V3>,
-    /// Replaying a recording: every pearl as it was when thrown.
-    pub spawned: Vec<Pearl>,
-    /// Replaying a recording: pearls the game did not update on this tick.
-    /// It leaves out entities close to a part of the world that is not
-    /// loaded, which only happens to a pearl that got out of the scene.
+    pub potion_throws: [u32; 2],
+    /// Replaying a recording: the exact motion of the next pearls and
+    /// potions thrown, which in the game has a random part.
+    pub throw_motions: VecDeque<V3>,
+    /// Replaying a recording: every pearl and potion as it was when thrown.
+    pub spawned: Vec<Thrown>,
+    /// Replaying a recording: pearls and potions the game did not update on
+    /// this tick. It leaves out entities close to a part of the world that
+    /// is not loaded, which only happens to one that got out of the scene.
     pub frozen: Vec<u32>,
     /// What servers add against pearl glitches: a pearl that would put its
     /// thrower inside a block is lost instead. The plain game has no such
@@ -585,11 +626,13 @@ impl Server {
             cfg,
             hits: Vec::with_capacity(4),
             attacks_received: [0; 2],
-            pearls: Vec::new(),
-            next_pearl_id: 0,
+            thrown: Vec::new(),
+            next_thrown_id: 0,
             landings: Vec::new(),
+            splashes: Vec::new(),
             throws: [0; 2],
-            pearl_motions: VecDeque::new(),
+            potion_throws: [0; 2],
+            throw_motions: VecDeque::new(),
             spawned: Vec::new(),
             frozen: Vec::new(),
             pearl_guard: false,
@@ -640,7 +683,7 @@ impl Server {
     }
 
     /// `processPlayerBlockPlacement` with direction 255: use what is in
-    /// hand. The sword blocks; a pearl is thrown.
+    /// hand. The sword blocks; a pearl or a potion is thrown.
     fn use_item(&mut self, i: usize, rng: &mut Rng, out: &mut Outbox) {
         match self.p[i].in_hand().0 {
             Item::Empty => {}
@@ -650,7 +693,7 @@ impl Server {
                 if self.cfg.pearl_cooldown > 0 && self.p[i].pearl_wait > 0 {
                     // The plugin cancels the click and sends the inventory
                     // again, so that the client gets its pearl back.
-                    out.push((i, S2C::WindowItems { pearls: self.p[i].pearls }));
+                    out.push((i, S2C::WindowItems { pearls: self.p[i].pearls, potions: self.p[i].potions }));
                     out.push((i, S2C::Cursor));
                     return;
                 }
@@ -658,11 +701,11 @@ impl Server {
                 // ItemEnderPearl.onItemRightClick
                 self.p[i].pearls -= 1;
                 self.throws[i] += 1;
-                self.spawn_pearl(i, rng, out);
+                self.spawn_thrown(i, Kind::Pearl, rng, out);
                 // tryUseItem: the stack changed, so the whole inventory is
                 // sent, unless the server still has the player blocking.
                 if !self.p[i].using_item {
-                    out.push((i, S2C::WindowItems { pearls: self.p[i].pearls }));
+                    out.push((i, S2C::WindowItems { pearls: self.p[i].pearls, potions: self.p[i].potions }));
                     out.push((i, S2C::Cursor));
                 }
                 // Back in the packet handler: the inventory copy is brought
@@ -671,31 +714,47 @@ impl Server {
                 self.p[i].slot_dirty = false;
                 out.push((i, S2C::SetSlot { slot: self.p[i].held, count: self.p[i].pearls }));
             }
+            Item::Potion => {
+                // ItemPotion.onItemRightClick for a splash potion: the
+                // stack of one is used up, and the rest goes as for a pearl.
+                self.p[i].potions &= !(1 << self.p[i].held);
+                self.potion_throws[i] += 1;
+                self.spawn_thrown(i, Kind::Potion, rng, out);
+                if !self.p[i].using_item {
+                    out.push((i, S2C::WindowItems { pearls: self.p[i].pearls, potions: self.p[i].potions }));
+                    out.push((i, S2C::Cursor));
+                }
+                self.p[i].slot_dirty = false;
+                out.push((i, S2C::SetSlot { slot: self.p[i].held, count: 0 }));
+            }
         }
     }
 
-    /// `new EntityEnderPearl(world, thrower)` and `spawnEntityInWorld`,
-    /// which makes the entity tracker tell both players at once.
-    fn spawn_pearl(&mut self, i: usize, rng: &mut Rng, out: &mut Outbox) {
+    /// `new EntityEnderPearl(world, thrower)` or `new EntityPotion(world,
+    /// thrower, stack)` and `spawnEntityInWorld`, which makes the entity
+    /// tracker tell both players at once.
+    fn spawn_thrown(&mut self, i: usize, kind: Kind, rng: &mut Rng, out: &mut Outbox) {
         let p = &self.p[i];
-        let (pos, mut m) = pearl_heading(p.l.body.pos, p.l.yaw, p.l.pitch);
+        let (pos, mut m) = throw_heading(kind, p.l.body.pos, p.l.yaw, p.l.pitch);
         let spread = 0.007499999832361937 * 1.0f32 as f64;
-        let aim = [m[0] * 1.5f32 as f64, m[1] * 1.5f32 as f64, m[2] * 1.5f32 as f64];
+        let speed = kind.speed() as f64;
+        let aim = [m[0] * speed, m[1] * speed, m[2] * speed];
         for v in m.iter_mut() {
             *v += rng.gaussian() * spread;
-            *v *= 1.5f32 as f64;
+            *v *= speed;
         }
-        let replaying = !self.pearl_motions.is_empty();
-        if let Some(exact) = self.pearl_motions.pop_front() {
+        let replaying = !self.throw_motions.is_empty();
+        if let Some(exact) = self.throw_motions.pop_front() {
             m = exact;
         }
         let f1 = mth::sqrt_d(m[0] * m[0] + m[2] * m[2]);
         let pyaw = (mth::atan2(m[0], m[2]) * 180.0 / std::f64::consts::PI) as f32;
         let ppitch = (mth::atan2(m[1], f1 as f64) * 180.0 / std::f64::consts::PI) as f32;
-        let id = self.next_pearl_id;
-        self.next_pearl_id += 1;
-        let e = Pearl {
+        let id = self.next_thrown_id;
+        self.next_thrown_id += 1;
+        let e = Thrown {
             id,
+            kind,
             thrower: i,
             pos,
             motion: m,
@@ -718,17 +777,17 @@ impl Server {
         }
         // EntityTrackerEntry.updatePlayerEntity for each player.
         for dest in 0..2 {
-            out.push((dest, S2C::Pearl { id, ev: PearlEv::Spawn { p: e.enc_pos, yaw: e.enc_yaw as i8, pitch: e.enc_pitch as i8 } }));
-            out.push((dest, S2C::Pearl { id, ev: PearlEv::Meta }));
-            out.push((dest, S2C::Pearl { id, ev: PearlEv::Velocity(encode_velocity(m)) }));
+            out.push((dest, S2C::Thrown { id, ev: ThrownEv::Spawn { kind, p: e.enc_pos, yaw: e.enc_yaw as i8, pitch: e.enc_pitch as i8 } }));
+            out.push((dest, S2C::Thrown { id, ev: ThrownEv::Meta }));
+            out.push((dest, S2C::Thrown { id, ev: ThrownEv::Velocity(encode_velocity(m)) }));
         }
-        self.pearls.push(e);
+        self.thrown.push(e);
     }
 
-    /// `EntityThrowable.onUpdate` and `EntityEnderPearl.onImpact` for the
-    /// pearl at index `k`.
-    fn pearl_update(&mut self, k: usize, world: &World, rng: &mut Rng, out: &mut Outbox) {
-        let e = &mut self.pearls[k];
+    /// `EntityThrowable.onUpdate` with `EntityEnderPearl.onImpact` or
+    /// `EntityPotion.onImpact` for the pearl or potion at index `k`.
+    fn thrown_update(&mut self, k: usize, world: &World, rng: &mut Rng, out: &mut Outbox) {
+        let e = &mut self.thrown[k];
         // Entity.onEntityUpdate
         e.prev_yaw = e.yaw;
         e.prev_pitch = e.pitch;
@@ -744,12 +803,12 @@ impl Server {
             vec31 = h;
             hit_block = true;
         }
-        // The players the path comes near. The box of the pearl is a
-        // quarter of a block wide and high.
+        // The players the path comes near. The box of a pearl or potion is
+        // a quarter of a block wide and high.
         let w = (0.25f32 / 2.0f32) as f64;
         let bb = Aabb::new([e.pos[0] - w, e.pos[1], e.pos[2] - w], [e.pos[0] + w, e.pos[1] + 0.25f32 as f64, e.pos[2] + w]);
         let query = bb.add_coord(e.motion[0], e.motion[1], e.motion[2]).expand(1.0, 1.0, 1.0);
-        let (thrower, ticks_in_air) = (e.thrower, e.ticks_in_air);
+        let (thrower, ticks_in_air, kind) = (e.thrower, e.ticks_in_air, e.kind);
         let mut hit_player: Option<usize> = None;
         let mut d0 = 0.0f64;
         for j in 0..2 {
@@ -769,14 +828,43 @@ impl Server {
                 }
             }
         }
-        // onImpact. A pearl goes through its own thrower, and while it does
-        // it does not notice a block either.
-        let impact = match hit_player {
-            Some(j) => j != thrower,
-            None => hit_block,
-        };
+        if kind == Kind::Potion {
+            // EntityPotion.onImpact: it breaks on a block and on any player,
+            // its thrower too. Every player whose box is within four blocks
+            // to the sides and two up or down of the potion's own, and whose
+            // feet are less than four blocks from where the potion was at
+            // the start of this tick, gets a share that falls with that
+            // distance. A player it hit gets all of it.
+            if hit_player.is_some() || hit_block {
+                let at = self.thrown[k].pos;
+                let area = bb.expand(4.0, 2.0, 4.0);
+                let mut sp = Splash { thrower, pos: at, on_player: hit_player, ticks: ticks_in_air, offered: [0.0; 2], healed: [0.0; 2] };
+                for j in 0..2 {
+                    let q = &self.p[j];
+                    if !filed_near(&area, q.chunk) || !q.l.body.bb.intersects(&area) {
+                        continue;
+                    }
+                    let i = splash_heal(at, q.l.body.pos, hit_player == Some(j));
+                    if dist_sq(at, q.l.body.pos) < 16.0 {
+                        let before = self.p[j].health;
+                        self.p[j].heal(i);
+                        sp.offered[j] = i;
+                        sp.healed[j] = self.p[j].health - before;
+                    }
+                }
+                self.splashes.push(sp);
+                self.thrown[k].dead = true;
+            }
+        }
+        // EntityEnderPearl.onImpact. A pearl goes through its own thrower,
+        // and while it does it does not notice a block either.
+        let impact = kind == Kind::Pearl
+            && match hit_player {
+                Some(j) => j != thrower,
+                None => hit_block,
+            };
         if impact {
-            let to = self.pearls[k].pos;
+            let to = self.thrown[k].pos;
             let (bx, by, bz) = (mth::floor_d(to[0]), mth::floor_d(to[1]), mth::floor_d(to[2]));
             let inside = world.solid(bx, by, bz) || world.solid(bx, by + 1, bz);
             if !(self.pearl_guard && inside) {
@@ -786,9 +874,9 @@ impl Server {
                 self.attack_entity_from(thrower, PEARL_DAMAGE, Source::Fall, rng, out);
                 self.landings.push(Landing { thrower, pos: to, on_player: hit_player.is_some(), ticks: ticks_in_air });
             }
-            self.pearls[k].dead = true;
+            self.thrown[k].dead = true;
         }
-        let e = &mut self.pearls[k];
+        let e = &mut self.thrown[k];
         for a in 0..3 {
             e.pos[a] += e.motion[a];
         }
@@ -809,21 +897,22 @@ impl Server {
         }
         e.pitch = e.prev_pitch + (e.pitch - e.prev_pitch) * 0.2f32;
         e.yaw = e.prev_yaw + (e.yaw - e.prev_yaw) * 0.2f32;
-        let (f2, f3) = (0.99f32 as f64, 0.03f32 as f64);
+        let (f2, f3) = (0.99f32 as f64, e.kind.gravity() as f64);
         for a in 0..3 {
             e.motion[a] *= f2;
         }
         e.motion[1] -= f3;
     }
 
-    /// `EntityTrackerEntry.updatePlayerList` for the pearl at index `k`:
-    /// update frequency 10, with velocity updates, sent to both players.
-    fn pearl_tracker_update(&mut self, k: usize, out: &mut Outbox) {
-        let e = &mut self.pearls[k];
+    /// `EntityTrackerEntry.updatePlayerList` for the pearl or potion at
+    /// index `k`: update frequency 10, with velocity updates, sent to both
+    /// players.
+    fn thrown_tracker_update(&mut self, k: usize, out: &mut Outbox) {
+        let e = &mut self.thrown[k];
         let id = e.id;
-        let mut send = |ev: PearlEv| {
+        let mut send = |ev: ThrownEv| {
             for dest in 0..2 {
-                out.push((dest, S2C::Pearl { id, ev }));
+                out.push((dest, S2C::Thrown { id, ev }));
             }
         };
         if e.update_counter % 10 == 0 {
@@ -844,16 +933,16 @@ impl Server {
                 if in_range(j2) && in_range(k2) && in_range(ii) && e.ticks_since_teleport <= 400 {
                     if !flag || !flag1 {
                         if flag {
-                            pkt = Some(PearlEv::RelMove { d: [j2 as i8, k2 as i8, ii as i8], on_ground: false });
+                            pkt = Some(ThrownEv::RelMove { d: [j2 as i8, k2 as i8, ii as i8], on_ground: false });
                         } else if flag1 {
-                            pkt = Some(PearlEv::Look { yaw: l1 as i8, pitch: i2 as i8, on_ground: false });
+                            pkt = Some(ThrownEv::Look { yaw: l1 as i8, pitch: i2 as i8, on_ground: false });
                         }
                     } else {
-                        pkt = Some(PearlEv::LookMove { d: [j2 as i8, k2 as i8, ii as i8], yaw: l1 as i8, pitch: i2 as i8, on_ground: false });
+                        pkt = Some(ThrownEv::LookMove { d: [j2 as i8, k2 as i8, ii as i8], yaw: l1 as i8, pitch: i2 as i8, on_ground: false });
                     }
                 } else {
                     e.ticks_since_teleport = 0;
-                    pkt = Some(PearlEv::Teleport { p: [k0, j1, k1], yaw: l1 as i8, pitch: i2 as i8, on_ground: false });
+                    pkt = Some(ThrownEv::Teleport { p: [k0, j1, k1], yaw: l1 as i8, pitch: i2 as i8, on_ground: false });
                 }
             }
             let d = [e.motion[0] - e.last_motion[0], e.motion[1] - e.last_motion[1], e.motion[2] - e.last_motion[2]];
@@ -861,7 +950,7 @@ impl Server {
             let d4 = d[0] * d[0] + d[1] * d[1] + d[2] * d[2];
             if d4 > d3 * d3 || (d4 > 0.0 && e.motion == [0.0; 3]) {
                 e.last_motion = e.motion;
-                send(PearlEv::Velocity(encode_velocity(e.motion)));
+                send(ThrownEv::Velocity(encode_velocity(e.motion)));
             }
             if let Some(p) = pkt {
                 send(p);
@@ -1365,8 +1454,8 @@ impl Server {
 
     /// The part of a server tick after the packet handlers: the world
     /// update (`EntityPlayerMP.onUpdate` for both players, then every pearl
-    /// in the order they were thrown), the entity tracker, then the network
-    /// tick.
+    /// and potion in the order they were thrown), the entity tracker, then
+    /// the network tick.
     pub fn tick(&mut self, world: &World, rng: &mut Rng, out: &mut Outbox) {
         for (i, p) in self.p.iter_mut().enumerate() {
             if p.hurt_resistant_time > 0 {
@@ -1392,16 +1481,16 @@ impl Server {
             p.chunk = chunk_of(p.l.body.pos);
         }
         let mut k = 0;
-        while k < self.pearls.len() {
-            if self.frozen.contains(&self.pearls[k].id) {
+        while k < self.thrown.len() {
+            if self.frozen.contains(&self.thrown[k].id) {
                 k += 1;
                 continue;
             }
-            self.pearl_update(k, world, rng, out);
-            if self.pearls[k].dead {
+            self.thrown_update(k, world, rng, out);
+            if self.thrown[k].dead {
                 // World.updateEntities takes a dead entity out at once, and
                 // the tracker notes it for both players.
-                let id = self.pearls.remove(k).id;
+                let id = self.thrown.remove(k).id;
                 for p in self.p.iter_mut() {
                     p.gone.push(id);
                 }
@@ -1412,8 +1501,8 @@ impl Server {
         for i in 0..2 {
             self.tracker_update(i, out);
         }
-        for k in 0..self.pearls.len() {
-            self.pearl_tracker_update(k, out);
+        for k in 0..self.thrown.len() {
+            self.thrown_tracker_update(k, out);
         }
         // NetHandlerPlayServer.update
         for p in self.p.iter_mut() {

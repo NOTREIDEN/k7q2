@@ -22,10 +22,11 @@ fn traces() -> Vec<String> {
 #[test]
 fn the_real_game_is_reproduced_bit_for_bit() {
     let files = traces();
-    assert!(files.len() >= 27, "expected the recordings in tests/traces, found {}", files.len());
+    assert!(files.len() >= 42, "expected the recordings in tests/traces, found {}", files.len());
     let (mut ticks, mut hits, mut sprint_hits, mut crits, mut attacks, mut teleports, mut kb) = (0, 0, 0, 0, 0, 0, 0);
     let (mut blocked, mut right_clicks, mut lost, mut silent, mut swords) = (0, 0, 0, 0, 0);
     let (mut thrown, mut landed, mut on_player, mut slots, mut bare, mut seen, mut flying, mut outside) = (0, 0, 0, 0, 0, 0, 0, 0);
+    let (mut potions, mut broken, mut direct, mut both, mut healed, mut health_lost) = (0, 0, 0, 0, 0, 0);
     for f in &files {
         let r = replay(&read_trace(f).unwrap(), &Options::default()).unwrap_or_else(|e| panic!("{f}: {e}"));
         assert!(r.identical(), "{f}\n{}", r.describe());
@@ -49,6 +50,12 @@ fn the_real_game_is_reproduced_bit_for_bit() {
         seen += r.client.get("pearls seen");
         flying += r.client.get("ticks with a pearl in flight");
         outside += r.server.get("pearl ticks outside the loaded world");
+        potions += r.server.get("potions thrown");
+        broken += r.server.get("potions broken");
+        direct += r.server.get("potions broken on a player");
+        both += r.server.get("potions that healed both");
+        healed += r.server.get("health from potions, in tenths");
+        health_lost += r.server.get("health lost, in tenths");
     }
     // The recordings have to keep covering what a duel is made of.
     assert!(ticks > 15000, "ticks {ticks}");
@@ -70,6 +77,12 @@ fn the_real_game_is_reproduced_bit_for_bit() {
     // No pearl got out of the part of the world the rig keeps loaded, where
     // the game stops updating it.
     assert!(outside == 0, "{outside} pearl ticks outside the loaded world");
+    // Health and splash potions of healing: hits that cost health, potions
+    // thrown by both players that broke on blocks and on players, and the
+    // health they gave back, to the thrower alone and to both.
+    assert!(health_lost > 10000, "health lost, in tenths: {health_lost}");
+    assert!(potions > 60 && broken > 60 && direct > 8, "potions thrown {potions}, broken {broken}, on a player {direct}");
+    assert!(both > 30 && healed > 1500, "potions that healed both {both}, health from potions in tenths {healed}");
 }
 
 #[test]

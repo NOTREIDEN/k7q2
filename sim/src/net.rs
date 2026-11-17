@@ -1,20 +1,66 @@
-//! The packets a duel with swords and ender pearls needs, and a FIFO link
-//! with per-packet delay.
+//! The packets a duel with swords, ender pearls and splash potions needs,
+//! and a FIFO link with per-packet delay.
 use crate::aabb::V3;
 use std::collections::VecDeque;
 
 /// What a hotbar slot holds. The sword is in the first slot and the ender
-/// pearls in the second; the other seven are empty.
+/// pearls in the second; each of the other seven holds one splash potion of
+/// Instant Health II or nothing.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Item {
     Sword,
     Pearl,
+    Potion,
     Empty,
 }
 
 /// Hotbar slot of the sword and of the pearls.
 pub const SLOT_SWORD: u8 = 0;
 pub const SLOT_PEARL: u8 = 1;
+/// The hotbar slots that can hold a potion, as bits of the masks that say
+/// which of them do.
+pub const POTION_SLOTS: u16 = 0b1_1111_1100;
+
+/// The first `n` potion slots, as such a mask.
+#[inline]
+pub fn potion_mask(n: u8) -> u16 {
+    (((1u32 << n.min(7)) - 1) << 2) as u16
+}
+
+/// What is thrown: an ender pearl or a splash potion.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Kind {
+    Pearl,
+    Potion,
+}
+
+impl Kind {
+    /// `getGravityVelocity`.
+    #[inline]
+    pub fn gravity(self) -> f32 {
+        match self {
+            Kind::Pearl => 0.03f32,
+            Kind::Potion => 0.05f32,
+        }
+    }
+    /// `getVelocity`.
+    #[inline]
+    pub fn speed(self) -> f32 {
+        match self {
+            Kind::Pearl => 1.5f32,
+            Kind::Potion => 0.5f32,
+        }
+    }
+    /// `getInaccuracy`: degrees added to the pitch for the upward part of
+    /// the throw only.
+    #[inline]
+    pub fn pitch_offset(self) -> f32 {
+        match self {
+            Kind::Pearl => 0.0f32,
+            Kind::Potion => -20.0f32,
+        }
+    }
+}
 
 /// Client to server.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -45,11 +91,12 @@ pub enum C2S {
     HeldItem(u8),
 }
 
-/// What the server tells a client about an ender pearl in flight.
+/// What the server tells a client about a pearl or a potion in flight.
 #[derive(Clone, Copy, Debug, PartialEq)]
-pub enum PearlEv {
-    /// S0E spawn object, type 65: position in 1/32 block, angles in 1/256 turn.
-    Spawn { p: [i32; 3], yaw: i8, pitch: i8 },
+pub enum ThrownEv {
+    /// S0E spawn object, type 65 (pearl) or 73 (potion): position in 1/32
+    /// block, angles in 1/256 turn.
+    Spawn { kind: Kind, p: [i32; 3], yaw: i8, pitch: i8 },
     /// S1C entity metadata sent with the spawn. It carries nothing.
     Meta,
     /// S12 entity velocity, in 1/8000 block per tick.
@@ -85,21 +132,23 @@ pub enum S2C {
     Health { health: f32, food: i32, saturation: f32 },
     /// S2F set slot for a hotbar slot of the receiving player: a new stack
     /// of `count` items (0 empties the slot). The server sends it for the
-    /// sword when a hit has cost it durability, and for the pearls after a
-    /// throw.
+    /// sword when a hit has cost it durability, and for the pearls or the
+    /// potion after a throw.
     SetSlot { slot: u8, count: u8 },
     /// S30 window items: the whole inventory again, every stack a new one.
-    /// The server sends it after a throw. `pearls` is how many are left.
-    WindowItems { pearls: u8 },
+    /// The server sends it after a throw. `pearls` is how many are left and
+    /// `potions` which slots hold a potion.
+    WindowItems { pearls: u8, potions: u16 },
     /// S2F for the stack on the mouse cursor, which follows S30. Nothing
     /// comes of it.
     Cursor,
     /// S04 entity equipment: what the other player now holds. `n` is the
-    /// wear of a sword or the size of a stack of pearls.
+    /// wear of a sword or the size of a stack.
     Equip { item: Item, n: u32 },
-    /// Something about the ender pearl with this entity id.
-    Pearl { id: u32, ev: PearlEv },
-    /// S13 destroy entities: these pearls are gone (the first `n` ids).
+    /// Something about the pearl or potion with this entity id.
+    Thrown { id: u32, ev: ThrownEv },
+    /// S13 destroy entities: these pearls and potions are gone (the first
+    /// `n` ids).
     Destroy { ids: [u32; 8], n: u8 },
     /// S20 entity properties for `generic.movementSpeed`.
     Props { own: bool, base: f64, speed_amp: i8, sprint: bool },

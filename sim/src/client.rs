@@ -5,7 +5,7 @@
 use crate::aabb::{dist, Aabb, V3, EYE_HEIGHT};
 use crate::living::Living;
 use crate::mth;
-use crate::net::{Item, PearlEv, C2S, S2C, SLOT_PEARL, SLOT_SWORD};
+use crate::net::{Item, Kind, ThrownEv, C2S, S2C, SLOT_PEARL, SLOT_SWORD};
 use crate::world::{RayHit, World};
 
 /// Keys and mouse for one client tick.
@@ -99,12 +99,13 @@ pub struct RemotePlayer {
     pub ticks_since_jump: i32,
 }
 
-/// An ender pearl as a client has it: created by the server's spawn packet,
-/// flying on its own between the server's corrections, and gone only when
-/// the server says so. It hits nothing on the client.
+/// An ender pearl or a potion as a client has it: created by the server's
+/// spawn packet, flying on its own between the server's corrections, and
+/// gone only when the server says so. It hits nothing on the client.
 #[derive(Clone, Copy, Debug, PartialEq)]
-pub struct ClientPearl {
+pub struct ClientThrown {
     pub id: u32,
+    pub kind: Kind,
     pub pos: V3,
     pub motion: V3,
     pub server_pos: [i32; 3],
@@ -115,9 +116,9 @@ pub struct ClientPearl {
     pub mine: bool,
 }
 
-impl ClientPearl {
-    /// `Entity.setPositionAndRotation2`: put the pearl there, and on top of
-    /// any block it would be inside of.
+impl ClientThrown {
+    /// `Entity.setPositionAndRotation2`: put it there, and on top of any
+    /// block it would be inside of.
     fn set_position2(&mut self, world: &World, p: V3) {
         self.pos = p;
         let w = (0.25f32 / 2.0f32) as f64;
@@ -157,14 +158,14 @@ impl ClientPearl {
     }
 
     /// `EntityThrowable.onUpdate` as far as it matters on a client. Returns
-    /// false for a pearl that has fallen out of the world: the client then
+    /// false for one that has fallen out of the world: the client then
     /// drops it on its own.
     fn tick(&mut self) -> bool {
         let alive = !(self.pos[1] < -64.0);
         for a in 0..3 {
             self.pos[a] += self.motion[a];
         }
-        let (f2, f3) = (0.99f32 as f64, 0.03f32 as f64);
+        let (f2, f3) = (0.99f32 as f64, self.kind.gravity() as f64);
         for a in 0..3 {
             self.motion[a] *= f2;
         }
@@ -357,6 +358,8 @@ pub struct LocalPlayer {
     pub synced: u8,
     /// Ender pearls in the second hotbar slot, as this client counts them.
     pub pearls: u8,
+    /// The hotbar slots that hold a splash potion, one bit each.
+    pub potions: u16,
     /// Health, food and saturation as the server last said.
     pub health: f32,
     pub food: i32,
@@ -369,11 +372,13 @@ pub struct LocalPlayer {
     pub ticks_since_attack: i32,
     /// Ticks since the server last put this player somewhere.
     pub ticks_since_moved: i32,
-    /// Ticks since this client last threw a pearl, where its eyes were
-    /// then, and how many of its throws have not shown up as a pearl yet.
+    /// Ticks since this client last threw a pearl or a potion, where its
+    /// eyes were then, and how many of its throws of each kind have not
+    /// shown up yet.
     pub ticks_since_throw: i32,
     pub throw_eye: V3,
     pub throws_pending: u8,
+    pub potions_pending: u8,
 }
 
 impl LocalPlayer {
@@ -402,6 +407,7 @@ impl LocalPlayer {
             held: SLOT_SWORD,
             synced: SLOT_SWORD,
             pearls: 0,
+            potions: 0,
             health: 20.0,
             food: 20,
             saturation: 5.0,
@@ -414,6 +420,7 @@ impl LocalPlayer {
             ticks_since_throw: 1000,
             throw_eye: pos,
             throws_pending: 0,
+            potions_pending: 0,
         }
     }
 
@@ -449,6 +456,7 @@ impl LocalPlayer {
         match self.held {
             SLOT_SWORD => Item::Sword,
             SLOT_PEARL if self.pearls > 0 => Item::Pearl,
+            s if self.potions >> s & 1 != 0 => Item::Potion,
             _ => Item::Empty,
         }
     }
@@ -478,6 +486,8 @@ pub struct TickOut {
     pub used: bool,
     /// An ender pearl was thrown.
     pub threw: bool,
+    /// A potion was thrown.
+    pub threw_potion: bool,
     /// Left clicks that were swallowed because the client was blocking.
     pub swallowed: u8,
 }
@@ -514,8 +524,8 @@ pub struct Client {
     /// Where the other player was shown at the picks of the last ticks,
     /// newest first.
     shown: [Aabb; MAX_BACKTRACK],
-    /// The ender pearls in flight this client knows of, oldest first.
-    pub pearls: Vec<ClientPearl>,
+    /// The pearls and potions in flight this client knows of, oldest first.
+    pub thrown: Vec<ClientThrown>,
 }
 
 /// `EntityRenderer.getMouseOver(1.0F)` for a world that holds one other
@@ -570,11 +580,12 @@ pub fn pick_with(world: &World, eye: V3, own_bb: &Aabb, pitch: f32, yaw: f32, re
     }
 }
 
-/// Where a pearl at `pos` moving by `motion` per tick stops if it flies on
-/// undisturbed, and after how many ticks: its position at the start of the
-/// tick in which it reaches a block, which is where its thrower is put.
-pub fn pearl_flight(world: &World, mut pos: V3, mut m: V3) -> (V3, i32) {
-    let (f2, f3) = (0.99f32 as f64, 0.03f32 as f64);
+/// Where a pearl or potion at `pos` moving by `motion` per tick stops if it
+/// flies on undisturbed, and after how many ticks: its position at the
+/// start of the tick in which it reaches a block. That is where a pearl
+/// puts its thrower, and where the reach of a potion is measured from.
+pub fn thrown_flight(world: &World, kind: Kind, mut pos: V3, mut m: V3) -> (V3, i32) {
+    let (f2, f3) = (0.99f32 as f64, kind.gravity() as f64);
     for t in 0..100 {
         let next = [pos[0] + m[0], pos[1] + m[1], pos[2] + m[2]];
         if !world.clear_path(pos, next) {
@@ -591,22 +602,27 @@ pub fn pearl_flight(world: &World, mut pos: V3, mut m: V3) -> (V3, i32) {
     (pos, 100)
 }
 
-/// `pearl_flight` for a pearl this client sees.
-pub fn pearl_landing(world: &World, e: &ClientPearl) -> (V3, i32) {
-    pearl_flight(world, e.pos, e.motion)
+/// `thrown_flight` for a pearl or potion this client sees.
+pub fn pearl_landing(world: &World, e: &ClientThrown) -> (V3, i32) {
+    thrown_flight(world, e.kind, e.pos, e.motion)
 }
 
-/// `pearl_flight` for a pearl that a player standing at `feet` with this
-/// view would throw, leaving out the small random part of a throw.
+/// `thrown_flight` for what a player standing at `feet` with this view
+/// would throw, leaving out the small random part of a throw.
+pub fn throw_preview(world: &World, kind: Kind, feet: V3, yaw: f32, pitch: f32) -> (V3, i32) {
+    let (pos, m) = crate::server::throw_heading(kind, feet, yaw, pitch);
+    let v = kind.speed() as f64;
+    thrown_flight(world, kind, pos, [m[0] * v, m[1] * v, m[2] * v])
+}
+
+/// `throw_preview` for a pearl.
 pub fn pearl_preview(world: &World, feet: V3, yaw: f32, pitch: f32) -> (V3, i32) {
-    let (pos, m) = crate::server::pearl_heading(feet, yaw, pitch);
-    let v = 1.5f32 as f64;
-    pearl_flight(world, pos, [m[0] * v, m[1] * v, m[2] * v])
+    throw_preview(world, Kind::Pearl, feet, yaw, pitch)
 }
 
-/// `Minecraft.rightClickMouse`. Returns whether a pearl was thrown.
+/// `Minecraft.rightClickMouse`. Returns what was thrown, if anything.
 #[inline]
-fn right_click(lp: &mut LocalPlayer, pick: &Pick, out: &mut Vec<C2S>) -> bool {
+fn right_click(lp: &mut LocalPlayer, pick: &Pick, out: &mut Vec<C2S>) -> Option<Kind> {
     lp.right_click_delay = 4;
     let item = lp.in_hand();
     if pick.entity {
@@ -618,11 +634,11 @@ fn right_click(lp: &mut LocalPlayer, pick: &Pick, out: &mut Vec<C2S>) -> bool {
         lp.sync_slot(out);
         out.push(C2S::UseBlock);
         if item == Item::Empty {
-            return false;
+            return None;
         }
     }
     match item {
-        Item::Empty => false,
+        Item::Empty => None,
         Item::Sword => {
             // sendUseItem -> ItemSword.onItemRightClick -> setItemInUse
             lp.sync_slot(out);
@@ -631,7 +647,7 @@ fn right_click(lp: &mut LocalPlayer, pick: &Pick, out: &mut Vec<C2S>) -> bool {
                 lp.using_item = true;
                 lp.use_gen = lp.stack_gen;
             }
-            false
+            None
         }
         Item::Pearl => {
             // sendUseItem -> ItemEnderPearl.onItemRightClick: the client
@@ -640,7 +656,15 @@ fn right_click(lp: &mut LocalPlayer, pick: &Pick, out: &mut Vec<C2S>) -> bool {
             lp.sync_slot(out);
             out.push(C2S::UseItem);
             lp.pearls -= 1;
-            true
+            Some(Kind::Pearl)
+        }
+        Item::Potion => {
+            // sendUseItem -> ItemPotion.onItemRightClick for a splash
+            // potion: the stack of one is used up.
+            lp.sync_slot(out);
+            out.push(C2S::UseItem);
+            lp.potions &= !(1 << lp.held);
+            Some(Kind::Potion)
         }
     }
 }
@@ -687,7 +711,7 @@ impl Client {
     pub fn new(pos: V3, yaw: f32, pitch: f32, speed_amp: i8, other_pos: V3, other_yaw: f32, other_pitch: f32) -> Self {
         let rp = RemotePlayer::spawn(other_pos, other_yaw, other_pitch, true);
         let shown = [rp.bb; MAX_BACKTRACK];
-        Client { lp: LocalPlayer::new(pos, yaw, pitch, speed_amp), rp, edge: Edge::default(), shown, pearls: Vec::new() }
+        Client { lp: LocalPlayer::new(pos, yaw, pitch, speed_amp), rp, edge: Edge::default(), shown, thrown: Vec::new() }
     }
 
     /// The pick the next tick would make if the mouse did not move.
@@ -799,12 +823,14 @@ impl Client {
             S2C::SetSlot { slot, count } => match slot {
                 SLOT_SWORD => self.lp.stack_gen = self.lp.stack_gen.wrapping_add(1),
                 SLOT_PEARL => self.lp.pearls = count,
+                s if s < 9 => self.lp.potions = self.lp.potions & !(1 << s) | ((count > 0) as u16) << s,
                 _ => {}
             },
             // handleWindowItems puts new stack objects into every slot.
-            S2C::WindowItems { pearls } => {
+            S2C::WindowItems { pearls, potions } => {
                 self.lp.stack_gen = self.lp.stack_gen.wrapping_add(1);
                 self.lp.pearls = pearls;
+                self.lp.potions = potions;
             }
             S2C::Cursor => {}
             // handleEntityEquipment
@@ -812,27 +838,31 @@ impl Client {
                 self.rp.item = item;
                 self.rp.item_n = n;
             }
-            S2C::Pearl { id, ev } => match ev {
-                // handleSpawnObject: a pearl at rest; its speed comes in a
-                // packet of its own.
-                PearlEv::Spawn { p, .. } => {
+            S2C::Thrown { id, ev } => match ev {
+                // handleSpawnObject: a pearl or a potion at rest; its speed
+                // comes in a packet of its own.
+                ThrownEv::Spawn { kind, p, .. } => {
                     let pos = [p[0] as f64 / 32.0, p[1] as f64 / 32.0, p[2] as f64 / 32.0];
                     let lp = &mut self.lp;
-                    let mine = lp.throws_pending > 0 && crate::aabb::dist_sq(pos, lp.throw_eye) < 1.0;
+                    let pending = match kind {
+                        Kind::Pearl => &mut lp.throws_pending,
+                        Kind::Potion => &mut lp.potions_pending,
+                    };
+                    let mine = *pending > 0 && crate::aabb::dist_sq(pos, lp.throw_eye) < 1.0;
                     if mine {
-                        lp.throws_pending -= 1;
+                        *pending -= 1;
                     }
-                    self.pearls.push(ClientPearl { id, pos, motion: [0.0; 3], server_pos: p, age: 0, mine });
+                    self.thrown.push(ClientThrown { id, kind, pos, motion: [0.0; 3], server_pos: p, age: 0, mine });
                 }
-                PearlEv::Meta => {}
+                ThrownEv::Meta => {}
                 ev => {
-                    if let Some(e) = self.pearls.iter_mut().find(|e| e.id == id) {
+                    if let Some(e) = self.thrown.iter_mut().find(|e| e.id == id) {
                         match ev {
-                            PearlEv::Velocity(v) => e.motion = [v[0] as f64 / 8000.0, v[1] as f64 / 8000.0, v[2] as f64 / 8000.0],
-                            PearlEv::RelMove { d, .. } | PearlEv::LookMove { d, .. } => e.rel_move(world, d),
-                            PearlEv::Look { .. } => e.rel_move(world, [0, 0, 0]),
-                            PearlEv::Teleport { p, .. } => e.teleport(world, p),
-                            PearlEv::Spawn { .. } | PearlEv::Meta => {}
+                            ThrownEv::Velocity(v) => e.motion = [v[0] as f64 / 8000.0, v[1] as f64 / 8000.0, v[2] as f64 / 8000.0],
+                            ThrownEv::RelMove { d, .. } | ThrownEv::LookMove { d, .. } => e.rel_move(world, d),
+                            ThrownEv::Look { .. } => e.rel_move(world, [0, 0, 0]),
+                            ThrownEv::Teleport { p, .. } => e.teleport(world, p),
+                            ThrownEv::Spawn { .. } | ThrownEv::Meta => {}
                         }
                     }
                 }
@@ -840,7 +870,7 @@ impl Client {
             // handleDestroyEntities
             S2C::Destroy { ids, n } => {
                 let gone = &ids[..n as usize];
-                self.pearls.retain(|e| !gone.contains(&e.id));
+                self.thrown.retain(|e| !gone.contains(&e.id));
             }
             S2C::Props { own, base, speed_amp, sprint } => {
                 if own {
@@ -930,19 +960,28 @@ impl Client {
                 }
             }
             if press && !hitting_block {
-                t.threw |= right_click(lp, &t.pick, out);
+                let k = right_click(lp, &t.pick, out);
+                t.threw |= k == Some(Kind::Pearl);
+                t.threw_potion |= k == Some(Kind::Potion);
                 t.used = true;
             }
         }
         // The button held down clicks again once the delay has run out.
         if inp.use_item && lp.right_click_delay == 0 && !lp.using_item && !hitting_block {
-            t.threw |= right_click(lp, &t.pick, out);
+            let k = right_click(lp, &t.pick, out);
+            t.threw |= k == Some(Kind::Pearl);
+            t.threw_potion |= k == Some(Kind::Potion);
             t.used = true;
         }
-        if t.threw {
+        if t.threw || t.threw_potion {
             lp.ticks_since_throw = 0;
             lp.throw_eye = lp.eye();
-            lp.throws_pending = lp.throws_pending.saturating_add(1);
+            if t.threw {
+                lp.throws_pending = lp.throws_pending.saturating_add(1);
+            }
+            if t.threw_potion {
+                lp.potions_pending = lp.potions_pending.saturating_add(1);
+            }
         }
 
         // --- EntityPlayerSP.onUpdate ---
@@ -1070,13 +1109,14 @@ impl Client {
             if lp.ticks_since_throw > 60 {
                 // A throw the server refused never shows up.
                 lp.throws_pending = 0;
+                lp.potions_pending = 0;
             }
         }
 
         // The other player's entity updates after the local one, then the
-        // pearls.
+        // pearls and potions.
         self.rp.tick();
-        self.pearls.retain_mut(|e| e.tick());
+        self.thrown.retain_mut(|e| e.tick());
         t
     }
 }

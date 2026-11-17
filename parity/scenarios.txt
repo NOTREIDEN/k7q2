@@ -33,3 +33,9 @@ hp6         pearl      96    health=1 armor=1 many=1 fake=0.05 refill=8
 hp7         fight      87    health=1 armor=1 prot=1 food=8,0
 hp8         fight      88    health=1 armor=1 prot=3 food=1,0 refill=4
 hp9         pearlsolo  89    health=1 armor=1 prot=2 ff=2 refill=10
+pot1 pot 101 health=1 armor=1 prot=2 sharp=2 potions=7 refill=6
+pot2 pot 102 health=1 armor=1 prot=4 sharp=5 potions=7 pearls=16 many=1 blocks=1 refill=8
+pot3 potsolo 113 health=1 armor=1 prot=2 ff=4 potions=7 pearls=16
+pot4 pot 104 potions=5 many=1 roof=0
+pot5 pot 105 health=1 potions=7 refill=13 fakepot=0.06 many=1 sensitivity=0.83
+pot6 pot 106 health=1 armor=1 prot=1 sharp=1 potions=7 many=1 fakepot=0.05 refill=5 speed=0

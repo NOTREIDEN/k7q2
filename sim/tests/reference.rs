@@ -441,8 +441,8 @@ fn a_pearl_takes_its_thrower_where_it_comes_down() {
     let mut seen = false;
     for _ in 0..80 {
         step(&mut m, &idle, &idle);
-        seen |= !m.c[0].pearls.is_empty();
-        if !m.s.pearls.is_empty() {
+        seen |= !m.c[0].thrown.is_empty();
+        if !m.s.thrown.is_empty() {
             flew += 1;
         }
         if !m.s.landings.is_empty() {
@@ -464,7 +464,7 @@ fn a_pearl_takes_its_thrower_where_it_comes_down() {
     }
     let (c, s) = (m.c[0].lp.l.body.pos, m.s.p[0].l.body.pos);
     assert!((c[2] - l.pos[2]).abs() < 0.5 && (s[2] - l.pos[2]).abs() < 0.5, "client {c:?}, server {s:?}, landing {l:?}");
-    assert!(m.c[0].pearls.is_empty() && m.s.pearls.is_empty(), "the pearl is gone on both sides");
+    assert!(m.c[0].thrown.is_empty() && m.s.thrown.is_empty(), "the pearl is gone on both sides");
     assert_eq!(m.c[0].lp.held, 0);
     assert_eq!(m.s.p[0].in_hand().0, Item::Sword);
     assert_eq!(m.c[1].rp.item, Item::Sword, "the other client saw the sword come back");

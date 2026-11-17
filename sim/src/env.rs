@@ -11,7 +11,7 @@ use crate::aabb::{dist, Aabb, V3};
 use crate::bot::{self, BotParams, BotState};
 use crate::client::{pearl_landing, pearl_preview, ClientCfg, Edge, Input, TickOut, MAX_BACKTRACK};
 use crate::mth::{self, Rng};
-use crate::net::{Item, SLOT_PEARL, SLOT_SWORD};
+use crate::net::{Item, Kind, SLOT_PEARL, SLOT_SWORD};
 use crate::server::{KbPlugin, KbProfile, ServerCfg, PEARL_DAMAGE};
 use crate::sim::{Match, NetCfg, Spawn, TICK_US};
 use crate::world::World;
@@ -1056,7 +1056,7 @@ impl Env {
             o[b + 25] = lp.pearls as f32;
             // The newest pearl of this player still in flight, as the
             // server has it.
-            let e = self.m.s.pearls.iter().rev().find(|e| e.thrower == id);
+            let e = self.m.s.thrown.iter().rev().find(|e| e.thrower == id && e.kind == Kind::Pearl);
             o[b + 26] = e.is_some() as u8 as f32;
             for a in 0..3 {
                 o[b + 27 + a] = e.map(|e| e.pos[a] as f32).unwrap_or(0.0);
@@ -1225,7 +1225,7 @@ impl Env {
         for v in o[77..96].iter_mut() {
             *v = 0.0;
         }
-        if let Some(e) = c.pearls.iter().rev().find(|e| e.mine) {
+        if let Some(e) = c.thrown.iter().rev().find(|e| e.mine && e.kind == Kind::Pearl) {
             let (land, ticks) = pearl_landing(&self.m.world, e);
             let (lf, lr) = local(yaw, land[0] - b.pos[0], land[2] - b.pos[2]);
             o[77] = 1.0;
@@ -1238,7 +1238,7 @@ impl Env {
         // The newest pearl of the opponent: where it is, where it will put
         // the opponent, in how many ticks, and how far the view has to
         // turn to face that spot.
-        if let Some(e) = c.pearls.iter().rev().find(|e| !e.mine) {
+        if let Some(e) = c.thrown.iter().rev().find(|e| !e.mine && e.kind == Kind::Pearl) {
             let (land, ticks) = pearl_landing(&self.m.world, e);
             let (pf, pr) = local(yaw, e.pos[0] - b.pos[0], e.pos[2] - b.pos[2]);
             let (lf, lr) = local(yaw, land[0] - b.pos[0], land[2] - b.pos[2]);
@@ -1345,7 +1345,7 @@ impl Env {
         o[49] = s.p[1 - id].pearl_wait as f32 / cd;
         o[50] = s.p[1 - id].pearls as f32 / 16.0;
         o[51] = (s.p[1 - id].held == SLOT_PEARL) as u8 as f32;
-        o[52] = s.pearls.iter().any(|e| e.thrower != id) as u8 as f32;
+        o[52] = s.thrown.iter().any(|e| e.thrower != id && e.kind == Kind::Pearl) as u8 as f32;
         o[53] = s.cfg.pearl_cooldown as f32 / 320.0;
     }
 }

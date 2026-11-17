@@ -91,6 +91,9 @@ public final class Rig {
     static final List<int[]> blocks = new ArrayList<int[]>();
     static boolean unbreakable = false;
     static int pearls = 0;
+    /** Splash potions of Instant Health II, one each in the hotbar slots from the third on. */
+    static int potions = 0;
+    static final int HEAL_II = 16421;
     // The kit. With health on, hits cost health: no Resistance and no Saturation.
     static boolean health = false, armor = false;
     static int prot = 0, feather = 0, sharp = 0;
@@ -168,6 +171,8 @@ public final class Rig {
                 unbreakable = !p[1].equals("0");
             } else if (p[0].equals("pearls")) {
                 pearls = Integer.parseInt(p[1]);
+            } else if (p[0].equals("potions")) {
+                potions = Math.min(7, Integer.parseInt(p[1]));
             } else if (p[0].equals("health")) {
                 health = !p[1].equals("0");
             } else if (p[0].equals("armor")) {
@@ -191,9 +196,9 @@ public final class Rig {
         }
         r.close();
         log("HEADER ticks=" + inputs.size() + " speed=" + speedAmp + " sensitivity=" + hf(sensitivity)
-            + " fake=" + (fakeStart != null ? 1 : 0) + " blocks=" + blocks.size() + " fmt=4 wear=" + (unbreakable ? 0 : 1) + " pearls=" + pearls
+            + " fake=" + (fakeStart != null ? 1 : 0) + " blocks=" + blocks.size() + " fmt=5 wear=" + (unbreakable ? 0 : 1) + " pearls=" + pearls
             + " res=" + (health ? 0 : 1) + " armor=" + (armor ? 20 : 0) + " prot=" + (armor ? prot : 0) + " ff=" + (armor ? feather : 0)
-            + " sharp=" + sharp + " eseed=" + enchSeed);
+            + " sharp=" + sharp + " eseed=" + enchSeed + " potions=" + potions);
         for (int[] b : blocks) log("BLOCK " + b[0] + " " + b[1] + " " + b[2]);
     }
 
@@ -358,7 +363,7 @@ public final class Rig {
             + " lcc=" + get(Minecraft.getMinecraft(), Minecraft.class, "leftClickCounter")
             + " sd=" + wear(p) + " held=" + p.inventory.currentItem
             + " cpi=" + get(Minecraft.getMinecraft().playerController, net.minecraft.client.multiplayer.PlayerControllerMP.class, "currentPlayerItem")
-            + " pc=" + count(p) + " pe=" + clientPearls(Minecraft.getMinecraft())
+            + " pc=" + count(p) + " pots=" + pots(p) + " pe=" + clientPearls(Minecraft.getMinecraft())
             + " hp=" + hf(p.getHealth()) + " sat=" + hf(p.getFoodStats().getSaturationLevel());
     }
 
@@ -368,11 +373,21 @@ public final class Rig {
         return s == null ? 0 : s.stackSize;
     }
 
-    /** The pearls in flight as this client has them. */
+    /** The hotbar slots that hold a potion, one bit each. */
+    static int pots(EntityPlayer p) {
+        int m = 0;
+        for (int i = 0; i < 9; i++) {
+            ItemStack s = p.inventory.mainInventory[i];
+            if (s != null && s.getItem() == Items.potionitem && s.stackSize > 0) m |= 1 << i;
+        }
+        return m;
+    }
+
+    /** The pearls and potions in flight as this client has them. */
     static String clientPearls(Minecraft mc) {
         StringBuilder sb = new StringBuilder("[");
         for (Object o : mc.theWorld.loadedEntityList) {
-            if (!(o instanceof EntityEnderPearl)) continue;
+            if (!(o instanceof EntityEnderPearl) && !(o instanceof net.minecraft.entity.projectile.EntityPotion)) continue;
             Entity e = (Entity) o;
             sb.append(e.getEntityId()).append(':').append(hd(e.posX)).append(':').append(hd(e.posY)).append(':').append(hd(e.posZ))
                 .append(':').append(hd(e.motionX)).append(':').append(hd(e.motionY)).append(':').append(hd(e.motionZ))
@@ -591,6 +606,7 @@ public final class Rig {
         }
         p.inventory.mainInventory[0] = sword;
         if (pearls > 0) p.inventory.mainInventory[1] = new ItemStack(Items.ender_pearl, pearls);
+        for (int i = 0; i < potions; i++) p.inventory.mainInventory[2 + i] = new ItemStack(Items.potionitem, 1, HEAL_II);
         p.inventory.currentItem = 0;
         p.setHealth(p.getMaxHealth());
     }
@@ -643,7 +659,7 @@ public final class Rig {
             + " fall=" + hf(p.fallDistance) + " hp=" + hf(p.getHealth()) + " food=" + p.getFoodStats().getFoodLevel()
             + " swing=" + (p.isSwingInProgress ? 1 : 0) + " swp=" + p.swingProgressInt
             + " use=" + (p.isUsingItem() ? 1 : 0) + " eat=" + (p.isEating() ? 1 : 0) + " blk=" + (p.isBlocking() ? 1 : 0)
-            + " sd=" + wear(p) + " held=" + p.inventory.currentItem + " pc=" + count(p)
+            + " sd=" + wear(p) + " held=" + p.inventory.currentItem + " pc=" + count(p) + " pots=" + pots(p)
             + " ad=" + hd(p.getEntityAttribute(SharedMonsterAttributes.attackDamage).getAttributeValue())
             + " rit=" + get(p, EntityPlayerMP.class, "respawnInvulnerabilityTicks")
             + " sat=" + hf(p.getFoodStats().getSaturationLevel())
@@ -657,10 +673,10 @@ public final class Rig {
             + tracker(p);
     }
 
-    /** A pearl in flight on the server, with its entity tracker entry. */
-    static String pearl(EntityEnderPearl e) {
+    /** A pearl or a potion in flight on the server, with its entity tracker entry. */
+    static String pearl(net.minecraft.entity.projectile.EntityThrowable e) {
         Entity th = e.getThrower();
-        String s = "id=" + e.getEntityId() + " th=" + (th == fake ? 1 : 0)
+        String s = "id=" + e.getEntityId() + " th=" + (th == fake ? 1 : 0) + " kind=" + (e instanceof EntityEnderPearl ? 0 : 1)
             + " x=" + hd(e.posX) + " y=" + hd(e.posY) + " z=" + hd(e.posZ)
             + " mx=" + hd(e.motionX) + " my=" + hd(e.motionY) + " mz=" + hd(e.motionZ)
             + " yaw=" + hf(e.rotationYaw) + " pitch=" + hf(e.rotationPitch)
@@ -692,7 +708,7 @@ public final class Rig {
             if (real == null || finished) return;
             WorldServer w = server.worldServerForDimension(0);
             for (Object o : new ArrayList<Object>(w.loadedEntityList)) {
-                if (!(o instanceof EntityPlayer) && !(o instanceof EntityEnderPearl)) ((Entity) o).setDead();
+                if (!(o instanceof EntityPlayer) && !(o instanceof EntityEnderPearl) && !(o instanceof net.minecraft.entity.projectile.EntityPotion)) ((Entity) o).setDead();
             }
             if (!recording) {
                 // A client reports in every tick; do the same for the scripted player.
@@ -801,7 +817,7 @@ public final class Rig {
             log("ST " + stick + " " + sp(real));
             if (fake != null) log("ST " + stick + " " + sp(fake));
             for (Object o : real.worldObj.loadedEntityList) {
-                if (o instanceof EntityEnderPearl) log("SE " + stick + " " + pearl((EntityEnderPearl) o));
+                if (o instanceof EntityEnderPearl || o instanceof net.minecraft.entity.projectile.EntityPotion) log("SE " + stick + " " + pearl((net.minecraft.entity.projectile.EntityThrowable) o));
             }
         } catch (Throwable t) {
             t.printStackTrace();

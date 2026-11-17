@@ -171,7 +171,7 @@ fn a_pearl_thrown_straight_up_does_not_put_its_thrower_into_the_floor() {
         IDLE
     });
     assert_eq!(e.m.s.throws, [1, 0]);
-    assert!(e.m.s.pearls.is_empty());
+    assert!(e.m.s.thrown.is_empty());
     assert!(lowest >= floor, "lowest {lowest}, floor {floor}");
 }
 
