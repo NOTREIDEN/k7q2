@@ -509,16 +509,21 @@ def hud(img, seg, t, fonts, inset_box):
         wide.append(("PERLA", seg.col(0, "pearls")[max(tick - 7, 0)] > seg.col(0, "pearls")[tick]))
     if seg.real:
         wide.append(("POCIÓN", seg.threw(0, tick, 7)))
+    # What is drunk, eaten and fetched has a row of its own, above the
+    # others and beside the movement keys.
+    upper = []
     if seg.real and seg.timed:
-        wide.append(("BEBER", seg.col(0, "consuming")[tick] == 1))
+        upper.append(("BEBER", seg.col(0, "consuming")[tick] == 1))
     if seg.real and seg.hungry:
-        wide.append(("COMER", seg.col(0, "consuming")[tick] == 2))
+        upper.append(("COMER", seg.col(0, "consuming")[tick] == 2))
     if seg.real and seg.stocked:
-        wide.append(("INVENT.", seg.col(0, "inv_open")[tick] > 0))
-    for i, (label, on) in enumerate(wide):
-        bx, by = x0 + i * 112, y0 + 2 * (sz + 6)
-        d.rectangle([bx, by, bx + 106, by + 40], fill=(255, 255, 255, 215) if on else (0, 0, 0, 110))
-        d.text((bx + 53, by + 20), label, font=small, fill=(20, 20, 20) if on else (235, 235, 235), anchor="mm")
+        upper.append(("INVENT.", seg.col(0, "inv_open")[tick] > 0))
+    rows = [(wide, 0, y0 + 2 * (sz + 6)), (upper, 3, y0 + sz + 16)]
+    for row, first, by in rows:
+        for i, (label, on) in enumerate(row):
+            bx = x0 + (first + i) * 112
+            d.rectangle([bx, by, bx + 106, by + 40], fill=(255, 255, 255, 215) if on else (0, 0, 0, 110))
+            d.text((bx + 53, by + 20), label, font=small, fill=(20, 20, 20) if on else (235, 235, 235), anchor="mm")
     secs = tick / 20.0
     kb = ""
     if "kb_kind" in seg.gi and seg.g("kb_kind") > 0:
@@ -552,7 +557,8 @@ def frames(seg, size, fps, ss, only=None):
     half, floor_y = seg.g("arena_half"), seg.g("floor_y")
     fonts = (font(46), font(30), font(21))
     iw, ih = int(w * 0.31), int(h * 0.31)
-    ibox = (w - iw - 24, h - ih - 24, w - 24, h - 24)
+    # Above the line of text at the bottom.
+    ibox = (w - iw - 24, h - ih - 56, w - 24, h - 56)
     focus, theta = None, None
     for k in range(int((seg.T - 1) * fps / 20)):
         t = int(k * 20 / fps)
