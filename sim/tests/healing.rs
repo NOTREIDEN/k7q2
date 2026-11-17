@@ -268,6 +268,60 @@ fn the_part_of_a_potion_that_missed_its_thrower_costs_more() {
     assert!((plain - strict - 2.0 * 2.0 / hh).abs() < 1e-3, "{plain} {strict}");
 }
 
+/// Every tick the crosshair is off the opponent for a potion costs the
+/// thrower, ten ticks before the throw and ten after it at most.
+#[test]
+fn looking_away_for_a_potion_costs_by_the_tick() {
+    let quick = |w: f32| {
+        let mut p = params();
+        p.w_pot_time = w;
+        let mut e = Env::new(Mode::SelfPlay, p, 1);
+        run(&mut e, 5, |_, _| IDLE);
+        let (a, _) = run(&mut e, 1, |_, _| with(6, FLICK_DOWN));
+        let (b, _) = run(&mut e, 1, |_, _| {
+            let mut a = with(9, 1);
+            a[6] = FLICK_UP;
+            a
+        });
+        let (c, _) = run(&mut e, 30, |_, _| IDLE);
+        assert_eq!((e.episode().potions[0], e.episode().pot_away[0]), (1.0, 1.0));
+        a + b + c
+    };
+    assert!((quick(0.0) - quick(0.1) - 0.1).abs() < 1e-4, "{} {}", quick(0.0), quick(0.1));
+    // Fifteen ticks of looking at the ground, the throw, and the ground
+    // again for as long: ten ticks are counted on each side.
+    let slow = |w: f32| {
+        let mut p = params();
+        p.w_pot_time = w;
+        let mut e = Env::new(Mode::SelfPlay, p, 1);
+        run(&mut e, 5, |_, _| IDLE);
+        let (a, _) = run(&mut e, 1, |_, _| with(6, FLICK_DOWN));
+        let (b, _) = run(&mut e, 15, |_, _| IDLE);
+        let (c, _) = run(&mut e, 1, |_, _| with(9, 1));
+        let (d, _) = run(&mut e, 15, |_, _| IDLE);
+        let (f, _) = run(&mut e, 1, |_, _| with(6, FLICK_UP));
+        let (g, _) = run(&mut e, 30, |_, _| IDLE);
+        assert_eq!(e.episode().potions[0], 1.0);
+        a + b + c + d + f + g
+    };
+    assert!((slow(0.0) - slow(0.1) - 2.0).abs() < 1e-4, "{} {}", slow(0.0), slow(0.1));
+    // A second potion right after the first: the ticks before it were
+    // counted with the first, and ten more are counted after it.
+    let two = |w: f32| {
+        let mut p = params();
+        p.w_pot_time = w;
+        let mut e = Env::new(Mode::SelfPlay, p, 1);
+        run(&mut e, 5, |_, _| IDLE);
+        let (a, _) = run(&mut e, 1, |_, _| with(6, FLICK_DOWN));
+        let (b, _) = run(&mut e, 3, |_, _| IDLE);
+        let (c, _) = run(&mut e, 2, |_, _| with(9, 1));
+        let (d, _) = run(&mut e, 40, |_, _| IDLE);
+        assert_eq!(e.episode().potions[0], 2.0);
+        a + b + c + d
+    };
+    assert!((two(0.0) - two(0.1) - 0.1 * (4.0 + 1.0 + 10.0)).abs() < 1e-4, "{} {}", two(0.0), two(0.1));
+}
+
 #[test]
 fn the_opponent_sees_a_potion_coming_and_what_it_would_give() {
     let mut p = params();

@@ -4,8 +4,9 @@ with armour, real health and healing potions.
     python train.py --minutes 30 --out runs/stage1
 
 Half of the duels are self-play, half are against scripted bots of mixed
-strength. Checkpoints are written every few minutes and can be resumed with
---init."""
+strength; with --n-league some more are against earlier versions of the
+agent (see pvpai/league.py). Checkpoints are written every few minutes and
+can be resumed with --init."""
 import argparse
 import json
 import os
@@ -15,6 +16,7 @@ import numpy as np
 import torch
 
 from pvpai.env import BOT, SELF_PLAY, VecEnv
+from pvpai.league import League
 from pvpai.model import Policy, load_policy, restart_choices
 from pvpai.ppo import RunningScale, Stream, ppo_update
 
@@ -40,6 +42,10 @@ def main():
     ap.add_argument("--minibatches", type=int, default=4)
     ap.add_argument("--epochs", type=int, default=3)
     ap.add_argument("--param", action="append", default=[], help="name=value for the simulator")
+    ap.add_argument("--n-league", type=int, default=0, help="duels against earlier versions of the agent")
+    ap.add_argument("--league-dir", default=None, help="folder with the weights of those versions")
+    ap.add_argument("--league-groups", type=int, default=4, help="versions played at the same time")
+    ap.add_argument("--league-swap", type=int, default=40, help="iterations until the versions played are drawn again")
     ap.add_argument("--worker-id", type=int, default=0, help="process number inside one machine")
     ap.add_argument("--workers", type=int, default=1, help="processes on this machine that share weights")
     ap.add_argument("--sync-dir", default=None, help="folder the processes of this machine share weights through")
@@ -72,6 +78,12 @@ def main():
         envs["sp"] = VecEnv(args.n_selfplay, SELF_PLAY, args.seed * 1000 + 1)
     if args.n_bot > 0:
         envs["bot"] = VecEnv(args.n_bot, BOT, args.seed * 1000 + 2)
+    # Against earlier versions the agent is the first player and the only
+    # one that learns.
+    groups = args.league_groups if args.n_league > 0 else 0
+    per_group = max(args.n_league // max(groups, 1), 1)
+    for gi in range(groups):
+        envs[f"lg{gi}"] = VecEnv(per_group, SELF_PLAY, args.seed * 1000 + 10 + gi)
     any_env = next(iter(envs.values()))
     for e in envs.values():
         e.set_param("bot_level_min", args.bot_min)
@@ -138,12 +150,22 @@ def main():
         streams["sp1"] = mk("sp1", args.n_selfplay)
     if "bot" in envs:
         streams["bot"] = mk("bot", args.n_bot)
+    league = None
+    if groups:
+        league = League(args.league_dir, (any_env.obs_dim, any_env.priv_dim, any_env.act_dims), groups, per_group, args.seed)
+        league.refresh(policy)
+        league.assign()
+        for gi in range(groups):
+            streams[f"lg{gi}"] = mk(f"lg{gi}", per_group)
+        if args.worker_id == 0:
+            print(f"start: league of {len(league.members)} earlier versions:", " ".join(n for n, _ in league.table()), flush=True)
 
     # Player 0 of every duel is the first to act.
     acts = {}
     for k, e in envs.items():
         obs, priv = e.reset()
-        acts[k if k == "bot" else "sp0"] = streams[k if k == "bot" else "sp0"].choose(policy, obs, priv)
+        k = "sp0" if k == "sp" else k
+        acts[k] = streams[k].choose(policy, obs, priv)
 
     def machine_samples():
         return local.total_samples(total_samples) if local is not None else total_samples
@@ -179,6 +201,13 @@ def main():
                 e.step(acts["bot"])
                 streams["bot"].close(policy, e.rew, e.done, e.fobs, e.fpriv, g, vsc)
                 acts["bot"] = streams["bot"].choose(policy, e.obs, e.priv)
+            for gi in range(groups):
+                k = f"lg{gi}"
+                e = envs[k]
+                e.step(acts[k])  # the agent ticks; the earlier version is next
+                e.step(league.act(gi, e.obs, e.priv, e.done))  # it ticks; the agent is next
+                streams[k].close(policy, e.rew, e.done, e.fobs, e.fpriv, g, vsc)
+                acts[k] = streams[k].choose(policy, e.obs, e.priv)
         t1 = time.time()
         info = ppo_update(policy, opt, list(streams.values()), vs, cfg)
         t2 = time.time()
@@ -213,6 +242,9 @@ def main():
                    sps=info["samples"] / (t2 - t0), rollout_s=t1 - t0, update_s=t2 - t1)
         for k, e in envs.items():
             st = e.take_stats()
+            if k.startswith("lg"):
+                league.result(int(k[2:]), st["deaths1"], st["deaths0"])
+                k = "lg"
             acc = window.setdefault(k, {})
             for name, v in st.items():
                 acc[name] = acc.get(name, 0.0) + v
@@ -300,11 +332,17 @@ def main():
                         inv_hits_taken=st["inv_hit0"] / max(st["inv_opens0"], 1.0),
                     )
             window.clear()
+            if league is not None:
+                row["league"] = {name: round(beaten, 3) for name, beaten in league.table()}
+        if league is not None and iters % args.league_swap == 0:
+            league.refresh(policy)
+            league.assign()
         log.write(json.dumps(row) + "\n")
         log.flush()
         if iters % args.log_every == 0 or iters == 1:
             b = row.get("bot", {})
             s = row.get("sp", {})
+            q = row.get("lg", {})
             print(f"it {iters:4d} {total_samples/1e6:7.2f}M {row['sps']:6.0f}/s ent {info['entropy']:.2f} "
                   f"kl {info['kl']:.4f} r {info['mean_step_reward']:+.4f} | bot: hit/min {b.get('hits_per_min', 0):5.1f} "
                   f"taken {b.get('taken_per_min', 0):5.1f} on-target {b.get('on_target', 0):.2f} aim {b.get('aim_err_deg', 0):5.1f} "
@@ -329,7 +367,12 @@ def main():
                   f"inv-hit {b.get('inv_hits_taken', 0):.2f} "
                   f"| self: hit/min {s.get('hits_per_min', 0):5.1f} combo {s.get('max_combo', 0):.1f} "
                   f"aim {s.get('aim_err_deg', 0):5.1f} pot {s.get('potions_per_min', 0):.1f} "
-                  f"heal {s.get('potion_heal', 0):.1f}", flush=True)
+                  f"heal {s.get('potion_heal', 0):.1f}"
+                  + (f" | league: win {q.get('win_frac', 0):.2f} hit/min {q.get('hits_per_min', 0):5.1f} "
+                     f"taken {q.get('taken_per_min', 0):5.1f} pearl {q.get('pearls_per_min', 0):.1f} "
+                     f"pot {q.get('potions_per_min', 0):.1f} full {q.get('potion_perfect', 0):.2f} ["
+                     + ", ".join(f"{name} {beaten:.2f}" for name, beaten in row.get("league", {}).items()) + "]"
+                     if league is not None else ""), flush=True)
             for name, whats in sync_log.items():
                 print(f"sync between {name}: {len(whats)} rounds, last: {whats[-1]}; together "
                       f"{local.total_samples(total_samples)/1e6:.1f}M samples", flush=True)

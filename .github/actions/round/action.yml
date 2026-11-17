@@ -17,7 +17,8 @@ inputs:
   snapshot-every:
     description: >
       On machine 0, push the average of the round to the branch "weights"
-      every this many rounds (0 for never)
+      every this many rounds (0 for never), and on every machine fetch the
+      pool of earlier versions from it
     default: "0"
 runs:
   using: composite
@@ -117,8 +118,32 @@ runs:
         } > share/snap/status.txt
         blob=$(git hash-object -w share/snap/latest.pt)
         note=$(git hash-object -w share/snap/status.txt)
-        tree=$(printf '100644 blob %s\tlatest.pt\n100644 blob %s\tstatus.txt\n' "$blob" "$note" | git mktree)
+        # The earlier versions the league plays against travel in the same
+        # commit, in the folder "pool"; python/pool.py says which ones stay
+        # and whether this network joins them. No such branch yet is fine,
+        # but when the fetch fails the branch is left as it is this time
+        # instead of losing the pool.
+        old=
+        if git fetch -q --depth 1 origin weights 2>/dev/null; then
+          old=$(git ls-tree FETCH_HEAD pool/)
+        else
+          rc=0
+          git ls-remote --exit-code --heads origin weights >/dev/null 2>&1 || rc=$?
+          [ "$rc" -eq 2 ] || exit 0
+        fi
+        pool=$(printf '%s\n' "$old" | (cd python && python pool.py --latest ../share/snap/latest.pt --blob "$blob") | git mktree)
+        tree=$(printf '100644 blob %s\tlatest.pt\n100644 blob %s\tstatus.txt\n040000 tree %s\tpool\n' "$blob" "$note" "$pool" | git mktree)
         commit=$(git -c user.name='github-actions[bot]' \
           -c user.email='41898282+github-actions[bot]@users.noreply.github.com' \
           commit-tree "$tree" -m "Weights of run $GITHUB_RUN_ID after round $ROUND")
         git push --force origin "$commit:refs/heads/weights"
+    - if: steps.wait.outputs.round != '' && inputs.snapshot-every != '0'
+      shell: bash
+      continue-on-error: true
+      env:
+        ROUND: ${{ steps.wait.outputs.round }}
+        EVERY: ${{ inputs.snapshot-every }}
+      run: |
+        # Every machine takes the pool as the branch now has it.
+        [ $(( ROUND % EVERY )) -eq 0 ] || exit 0
+        bash "$GITHUB_ACTION_PATH/pool.sh"

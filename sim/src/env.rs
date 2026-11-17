@@ -52,6 +52,9 @@ pub const PITCH_BINS: [i32; 29] = [
 pub const OBS_DIM: usize = 151;
 /// How many of the points a potion did not offer its thrower `w_miss` counts.
 pub const MISS_POINTS: f32 = 2.0;
+/// How many ticks of looking away `w_pot_time` counts before a potion is
+/// thrown, and as many after it.
+pub const POT_TIME_TICKS: i32 = 10;
 pub const PRIV_DIM: usize = 71;
 pub const STATS_DIM: usize = 86;
 /// Floats per player and in total written by `Env::write_view`.
@@ -220,6 +223,14 @@ pub struct Params {
     /// knocked out of reach cost more than the potion. Nothing can be
     /// earned with it: the best a throw can do is to lose none.
     pub w_miss: f32,
+    /// Cost of every tick the crosshair is off the opponent for a potion,
+    /// in plain hits: the ticks in a row right before the throw and the
+    /// ticks after it until the crosshair is back, `POT_TIME_TICKS` of each
+    /// at most, so that a potion thrown on the run costs a fixed two
+    /// seconds' worth and never more than it gives. A throw that takes one
+    /// tick of looking down costs a tenth of one that takes ten. Nothing
+    /// can be earned with it either.
+    pub w_pot_time: f32,
     /// Scales how readily scripted bots heal themselves. 0 turns it off.
     pub bot_potion: f64,
     /// Running, jumping and fighting use up food.
@@ -366,6 +377,7 @@ impl Default for Params {
             w_heal: 1.0,
             w_waste: 0.5,
             w_miss: 0.0,
+            w_pot_time: 0.0,
             bot_potion: 1.0,
             hunger: false,
             hurt_who: 0,
@@ -509,6 +521,7 @@ impl Params {
             108 => self.lesson_dist[1] = v,
             109 => self.drink_window_s = v,
             110 => self.w_miss = v as f32,
+            111 => self.w_pot_time = v as f32,
             _ => return false,
         }
         true
@@ -1796,7 +1809,9 @@ impl Env {
             // The ticks spent looking away to aim it, unless they were
             // already counted after the potion before.
             if self.pot_back[id] {
-                self.ep.pot_away[id] += self.off_run[id].min(10) as f64;
+                let before = self.off_run[id].min(POT_TIME_TICKS);
+                self.ep.pot_away[id] += before as f64;
+                self.rew_acc[id] -= p.w_pot_time * before as f32;
             }
             self.pot_since[id] = 0;
             self.pot_back[id] = false;
@@ -1805,6 +1820,9 @@ impl Env {
             if off && self.pot_since[id] < 40 {
                 self.ep.pot_away[id] += 1.0;
                 self.ep.pot_after[id] += 1.0;
+                if self.pot_since[id] < POT_TIME_TICKS {
+                    self.rew_acc[id] -= p.w_pot_time;
+                }
             } else {
                 self.pot_back[id] = true;
             }

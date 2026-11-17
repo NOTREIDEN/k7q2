@@ -2,7 +2,9 @@
 it looks at the throw, how fast it is moving, whether the potion breaks on
 the ground or is caught in the air (a potion that has flown five ticks
 breaks on its own thrower, which gets all eight points), what it got out of
-it and how long its crosshair takes to be back on the opponent.
+it and how long its crosshair takes to be back on the opponent; and for
+every time it heals, with one potion or several in a row, how long its
+crosshair is off the opponent before, between and after the throws.
 
     python potion_report.py runs/stage1/latest.pt 4
     python potion_report.py latest.pt 4 speed_end_prob=1 speed_left_max_s=-1 speed_who=1
@@ -91,6 +93,49 @@ def throws(views):
     return np.array(rows, np.float64)
 
 
+def sessions(views):
+    """One row per run of potions thrown within a second of each other:
+    how many, the ticks the crosshair was off the opponent before the
+    first throw, between the first and the last and after the last, the
+    health at the first throw, the ticks since the agent was last hit and
+    the hits it took from looking away to looking back."""
+    n_p = len(VIEW_PLAYER)
+    ix = {k: i for i, k in enumerate(VIEW_PLAYER)}
+    ticks, n = views.shape[:2]
+    a, b = views[:, :, :n_p], views[:, :, n_p:2 * n_p]
+
+    def off(t, i):
+        dx = b[t, i, ix["x"]] - a[t, i, ix["x"]]
+        dy = (b[t, i, ix["y"]] + 0.9) - (a[t, i, ix["y"]] + 1.62)
+        dz = b[t, i, ix["z"]] - a[t, i, ix["z"]]
+        yaw = math.degrees(math.atan2(-dx, dz))
+        pitch = -math.degrees(math.atan2(dy, math.hypot(dx, dz)))
+        return math.hypot((yaw - a[t, i, ix["yaw"]] + 180) % 360 - 180, pitch - a[t, i, ix["pitch"]])
+
+    rows = []
+    for i in range(n):
+        left, hp, taken = a[:, i, ix["potions"]], a[:, i, ix["health"]], b[:, i, ix["hits"]]
+        thrown = [t for t in range(2, ticks - 60) if left[t] < left[t - 1] and hp[t] > 0]
+        k = 0
+        while k < len(thrown):
+            j = k
+            while j + 1 < len(thrown) and thrown[j + 1] - thrown[j] <= 20:
+                j += 1
+            first, last = thrown[k], thrown[j]
+            s = first
+            while s > max(first - 80, 1) and off(s, i) >= ON:
+                s -= 1
+            e = last + 1
+            while e < min(last + 60, ticks - 1) and off(e, i) >= ON:
+                e += 1
+            h = first
+            while h > max(first - 200, 1) and taken[h] == taken[h - 1]:
+                h -= 1
+            rows.append((j - k + 1, first - s, last - first, e - last, hp[first], first - h, taken[e] - taken[s]))
+            k = j + 1
+    return np.array(rows, np.float64)
+
+
 def main():
     ckpt, level = sys.argv[1], int(sys.argv[2])
     extra = {k: float(v) for k, v in (kv.split("=") for kv in sys.argv[3:])}
@@ -102,6 +147,11 @@ def main():
     print(f"  thrown at {r[:, 3].mean():.1f} health, {r[:, 2].mean():.1f} blocks from the opponent, moving at {r[:, 1].mean():.1f} m/s")
     print(f"  caught in the air {100 * r[:, 4].mean():.0f} %, the rest broke on the ground; "
           f"crosshair back on the opponent after {r[:, 7].mean():.1f} ticks (half of them within {np.median(r[:, 7]):.0f})")
+    q = sessions(views)
+    print(f"  {len(q)} times it healed, with {q[:, 0].mean():.2f} potions at {q[:, 4].mean():.1f} health, {q[:, 5].mean():.0f} ticks after it was last hit: "
+          f"crosshair off the opponent {q[:, 1].mean():.1f} ticks before the first throw, {q[:, 2].mean():.1f} between throws and "
+          f"{q[:, 3].mean():.1f} after the last, {q[:, 1:4].sum(1).mean():.1f} in all (half of them within {np.median(q[:, 1:4].sum(1)):.0f}); "
+          f"hits taken meanwhile {q[:, 6].mean():.2f}")
     print("  by where it looked (pitch, down is positive):")
     for lo, hi in ((-90, 0), (0, 10), (10, 20), (20, 35), (35, 60), (60, 91)):
         s = r[(r[:, 0] >= lo) & (r[:, 0] < hi)]

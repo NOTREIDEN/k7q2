@@ -23,7 +23,7 @@ on:
       args:
         description: Extra options for train.py
         default: >-
-          --lr 5e-4 --n-selfplay 128 --n-bot 128 --bot-min 2 --log-every 50
+          --lr 5e-4 --n-selfplay 96 --n-bot 128 --n-league 96 --bot-min 2 --log-every 50
           --param w_sprint_hit=0.3 --param w_reach_adv=0.03 --param w_combo=0.2
           --param w_close=0.06 --param close_dist=2.2
           --param kb_random=0.7 --param opp_edge_prob=0.5 --param w_damage=1
@@ -32,7 +32,7 @@ on:
           --param w_speed=5 --param w_fed=5
           --param refill_prob=0.5 --param w_stock=2 --param lesson_prob=0.3
           --param lesson_dist_min=12 --param lesson_dist_max=28
-          --param w_miss=1.5
+          --param w_miss=1.5 --param w_pot_time=0.1
       previous:
         description: Id of the run to continue from (empty starts from seed/stage1.pt)
         default: ""
@@ -120,13 +120,16 @@ jobs:
           mkdir -p "$S/out" "$S/in" "$S/dl" /dev/shm/pvp
           echo $(( $(date +%s) + (${MINUTES%.*} + 8) * 60 )) > "$S/deadline.txt"
           ls -l "$S/in"
+          # The earlier versions of the agent that part of the duels are
+          # played against.
+          bash .github/actions/round/pool.sh || true
           cd python
           for p in 0 1; do
             nohup python train.py --minutes "$MINUTES" --out "runs/p$p" --threads 2 \
               --worker-id "$p" --workers 2 --sync-dir /dev/shm/pvp \
               --machine-id "$MACHINE" --machines "$MACHINES" --machine-mode "$MODE" \
               --machine-out "$S/out" --machine-in "$S/in" --round-origin "$ORIGIN" \
-              --machine-minutes "$ROUND" --machine-wait 75 \
+              --machine-minutes "$ROUND" --machine-wait 75 --league-dir "$S/pool" \
               --init ../seed/stage1.pt $EXTRA > "$S/p$p.log" 2>&1 &
             echo $! > "$S/p$p.pid"
           done
