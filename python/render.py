@@ -21,6 +21,8 @@ GRASS_A, GRASS_B = (104, 168, 76), (92, 152, 66)
 WALL = (128, 128, 134)
 SKIN, HAIR, EYE = (226, 176, 134), (70, 46, 26), (40, 40, 60)
 SWORD = (118, 232, 220)
+PEARL = (22, 124, 108)
+PORTAL = (176, 92, 224)
 TEAM = [
     {"body": (58, 118, 224), "legs": (36, 48, 104), "ui": (96, 160, 255)},
     {"body": (214, 62, 52), "legs": (96, 40, 40), "ui": (255, 110, 96)},
@@ -111,9 +113,17 @@ def rot_x(pts, pivot, ang):
     return np.stack([d[:, 0], y, z], 1) + pivot
 
 
-def player_quads(pos, yaw, pitch, walk, amp, swing, team, hurt, block=False):
+def cube_quads(centre, size, color):
+    """World-space quads of a small cube, for a pearl in flight."""
+    c, r = np.asarray(centre, float), size / 2
+    w = box(c - r, c + r)
+    return [(w[list(idx)], np.array(n, float), shade(color, np.array(n, float), False)) for idx, n in FACES]
+
+
+def player_quads(pos, yaw, pitch, walk, amp, swing, team, hurt, block=False, pearl=False):
     """World-space quads (corners, normal, colour) of one blocky player.
-    With `block` the sword is held upright in front of the body."""
+    With `block` the sword is held upright in front of the body; with
+    `pearl` the hand holds a pearl instead of the sword."""
     cy, sy = math.cos(math.radians(yaw)), math.sin(math.radians(yaw))
 
     def to_world(p):
@@ -129,7 +139,9 @@ def player_quads(pos, yaw, pitch, walk, amp, swing, team, hurt, block=False):
     head = math.radians(max(-80.0, min(80.0, pitch)))
     arm = -leg * 0.8 - 0.35 + arm_swing
     sword = (box((-6.6, 10.5, 1), (-5.4, 12.5, 17)), (0, 22, 0), arm, [SWORD] * 6)
-    if block:
+    if pearl:
+        sword = (box((-7.6, 9.2, 0.4), (-4.4, 12.4, 3.6)), (0, 22, 0), arm, [PEARL] * 6)
+    elif block:
         arm = -1.15
         sword = (box((-5.2, 13, 7.2), (-0.8, 31, 8.4)), (0, 22, 0), 0.0, [SWORD] * 6)
     parts = [
@@ -154,7 +166,9 @@ def player_quads(pos, yaw, pitch, walk, amp, swing, team, hurt, block=False):
     return quads
 
 
-def draw_scene(img, cam, players, half, floor_y, skip=None):
+def draw_scene(img, cam, players, half, floor_y, skip=None, pearls=(), marks=()):
+    """`pearls` are positions of pearls in flight; `marks` are (position,
+    strength 0..1) of places a pearl has just put a player."""
     d = ImageDraw.Draw(img)
     w, h = img.size
     # Sky.
@@ -184,18 +198,30 @@ def draw_scene(img, cam, players, half, floor_y, skip=None):
         for iz in range(int(max(-half, cz - r)), int(min(half, cz + r))):
             if (ix + iz) % 2:
                 cam.polygon(d, np.array([(ix, floor_y, iz), (ix + 1, floor_y, iz), (ix + 1, floor_y, iz + 1), (ix, floor_y, iz + 1)], float), GRASS_B)
+    # Where a pearl has just landed: a ring on the floor that fades.
+    for pos, k in marks:
+        r = 0.55 + 0.5 * (1 - k)
+        col = tuple(int(g + (c - g) * k) for c, g in zip(PORTAL, GRASS_A))
+        ring = [(pos[0] + r * math.cos(a), floor_y + 0.012, pos[2] + r * math.sin(a)) for a in np.linspace(0, 2 * math.pi, 18)[:-1]]
+        cam.polygon(d, np.array(ring), col)
     # Soft shadows, then the players' faces from far to near.
     for i, p in enumerate(players):
         if i == skip:
             continue
         ring = [(p["pos"][0] + 0.42 * math.cos(a), floor_y + 0.01, p["pos"][2] + 0.42 * math.sin(a)) for a in np.linspace(0, 2 * math.pi, 14)[:-1]]
         cam.polygon(d, np.array(ring), (70, 118, 54))
+    for q in pearls:
+        ring = [(q[0] + 0.16 * math.cos(a), floor_y + 0.011, q[2] + 0.16 * math.sin(a)) for a in np.linspace(0, 2 * math.pi, 10)[:-1]]
+        cam.polygon(d, np.array(ring), (70, 118, 54))
     quads = []
     for i, p in enumerate(players):
         if i == skip:
             continue
         quads += player_quads(p["pos"], p["yaw"], p["pitch"], p["walk"], p["amp"], p["swing"], TEAM[i], p["hurt"],
-                              p.get("block", False))
+                              p.get("block", False), p.get("pearl", False))
+    for q in pearls:
+        # Drawn larger than the quarter block it is, so it can be followed.
+        quads += cube_quads(q, 0.34, PEARL)
     order = []
     for corners, n, col in quads:
         centre = corners.mean(0)
@@ -221,6 +247,9 @@ class Segment:
         self.T = len(self.v)
         pos = np.array([[self.col(p, "x"), self.col(p, "z")] for p in (0, 1)])  # [2, 2, T]
         step = np.hypot(np.diff(pos[:, 0], prepend=pos[:, 0, :1]), np.diff(pos[:, 1], prepend=pos[:, 1, :1]))
+        # A step of more than three blocks is a pearl landing, not a walk.
+        self.jump = step > 3.0
+        step = np.where(self.jump, 0.0, step)
         self.dist = np.cumsum(step, 1)
         self.speed = step
 
@@ -235,10 +264,13 @@ class Segment:
         t1 = min(t + 1, self.T - 1)
         lerp = lambda n: float(self.col(p, n)[t] * (1 - a) + self.col(p, n)[t1] * a)
         if seen_by is None:
-            pos = np.array([lerp("x"), lerp("y"), lerp("z")])
+            # Moved by a pearl: there one moment, here the next.
+            pos = np.array([lerp("x"), lerp("y"), lerp("z")]) if not self.jump[p, t1] else \
+                np.array([float(self.col(p, n)[t1 if a >= 0.5 else t]) for n in ("x", "y", "z")])
         else:
-            q = lambda n: float(self.col(seen_by, n)[t] * (1 - a) + self.col(seen_by, n)[t1] * a)
-            pos = np.array([q("seen_x"), q("seen_y"), q("seen_z")])
+            q0 = np.array([float(self.col(seen_by, n)[t]) for n in ("seen_x", "seen_y", "seen_z")])
+            q1 = np.array([float(self.col(seen_by, n)[t1]) for n in ("seen_x", "seen_y", "seen_z")])
+            pos = q0 * (1 - a) + q1 * a if np.hypot(q1[0] - q0[0], q1[2] - q0[2]) <= 3.0 else (q1 if a >= 0.5 else q0)
         since = float(self.col(p, "ticks_since_swing")[t1]) + a - 1.0
         return {
             "pos": pos, "yaw": lerp("yaw"), "pitch": lerp("pitch"),
@@ -248,7 +280,37 @@ class Segment:
             "hurt": self.col(p, "hurt_time")[t1] > 0,
             # Shown blocking when the server has the player blocking, which is what others see.
             "block": "blocking" in self.pi and self.col(p, "blocking")[t1] > 0,
+            "pearl": "held" in self.pi and self.col(p, "held")[t1] == 1,
         }
+
+    def pearls(self, t, a):
+        """Positions of the pearls in flight between ticks t and t+1."""
+        out = []
+        if "pearl_on" not in self.pi:
+            return out
+        t1 = min(t + 1, self.T - 1)
+        for p in (0, 1):
+            at = lambda k: np.array([float(self.col(p, n)[k]) for n in ("pearl_x", "pearl_y", "pearl_z")])
+            on0, on1 = self.col(p, "pearl_on")[t] > 0, self.col(p, "pearl_on")[t1] > 0
+            if on0 and on1 and np.linalg.norm(at(t1) - at(t)) < 2.5:
+                out.append(at(t) * (1 - a) + at(t1) * a)
+            elif on0 and a < 0.5:
+                out.append(at(t))
+            elif on1 and a >= 0.5:
+                out.append(at(t1))
+        return out
+
+    def marks(self, t, a, ticks=12):
+        """Places a pearl put a player within the last `ticks` ticks, with
+        how fresh each is (1 just now, 0 gone)."""
+        out = []
+        for p in (0, 1):
+            for k in range(max(1, t - ticks + 1), min(t + 1, self.T - 1) + 1):
+                if self.jump[p, k]:
+                    age = (t + a) - (k - 0.5)
+                    if 0 <= age < ticks:
+                        out.append((np.array([float(self.col(p, n)[k]) for n in ("x", "y", "z")]), 1 - age / ticks))
+        return out
 
 
 def text(d, xy, s, f, fill, anchor="la"):
@@ -294,7 +356,9 @@ def hud(img, seg, t, fonts, inset_box):
         text(d, (x, 22), seg.names[p], mid, TEAM[p]["ui"], anchor)
         text(d, (x, 60), f"Golpes: {hits}", mid, (255, 255, 255), anchor)
         text(d, (x, 98), f"Con sprint: {100 * sprint // max(hits, 1)} %   CPS: {cps:.1f}", small, (225, 225, 225), anchor)
-        text(d, (x, 128), f"Ping: {seg.g('ping' + str(p)):.0f} ms", small, (225, 225, 225), anchor)
+        has_pearls = "pearls" in seg.pi and seg.col(p, "pearls")[0] > 0
+        text(d, (x, 128), f"Ping: {seg.g('ping' + str(p)):.0f} ms" + (f"   Perlas: {int(seg.col(p, 'pearls')[tick])}" if has_pearls else ""),
+             small, (225, 225, 225), anchor)
         if combo >= 3:
             text(d, (w // 2, 30 + 64 * p), f"COMBO x{combo}", big, TEAM[p]["ui"], "ma")
     # Keys of the first player.
@@ -309,16 +373,21 @@ def hud(img, seg, t, fonts, inset_box):
     wide = [("SALTO", k("jump") > 0), ("SPRINT", seg.col(0, "sprinting")[tick] > 0), ("CLIC", k("attack") > 0)]
     if "using" in seg.pi:
         wide.append(("BLOQ", k("using") > 0))
+    if "pearls" in seg.pi and seg.col(0, "pearls")[0] > 0:
+        # Lit for a third of a second after a throw, which itself takes one tick.
+        wide.append(("PERLA", seg.col(0, "pearls")[max(tick - 7, 0)] > seg.col(0, "pearls")[tick]))
     for i, (label, on) in enumerate(wide):
-        bx, by = x0 + i * 122, y0 + 2 * (sz + 6)
-        d.rectangle([bx, by, bx + 116, by + 40], fill=(255, 255, 255, 215) if on else (0, 0, 0, 110))
-        d.text((bx + 58, by + 20), label, font=small, fill=(20, 20, 20) if on else (235, 235, 235), anchor="mm")
+        bx, by = x0 + i * 112, y0 + 2 * (sz + 6)
+        d.rectangle([bx, by, bx + 106, by + 40], fill=(255, 255, 255, 215) if on else (0, 0, 0, 110))
+        d.text((bx + 53, by + 20), label, font=small, fill=(20, 20, 20) if on else (235, 235, 235), anchor="mm")
     secs = tick / 20.0
     kb = ""
     if "kb_kind" in seg.gi and seg.g("kb_kind") > 0:
         kb = f", KB de servidor {seg.g('kb_h'):.2f} / {seg.g('kb_v'):.2f}"
         if seg.g("hit_delay") != 20:
             kb += f", hit delay {seg.g('hit_delay'):.0f}"
+    if "pearl_cd_s" in seg.gi and seg.col(0, "pearls")[0] + seg.col(1, "pearls")[0] > 0:
+        kb += f", perlas cada {seg.g('pearl_cd_s'):.0f} s"
     text(d, (w // 2, h - 40), f"{int(secs) // 60:02d}:{int(secs) % 60:02d}   Simulador de 1.8.9, Speed II, vida infinita{kb}",
          small, (255, 255, 255), "ma")
     x1, y1, x2, y2 = inset_box
@@ -363,14 +432,16 @@ def frames(seg, size, fps, ss, only=None):
         if only is not None and k != only:
             continue
         img = Image.new("RGB", (w * ss, h * ss))
-        draw_scene(img, Camera(cpos, focus, 52, w * ss, h * ss), pl, half, floor_y)
+        flying, marks = seg.pearls(t, a), seg.marks(t, a)
+        draw_scene(img, Camera(cpos, focus, 52, w * ss, h * ss), pl, half, floor_y, pearls=flying, marks=marks)
         if ss > 1:
             img = img.resize((w, h), Image.BOX)
         # What the first player sees.
         eye = pl[0]["pos"] + np.array([0, 1.62, 0])
         seen = [pl[0], dict(pl[1], pos=seg.player(1, t, a, seen_by=0)["pos"])]
         inset = Image.new("RGB", (iw * ss, ih * ss))
-        draw_scene(inset, Camera(eye, eye + look(pl[0]["yaw"], pl[0]["pitch"]), 70, iw * ss, ih * ss), seen, half, floor_y, skip=0)
+        draw_scene(inset, Camera(eye, eye + look(pl[0]["yaw"], pl[0]["pitch"]), 70, iw * ss, ih * ss), seen, half, floor_y, skip=0,
+                   pearls=flying, marks=marks)
         if ss > 1:
             inset = inset.resize((iw, ih), Image.BOX)
         img.paste(inset, ibox[:2])
