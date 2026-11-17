@@ -106,6 +106,14 @@ impl Match {
     /// that have reached it, and return its index. The client has not
     /// ticked yet; call `client_tick` with its input.
     pub fn advance(&mut self) -> usize {
+        self.advance_seen(|_, _, _, _| {})
+    }
+
+    /// `advance`, with every packet a client is handed shown to `seen`
+    /// together with that client, once before the client handles it
+    /// (false) and once after (true).
+    #[inline]
+    pub fn advance_seen(&mut self, mut seen: impl FnMut(usize, &S2C, &Client, bool)) -> usize {
         loop {
             let id = if self.next_client[1] < self.next_client[0] { 1 } else { 0 };
             if self.next_server <= self.next_client[id] {
@@ -116,7 +124,9 @@ impl Match {
             while let Some(at) = self.s2c[id].peek_time().filter(|&a| a <= t) {
                 let p = self.s2c[id].pop_ready(t).unwrap();
                 self.out_c.clear();
+                seen(id, &p, &self.c[id], false);
                 self.c[id].handle(&self.world, p, &mut self.out_c);
+                seen(id, &p, &self.c[id], true);
                 // A handler's own packets leave when the packet is handled,
                 // which is the frame it arrived in, not the next tick.
                 for k in 0..self.out_c.len() {

@@ -12,8 +12,8 @@ import java.util.Random;
 /**
  * Plays back the duels the simulator wrote with
  * {@code cargo run --release --example agent_dump -- FILE} through this
- * agent, and compares what it shows the policy and the keys it presses
- * with the simulator's, number by number:
+ * agent, and compares the counts it keeps, what it shows the policy and
+ * the keys it presses with the simulator's, number by number:
  * {@code java pvpai.core.AgentCheck FILE}.
  */
 public final class AgentCheck {
@@ -115,10 +115,36 @@ public final class AgentCheck {
         }
     }
 
+    /** The counts of a view that a {@link Book} keeps. */
+    private static double[] counts(View v) {
+        double[] c = new double[13 + 7 * v.thrown.size()];
+        System.arraycopy(v.lastKb, 0, c, 0, 3);
+        c[3] = v.ticksSinceKb;
+        c[4] = v.ticksSinceHurt;
+        c[5] = v.ticksSinceSwing;
+        c[6] = v.ticksSinceAttack;
+        c[7] = v.ticksSinceMoved;
+        c[8] = v.potionsSeen;
+        c[9] = v.potionsPending;
+        c[10] = v.oTicksSinceHurt;
+        c[11] = v.oTicksSinceJump;
+        c[12] = v.thrown.size();
+        int at = 13;
+        for (View.Thrown t : v.thrown) {
+            c[at] = t.id;
+            c[at + 1] = t.mine ? 1 : 0;
+            c[at + 2] = t.age;
+            c[at + 3] = t.air;
+            System.arraycopy(t.serverSide, 0, c, at + 4, 3);
+            at += 7;
+        }
+        return c;
+    }
+
     public static void main(String[] args) throws IOException {
         byte[] raw = Files.readAllBytes(Paths.get(args[0]));
         d = ByteBuffer.wrap(raw).order(ByteOrder.LITTLE_ENDIAN).asDoubleBuffer();
-        if (n() != 5050.0 || n() != 1.0) {
+        if (n() != 5050.0 || n() != 2.0) {
             throw new IOException("not a file of duels, or of another format");
         }
         int obsDim = i(), heads = i();
@@ -127,6 +153,9 @@ public final class AgentCheck {
         }
         Random rng = new Random(1);
         Agent agent = null;
+        Book book = null;
+        int booksSame = 0, firstBook = -1;
+        double[] p3 = new double[3], said = new double[3];
         Duel duel = null;
         Blocks blocks = null;
         View view = new View();
@@ -154,9 +183,52 @@ public final class AgentCheck {
                 v(feet);
                 blocks = new Arena(duel.floorY, duel.arenaHalf, walls);
                 agent = new Agent(pingOwn, pingOther, cps, mouse, feet);
+                book = new Book(feet);
                 duels++;
             }
+            for (int left = i(); left > 0; left--) {
+                int code = i();
+                if (code == 1) {
+                    int x = i(), y = i(), z = i();
+                    book.velocity(x, y, z);
+                } else if (code == 2) {
+                    book.hurt(b());
+                } else if (code == 3) {
+                    book.moved();
+                } else if (code == 4) {
+                    v(p3);
+                    int x = i(), y = i(), z = i();
+                    book.otherTeleported(p3, x, y, z);
+                } else if (code == 9) {
+                    book.destroyed((long) n());
+                } else {
+                    long id = (long) n();
+                    int kind = code == 5 ? i() : 0;
+                    int x = i(), y = i(), z = i();
+                    if (code == 5) {
+                        book.spawned(id, kind, x, y, z);
+                    } else if (code == 6) {
+                        book.thrownVelocity(id, x, y, z);
+                    } else {
+                        v(p3);
+                        if (code == 7) {
+                            book.thrownMoved(id, x, y, z, p3);
+                        } else {
+                            book.thrownTeleported(id, x, y, z, p3);
+                        }
+                    }
+                }
+            }
             view(view);
+            double[] told = counts(view);
+            book.fill(view);
+            if (Arrays.equals(told, counts(view))) {
+                booksSame++;
+            } else if (firstBook < 0) {
+                firstBook = ticks;
+                System.out.println("tick " + ticks + ": counts " + Arrays.toString(counts(view)) + ", the simulator's " + Arrays.toString(told));
+            }
+            double[] eye = view.eye();
             int comboOwn = i(), comboOther = i();
             agent.beforeTick(view, blocks);
             agent.observe(view, blocks, duel, comboOwn, comboOther, obs);
@@ -215,11 +287,14 @@ public final class AgentCheck {
             v(feet);
             boolean consuming = b(), oppUsing = b();
             int oppItem = i();
-            boolean threw = b(), threwPotion = b();
+            boolean threw = b(), threwPotion = b(), swung = b(), attacked = b();
+            v(said);
+            float saidYaw = (float) n(), saidPitch = (float) n();
+            book.ticked(swung, attacked, threw, threwPotion, eye, said, saidYaw, saidPitch);
             agent.ticked(pressed, duel, feet, consuming, oppUsing && (oppItem == Inv.DRINK || oppItem == Inv.FOOD), threw, threwPotion);
             ticks++;
         }
-        System.out.println(ticks + " ticks of " + duels + " duels: the same keys on " + keysSame + ", all " + obsDim + " numbers shown the same on " + obsSame);
+        System.out.println(ticks + " ticks of " + duels + " duels: the same counts on " + booksSame + ", the same keys on " + keysSame + ", all " + obsDim + " numbers shown the same on " + obsSame);
         System.out.println(same + " of " + numbers + " numbers the same to the last bit, " + (numbers - close) + " further off than 0.00001; the largest difference " + worst + " (number " + worstAt + ", tick " + worstTick + ")");
         StringBuilder where = new StringBuilder();
         for (int k = 0; k < obsDim; k++) {
@@ -230,7 +305,7 @@ public final class AgentCheck {
         if (where.length() > 0) {
             System.out.println("numbers further off, and on how many ticks:" + where);
         }
-        if (keysSame != ticks || numbers != close) {
+        if (keysSame != ticks || numbers != close || booksSame != ticks) {
             System.exit(1);
         }
     }

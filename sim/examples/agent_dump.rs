@@ -5,7 +5,7 @@
 //! `cargo run --release --example agent_dump -- OUT.bin [TICKS]`.
 //!
 //! The file is a row of little-endian doubles (every number an agent
-//! handles fits one exactly). It starts with 5050, the format (1), the
+//! handles fits one exactly). It starts with 5050, the format (2), the
 //! sizes of an observation and of an action; then for each tick:
 //!
 //! - 1 and the duel if a new duel starts here, else 0. The duel: half the
@@ -13,18 +13,21 @@
 //!   health of a plain hit, the pearl cooldown, the drink window in
 //!   seconds, the two pings, the click rate, the mouse factor, and where
 //!   the player stands (see `duel`).
+//! - The packets the client was handed since its last tick that an agent's
+//!   own counts go by, how many and then each (see `packet`).
 //! - What the client holds when its packets are in and its tick is to come
 //!   (see `view`), and the two combos.
 //! - The observation, the action taken, and the keys and buttons it became.
 //! - After the tick: where the player stands, whether it is drinking or
-//!   eating, whether the other is seen to and what it holds, and whether a
-//!   pearl and a potion were thrown.
+//!   eating, whether the other is seen to and what it holds, whether a
+//!   pearl and a potion were thrown, whether it swung and whether it hit,
+//!   and the place and the view the server had been told before the tick.
 use pvpsim::agent::{Agent, Duel, ACT_DIMS, ACT_HEADS, OBS_DIM};
 use pvpsim::bot::{self, BotState};
 use pvpsim::client::{Client, ClientCfg, Input};
 use pvpsim::env::{new_duel, Mode, Params};
 use pvpsim::mth::Rng;
-use pvpsim::net::Item;
+use pvpsim::net::{Item, ThrownEv, S2C};
 use pvpsim::sim::Match;
 use pvpsim::world::World;
 use std::io::Write;
@@ -162,6 +165,77 @@ fn view(o: &mut Out, c: &Client, world: &World, ccfg: &ClientCfg) {
     }
 }
 
+/// A packet as the agent's counts need it; returns whether it is one of
+/// those. Before the client handles it: 1 a velocity for its own player
+/// (in 8000ths of a block per tick), 2 a player was hurt (1 its own, 0 the
+/// other), 3 its own player was put somewhere, 4 the other player was (where
+/// the copy was heading before, and the new place in 32nds), 5 a pearl (0)
+/// or a potion (1) appeared (its number, the kind, the place in 32nds), 6
+/// the velocity of one (number, 8000ths), 9 one is gone (number). After
+/// the client handled it: 7 one moved (number, the move in 32nds, where the
+/// copy now is), 8 one was put somewhere (number, 32nds, where the copy
+/// now is).
+fn packet(o: &mut Out, p: &S2C, c: &Client, after: bool) -> u32 {
+    let mut n = 0;
+    match *p {
+        S2C::Velocity { own: true, v } if !after => {
+            o.n(1);
+            for x in v {
+                o.n(x);
+            }
+            n = 1;
+        }
+        S2C::Hurt { own } if !after => {
+            o.n(2);
+            o.b(own);
+            n = 1;
+        }
+        S2C::PosLook { .. } if !after => {
+            o.n(3);
+            n = 1;
+        }
+        S2C::Teleport { p, .. } if !after => {
+            o.n(4);
+            o.v(c.rp.target);
+            for x in p {
+                o.n(x);
+            }
+            n = 1;
+        }
+        S2C::Destroy { ids, n: count } if !after => {
+            for id in &ids[..count as usize] {
+                o.n(9);
+                o.n(*id);
+                n += 1;
+            }
+        }
+        S2C::Thrown { id, ev } => {
+            let (code, x) = match ev {
+                ThrownEv::Spawn { p, .. } if !after => (5, p),
+                ThrownEv::Velocity(v) if !after => (6, v),
+                ThrownEv::Teleport { p, .. } if after => (8, p),
+                ThrownEv::RelMove { d, .. } | ThrownEv::LookMove { d, .. } if after => (7, d.map(|x| x as i32)),
+                ThrownEv::Look { .. } if after => (7, [0; 3]),
+                _ => return 0,
+            };
+            o.n(code);
+            o.n(id);
+            if let ThrownEv::Spawn { kind, .. } = ev {
+                o.n(kind as u8);
+            }
+            for v in x {
+                o.n(v);
+            }
+            if code == 7 || code == 8 {
+                o.v(c.thrown.iter().find(|e| e.id == id).map(|e| e.pos).unwrap_or([0.0; 3]));
+            }
+            n = 1;
+        }
+        _ => {}
+    }
+    n
+}
+
 fn keys(o: &mut Out, i: &Input) {
     o.n(i.forward);
     o.n(i.strafe);
@@ -286,7 +360,7 @@ fn main() {
     }
     let mut o = Out(Vec::new());
     o.n(5050.0);
-    o.n(1.0);
+    o.n(2.0);
     o.n(OBS_DIM as u32);
     o.n(ACT_HEADS as u32);
     let mut rng = Rng::new(23);
@@ -317,8 +391,14 @@ fn main() {
         let mut combo = [0u32; 2];
         let mut left = rng.range(300.0, 900.0) as i32;
         let mut fresh = true;
+        let mut told = Out(Vec::new());
+        let mut count = 0u32;
         loop {
-            let id = m.advance();
+            let id = m.advance_seen(|who, p, c, after| {
+                if who == 0 {
+                    count += packet(&mut told, p, c, after);
+                }
+            });
             for h in m.s.hits.drain(..) {
                 combo[h.attacker] += 1;
                 combo[h.victim] = 0;
@@ -351,6 +431,9 @@ fn main() {
                     duel(&mut o, &d, p.walls, &ag[0], &m.ccfg, m.c[0].lp.l.body.pos);
                     fresh = false;
                 }
+                o.n(count);
+                o.0.append(&mut told.0);
+                count = 0;
                 view(&mut o, &m.c[0], &m.world, &m.ccfg);
                 o.n(combo[0]);
                 o.n(combo[1]);
@@ -362,6 +445,7 @@ fn main() {
                 }
             }
             let was = m.c[id].lp.consuming();
+            let (said, said_yaw, said_pitch) = (m.c[id].lp.last_reported, m.c[id].lp.last_yaw, m.c[id].lp.last_pitch);
             let inp = ag[id].keys(&m.c[id], &d, &action, &mut rng);
             let out = m.client_tick(id, &inp);
             ag[id].ticked(&m.c[id], &d, &inp, &out);
@@ -374,6 +458,11 @@ fn main() {
                 o.n(c.rp.item as u8);
                 o.b(out.threw);
                 o.b(out.threw_potion);
+                o.b(out.swung);
+                o.b(out.attacked);
+                o.v(said);
+                o.n(said_yaw);
+                o.n(said_pitch);
                 written += 1;
                 thrown[0] += out.threw as u32;
                 thrown[1] += out.threw_potion as u32;
