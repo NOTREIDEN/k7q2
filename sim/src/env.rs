@@ -26,8 +26,12 @@ pub const MISS_POINTS: f32 = 2.0;
 /// How many ticks of looking away `w_pot_time` counts before a potion is
 /// thrown, and as many after it.
 pub const POT_TIME_TICKS: i32 = 10;
+/// The degrees of a turn undone at once that `w_shake` counts in full, and
+/// how many ticks the view may have stood still in between.
+pub const SHAKE_DEG: f32 = 6.0;
+pub const SHAKE_TICKS: i32 = 2;
 pub const PRIV_DIM: usize = 71;
-pub const STATS_DIM: usize = 86;
+pub const STATS_DIM: usize = 88;
 /// Floats per player and in total written by `Env::write_view`.
 pub const VIEW_PLAYER: usize = 45;
 pub const VIEW_DIM: usize = 2 * VIEW_PLAYER + 24;
@@ -264,16 +268,20 @@ pub struct Params {
     /// to sprint and has steak, 4 it is hurt with no healing potion at
     /// hand and some in the inventory, 8 it has no Speed and its potion of
     /// it is in the inventory. The rest of the duel is drawn as always.
-    /// 16 is the extreme one, against scripted bots only and from close
-    /// by: the first player is hurt and has potions, and the bot takes
-    /// next to no knockback, has Speed III to X and runs rings round it
-    /// (`BotParams::circler`). Nothing gets it off: the potions have to be
-    /// thrown with it there.
+    /// 16, 32 and 64 are the extreme ones, from close by, with the first
+    /// player hurt and carrying potions that have to be thrown with the
+    /// other one there. 16, against scripted bots only: the bot takes next
+    /// to no knockback, has Speed III to X and runs rings round it
+    /// (`BotParams::circler`). 32: hits hardly move either player, so
+    /// neither can be got off the other. 64: the first player stands in a
+    /// corner of the arena with the other one in its way out, who takes
+    /// less knockback than the game gives; most of the time it has no
+    /// pearl to leave with.
     pub lesson_prob: f64,
     pub lessons: u32,
-    /// Of the lessons against a scripted bot, the share that is the extreme
-    /// one. Its duels are short, so that as one lesson among five it gets
-    /// little of the playing time. Negative: as likely as any other.
+    /// Of the lessons, the share that is one of the extreme ones. Their
+    /// duels are short, so that as lessons among others they get little
+    /// of the playing time. Negative: each as likely as any other.
     pub extreme_share: f64,
     /// How far apart a lesson starts.
     pub lesson_dist: [f64; 2],
@@ -287,6 +295,20 @@ pub struct Params {
     /// gone. Less than zero: a drink at any time, and all of `w_speed` for
     /// any Speed at all.
     pub drink_window_s: f64,
+    /// Cost of a turn of the view that undoes the turn before it, sideways
+    /// and up or down each on its own: the degrees taken back, `SHAKE_DEG`
+    /// of them at most, as a share of that many. A crosshair that goes
+    /// left and right again tick after tick pays on every tick; one that
+    /// follows the opponent pays once when the opponent turns round, and a
+    /// look at the ground and back up for a potion pays once. Nothing can
+    /// be earned with it.
+    pub w_shake: f32,
+    /// Share of the duels with real health in which a healing potion that
+    /// did not offer its thrower all eight points gives it only the share
+    /// `pot_strict` of what the game would: a lesson in throwing them so
+    /// that they do. The players are not told which duels these are.
+    pub pot_strict_prob: f64,
+    pub pot_strict: f64,
 }
 
 impl Default for Params {
@@ -386,6 +408,9 @@ impl Default for Params {
             lessons: 15,
             lesson_dist: [10.0, 20.0],
             drink_window_s: 15.0,
+            w_shake: 0.0,
+            pot_strict_prob: 0.0,
+            pot_strict: 0.25,
         }
     }
 }
@@ -509,6 +534,9 @@ impl Params {
             111 => self.w_pot_time = v as f32,
             112 => self.bot_runner = v,
             113 => self.extreme_share = v,
+            114 => self.w_shake = v as f32,
+            115 => self.pot_strict_prob = v,
+            116 => self.pot_strict = v,
             _ => return false,
         }
         true
@@ -594,6 +622,9 @@ pub struct Stats {
     pub inv_opens: [f64; 2],
     pub inv_ticks: [f64; 2],
     pub inv_hit: [f64; 2],
+    /// Degrees of turning the view that the next turn undid (see
+    /// `Params::w_shake`), without the limit on what one turn counts.
+    pub shake: [f64; 2],
 }
 
 impl Stats {
@@ -644,6 +675,7 @@ impl Stats {
             self.inv_opens[a] += o.inv_opens[a];
             self.inv_ticks[a] += o.inv_ticks[a];
             self.inv_hit[a] += o.inv_hit[a];
+            self.shake[a] += o.shake[a];
         }
     }
     pub fn write(&self, out: &mut [f64]) {
@@ -734,6 +766,8 @@ impl Stats {
             self.inv_ticks[1],
             self.inv_hit[0],
             self.inv_hit[1],
+            self.shake[0],
+            self.shake[1],
         ];
         for (o, x) in out.iter_mut().zip(v.iter()) {
             *o = *x;
@@ -779,6 +813,11 @@ pub struct Env {
     off_run: [i32; 2],
     /// Whether each player's inventory was open on its last tick.
     was_open: [bool; 2],
+    /// Each player's view after its last tick, its last turn sideways and
+    /// up or down, and the ticks it has not turned that way since.
+    view_was: [[f32; 2]; 2],
+    turn_last: [[f32; 2]; 2],
+    turn_age: [[i32; 2]; 2],
     /// The lesson this duel started as (0: none).
     pub lesson: u8,
     /// A player has died: the duel ends when both have made their tick.
@@ -797,15 +836,12 @@ pub fn new_duel(p: &Params, rng: &mut Rng, mode: Mode) -> (Match, [f64; 2], BotP
     let lim = (p.arena_half - 2.0).max(1.0);
     // Drawn only when lessons are on, so that duels without them come out
     // as they always did.
-    let offered = if mode == Mode::Bot { 31 } else { 15 };
+    let offered = if mode == Mode::Bot { 127 } else { 111 };
     let lesson = if p.lesson_prob > 0.0 && p.lessons & offered != 0 && rng.chance(p.lesson_prob) {
-        let mut on: Vec<u8> = (0..5u8).filter(|k| (p.lessons & offered) >> k & 1 != 0).collect();
-        if p.extreme_share >= 0.0 && on.len() > 1 && on.contains(&4) {
-            if rng.chance(p.extreme_share) {
-                on = vec![4];
-            } else {
-                on.retain(|&k| k != 4);
-            }
+        let mut on: Vec<u8> = (0..7u8).filter(|k| (p.lessons & offered) >> k & 1 != 0).collect();
+        if p.extreme_share >= 0.0 && on.iter().any(|&k| k >= 4) && on.iter().any(|&k| k < 4) {
+            let extreme = rng.chance(p.extreme_share);
+            on.retain(|&k| (k >= 4) == extreme);
         }
         1 + on[(rng.next_u64() % on.len() as u64) as usize]
     } else {
@@ -813,7 +849,7 @@ pub fn new_duel(p: &Params, rng: &mut Rng, mode: Mode) -> (Match, [f64; 2], BotP
     };
     let (d_lo, d_hi) = match lesson {
         0 => (p.start_dist_min, p.start_dist_max),
-        5 => (2.5, 5.0),
+        5 | 6 => (2.5, 5.0),
         _ => (p.lesson_dist[0], p.lesson_dist[1]),
     };
     let mut a;
@@ -830,6 +866,17 @@ pub fn new_duel(p: &Params, rng: &mut Rng, mode: Mode) -> (Match, [f64; 2], BotP
             b[2] = b[2].clamp(-lim, lim);
             break;
         }
+    }
+    if lesson == 7 {
+        // In a corner, as near the two walls as a hit would push it, with
+        // the other player on the side the arena is on.
+        let h = p.arena_half;
+        let side = |rng: &mut Rng| if rng.chance(0.5) { 1.0 } else { -1.0 };
+        let (sx, sz) = (side(rng), side(rng));
+        a = [sx * (h - rng.range(0.4, 2.0)), p.floor_y, sz * (h - rng.range(0.4, 2.0))];
+        let d = rng.range(2.0, 4.0);
+        let ang = (-sz).atan2(-sx) + rng.range(-0.6, 0.6);
+        b = [a[0] + d * ang.cos(), p.floor_y, a[2] + d * ang.sin()];
     }
     let face = |from: V3, to: V3, rng: &mut Rng| -> f32 {
         let (yaw, _) = bot::angles_to(from, to);
@@ -894,6 +941,23 @@ pub fn new_duel(p: &Params, rng: &mut Rng, mode: Mode) -> (Match, [f64; 2], BotP
             max_no_damage = 16 + (rng.next_u64() % 4) as i32;
         }
     }
+    if lesson == 6 {
+        // Hits that hardly move anybody, on the ground or in the air.
+        let hg = rng.range(0.0, 0.15);
+        let vg = rng.range(0.0, 0.2);
+        kb = KbProfile::VANILLA;
+        plugin = Some(KbPlugin {
+            h_ground: hg,
+            h_air: hg * rng.range(0.8, 1.1),
+            h_sprint: rng.range(0.0, 0.15),
+            v_ground: vg,
+            v_air: vg * rng.range(0.6, 1.0),
+            v_sprint: rng.range(0.0, 0.05),
+            stop_sprint: rng.chance(0.7),
+            y_limit: -1.0,
+            v_after_limit: 0.0,
+        });
+    }
     let mut ccfg = ClientCfg::with_sensitivity(p.sensitivity);
     ccfg.mouse_delay_fix = p.mouse_delay_fix;
     ccfg.kb_ench = p.kb_ench;
@@ -928,12 +992,18 @@ pub fn new_duel(p: &Params, rng: &mut Rng, mode: Mode) -> (Match, [f64; 2], BotP
     let stocked = (real && p.refill_prob > 0.0 && rng.chance(p.refill_prob)) || lesson == 3 || lesson == 4;
     let mut scfg = scfg;
     scfg.hunger |= hungry;
+    if real && p.pot_strict_prob > 0.0 && rng.chance(p.pot_strict_prob) {
+        scfg.potion_strict = p.pot_strict.clamp(0.0, 1.0) as f32;
+    }
+    // Cornered with no pearl to leave with, most of the time.
+    let stuck = lesson == 7 && rng.chance(0.7);
     let seed = rng.next_u64();
     let mut m = Match::new(world, spawns, p.speed_amp, kb, scfg, ccfg, net, [0, c1, sv], seed);
     m.s.plugin = plugin;
     m.s.pearl_guard = true;
     for i in 0..2 {
         let pearls = if p.pearls_who == 0 || p.pearls_who as usize == i + 1 { pearls } else { 0 };
+        let pearls = if stuck && i == 0 { 0 } else { pearls };
         m.s.p[i].pearls = pearls;
         m.c[i].lp.pearls = pearls;
         if real {
@@ -1006,13 +1076,13 @@ pub fn new_duel(p: &Params, rng: &mut Rng, mode: Mode) -> (Match, [f64; 2], BotP
                 m.s.p[i].rows = rows;
                 m.c[i].lp.rows = rows;
             }
-            if lesson == 5 {
+            if lesson >= 5 {
                 n = n.max(3);
             }
             m.s.p[i].potions = potion_mask(n);
             m.c[i].lp.potions = potion_mask(n);
-            if lesson == 3 || lesson == 5 {
-                let lo = if lesson == 5 { 4.0 } else { 6.0 };
+            if lesson == 3 || lesson >= 5 {
+                let lo = if lesson >= 5 { 4.0 } else { 6.0 };
                 let h = (rng.range(lo, 12.0) * 2.0).round() as f32 / 2.0;
                 m.s.p[i].health = h;
                 m.s.p[i].last_health = h;
@@ -1052,6 +1122,10 @@ pub fn new_duel(p: &Params, rng: &mut Rng, mode: Mode) -> (Match, [f64; 2], BotP
         lp.speed_amp = amp;
         lp.l.attr.speed_amp = amp;
         lp.speed_ticks = FOR_GOOD;
+    }
+    if lesson == 7 {
+        // Hitting the other player does not clear the way out.
+        m.c[1].edge.kb_taken = m.c[1].edge.kb_taken.min(rng.range(0.2, 0.7));
     }
     let mut bot = if mode == Mode::Bot {
         let lo = p.bot_level[0].round() as i64;
@@ -1111,6 +1185,9 @@ impl Env {
             since_block: [1000; 2],
             pot_since: [1000; 2],
             was_open: [false; 2],
+            view_was: [[0.0; 2]; 2],
+            turn_last: [[0.0; 2]; 2],
+            turn_age: [[0; 2]; 2],
             lesson,
             pot_back: [true; 2],
             off_run: [0; 2],
@@ -1136,6 +1213,9 @@ impl Env {
         self.pot_back = [true; 2];
         self.off_run = [0; 2];
         self.over = false;
+        self.view_was = [0, 1].map(|a| [self.m.c[a].lp.l.yaw, self.m.c[a].lp.l.pitch]);
+        self.turn_last = [[0.0; 2]; 2];
+        self.turn_age = [[0; 2]; 2];
         let own = self.rng.range(p.cps_min, p.cps_max.max(p.cps_min));
         let (lo, hi) = if p.opp_cps_min < 0.0 { (p.cps_min, p.cps_max) } else { (p.opp_cps_min, p.opp_cps_max) };
         let other = self.rng.range(lo, hi.max(lo));
@@ -1381,6 +1461,24 @@ impl Env {
                 r -= p.w_close * ((p.close_dist - d) / p.close_dist) as f32;
             }
         }
+        // A turn of the view that takes back the one before it.
+        let view = [self.m.c[id].lp.l.yaw, self.m.c[id].lp.l.pitch];
+        for k in 0..2 {
+            let d = view[k] - self.view_was[id][k];
+            if d == 0.0 {
+                self.turn_age[id][k] = (self.turn_age[id][k] + 1).min(1000);
+                continue;
+            }
+            let last = self.turn_last[id][k];
+            if last * d < 0.0 && self.turn_age[id][k] <= SHAKE_TICKS {
+                let undone = last.abs().min(d.abs());
+                r -= p.w_shake * undone.min(SHAKE_DEG) / SHAKE_DEG;
+                self.ep.shake[id] += undone as f64;
+            }
+            self.turn_last[id][k] = d;
+            self.turn_age[id][k] = 0;
+        }
+        self.view_was[id] = view;
         self.rew_acc[id] += r;
         self.ep.agent_ticks[id] += 1.0;
         self.ep.aim_err_sum[id] += ang;

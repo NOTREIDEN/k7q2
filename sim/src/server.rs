@@ -113,6 +113,11 @@ pub struct ServerCfg {
     /// Server ticks a player has to wait between two ender pearls. The game
     /// has no wait (0); servers add one with a plugin, usually 16 seconds.
     pub pearl_cooldown: i32,
+    /// A lesson, not the game: the share of what the game gives that a
+    /// healing potion gives its own thrower unless it offered all eight
+    /// points (it hit the thrower or broke within a quarter of a block of
+    /// its feet). 1 is the game.
+    pub potion_strict: f32,
 }
 
 impl ServerCfg {
@@ -142,6 +147,7 @@ impl Default for ServerCfg {
             max_no_damage: 20,
             sword_wear: 1.0,
             pearl_cooldown: 0,
+            potion_strict: 1.0,
         }
     }
 }
@@ -1090,7 +1096,8 @@ impl Server {
                     let i = splash_heal(at, q.l.body.pos, hit_player == Some(j));
                     if dist_sq(at, q.l.body.pos) < 16.0 {
                         let before = self.p[j].health;
-                        self.p[j].heal(i);
+                        let strict = j == thrower && i < POTION_HEAL && self.cfg.potion_strict < 1.0;
+                        self.p[j].heal(if strict { i * self.cfg.potion_strict } else { i });
                         sp.offered[j] = i;
                         sp.healed[j] = self.p[j].health - before;
                     }

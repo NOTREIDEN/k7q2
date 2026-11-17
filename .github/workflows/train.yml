@@ -34,7 +34,8 @@ on:
           --param lesson_dist_min=12 --param lesson_dist_max=28
           --param w_miss=1.5 --param w_pot_time=0.1
           --param agent_ping_min_ms=190 --param agent_ping_max_ms=210
-          --param lessons=31 --param extreme_share=0.4 --param bot_runner=0.15
+          --param lessons=127 --param extreme_share=0.6 --param bot_runner=0.15
+          --param w_shake=0.1 --param w_waste=1 --param pot_strict_prob=0.3
       previous:
         description: Id of the run to continue from (empty starts from seed/stage1.pt)
         default: ""

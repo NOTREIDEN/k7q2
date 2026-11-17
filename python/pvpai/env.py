@@ -36,7 +36,7 @@ PARAM = {
     "refill_who": 102, "bot_refill": 103, "w_stock": 104,
     "lesson_prob": 105, "lessons": 106, "lesson_dist_min": 107, "lesson_dist_max": 108,
     "drink_window_s": 109, "w_miss": 110, "w_pot_time": 111, "bot_runner": 112,
-    "extreme_share": 113,
+    "extreme_share": 113, "w_shake": 114, "pot_strict_prob": 115, "pot_strict": 116,
 }
 
 STAT_NAMES = [
@@ -54,6 +54,7 @@ STAT_NAMES = [
     "sip_hit0", "sip_hit1", "speed_on0", "speed_on1", "fed0", "fed1",
     "pot_after0", "pot_after1", "off0", "off1",
     "refills0", "refills1", "inv_opens0", "inv_opens1", "inv_ticks0", "inv_ticks1", "inv_hit0", "inv_hit1",
+    "shake0", "shake1",
 ]
 
 # Per-player fields of VecEnv.view(), then the fields that follow both players.

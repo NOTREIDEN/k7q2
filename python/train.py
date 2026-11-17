@@ -265,6 +265,8 @@ def main():
                         click_on_target=st["attacks0"] / max(st["swings0"], 1.0),
                         on_target=st["on_target0"] / st["ticks0"],
                         aim_err_deg=st["aim_err_sum0"] / st["ticks0"],
+                        # Degrees a second of turning the view that the next turn took back.
+                        shake_deg_per_s=st["shake0"] / st["ticks0"] * 20,
                         max_combo=st["max_combo_sum0"] / st["episodes"],
                         # Share of own ticks spent blocking, share of the hits taken
                         # that landed on a block, and damage dealt and taken per minute.
