@@ -10,9 +10,9 @@
 //! two halves need no common clock.
 use crate::aabb::Aabb;
 use crate::client::{Client, ClientCfg, Input};
-use crate::mth::Rng;
+use crate::mth::{JavaRandom, Rng};
 use crate::net::{Item, PearlEv, C2S, S2C, SLOT_PEARL, SLOT_SWORD};
-use crate::server::{chunk_of, KbProfile, Server, ServerCfg, ServerPlayer};
+use crate::server::{chunk_of, feather_points, prot_points, Food, KbProfile, Server, ServerCfg, ServerPlayer, MAX_HEALTH};
 use crate::world::World;
 use std::collections::HashMap;
 
@@ -155,14 +155,22 @@ fn s2c(l: &Line, at: usize, own_id: i64, pearls: &mut PearlIds) -> Option<S2C> {
     }
     if class == "S1CPacketEntityMetadata" {
         let list = l.s("field_149378_b").trim_matches(|c| c == '[' || c == ']');
+        let (mut flags, mut health) = (None, None);
         for e in list.split(';').filter(|e| !e.is_empty()) {
             let p: Vec<&str> = e.split(':').collect();
             if p[0] == "0" {
-                let flags: i64 = p[2].parse().unwrap();
-                return Some(S2C::Meta { own: id("entityId"), sprinting: flags & 8 != 0, using: flags & 16 != 0 });
+                let f: i64 = p[2].parse().unwrap();
+                flags = Some((f & 8 != 0, f & 16 != 0));
+            }
+            // Watched value 6 is the health, a float.
+            if p[0] == "6" {
+                health = Some(f32::from_bits(u32::from_str_radix(p[2], 16).unwrap()));
             }
         }
-        return None;
+        return if flags.is_some() || health.is_some() { Some(S2C::Meta { own: id("entityId"), flags, health }) } else { None };
+    }
+    if class == "S06PacketUpdateHealth" {
+        return Some(S2C::Health { health: l.f("health"), food: l.i("foodLevel") as i32, saturation: l.f("saturationLevel") });
     }
     if class == "S20PacketEntityProperties" {
         let list = l.s("field_149444_b").trim_matches(|c| c == '[' || c == ']');
@@ -395,6 +403,11 @@ fn replay_client(lines: &[Line], world: &World, speed: i8, sens: f32, o: &Option
             lp.synced = l.i("cpi") as u8;
             lp.pearls = l.i("pc") as u8;
         }
+        if l.has("hp") {
+            lp.health = l.f("hp");
+            lp.food = l.i("food") as i32;
+            lp.saturation = l.f("sat");
+        }
     };
     let load_remote = |c: &mut Client, l: &Line| {
         let r = &mut c.rp;
@@ -415,6 +428,9 @@ fn replay_client(lines: &[Line], world: &World, speed: i8, sens: f32, o: &Option
         r.swing_progress_int = l.i("rswp") as i32;
         if l.has("reat") {
             r.using = l.b("reat");
+        }
+        if l.has("rhp") {
+            r.health = l.f("rhp");
         }
     };
     load(&mut c, init);
@@ -448,6 +464,9 @@ fn replay_client(lines: &[Line], world: &World, speed: i8, sens: f32, o: &Option
                     }
                     if let S2C::SetSlot { slot: SLOT_SWORD, .. } = p {
                         rep.count("swords sent again", 1);
+                    }
+                    if let S2C::Health { .. } = p {
+                        rep.count("health updates", 1);
                     }
                     if let S2C::Pearl { ev: PearlEv::Spawn { .. }, .. } = p {
                         rep.count("pearls seen", 1);
@@ -604,6 +623,14 @@ fn replay_client(lines: &[Line], world: &World, speed: i8, sens: f32, o: &Option
                         format!("tick {tick}: simulator [{}], game [{}]", got.join(";"), want.join(";"))
                     });
                 }
+                if fmt >= 4 {
+                    ok &= fd("health", lp.health as f64, st.f("hp") as f64, &mut rep);
+                    ok &= fd("saturation", lp.saturation as f64, st.f("sat") as f64, &mut rep);
+                    ok &= fi("food", lp.food as i64, st.i("food"), &mut rep);
+                    if st.has("rhp") {
+                        ok &= fd("other health", c.rp.health as f64, st.f("rhp") as f64, &mut rep);
+                    }
+                }
                 ok &= rep.note("packets sent", out == sent, || {
                     format!(
                         "tick {tick}: simulator [{}], game [{}]",
@@ -658,7 +685,7 @@ fn replay_client(lines: &[Line], world: &World, speed: i8, sens: f32, o: &Option
 fn about(p: &S2C) -> u8 {
     match p {
         S2C::Velocity { own, .. } | S2C::Hurt { own } | S2C::Meta { own, .. } | S2C::Props { own, .. } => !*own as u8,
-        S2C::PosLook { .. } | S2C::SetSlot { .. } | S2C::WindowItems { .. } | S2C::Cursor | S2C::Destroy { .. } => 0,
+        S2C::PosLook { .. } | S2C::SetSlot { .. } | S2C::WindowItems { .. } | S2C::Cursor | S2C::Destroy { .. } | S2C::Health { .. } => 0,
         S2C::Pearl { .. } => 2,
         _ => 1,
     }
@@ -703,8 +730,17 @@ fn load_server(p: &mut ServerPlayer, l: &Line) {
             (false, other) => other,
         };
     }
+    if l.has("sat") {
+        p.food = Food { level: l.i("food") as i32, saturation: l.f("sat"), exhaustion: l.f("exh"), timer: l.i("ft") as i32 };
+        p.last_health = l.f("lhp");
+        p.last_food = l.i("lfood") as i32;
+        p.was_hungry = l.b("wh");
+    } else {
+        p.last_health = p.health;
+    }
     p.slot_dirty = false;
     p.meta_dirty = false;
+    p.health_dirty = false;
     p.attr_dirty = false;
     if l.has("hm") {
         p.has_moved = l.b("hm");
@@ -729,7 +765,7 @@ fn load_server(p: &mut ServerPlayer, l: &Line) {
 
 /// The server half: feed the recorded packets of both players to the
 /// simulator's server and compare its state and everything it sends.
-fn replay_server(lines: &[Line], world: &World, speed: i8, o: &Options, wear: f32, fmt: i64) -> Report {
+fn replay_server(lines: &[Line], world: &World, speed: i8, o: &Options, wear: f32, fmt: i64, head: &Line) -> Report {
     let (resync, verbose) = (o.resync, o.verbose);
     let mut rep = Report::new(verbose);
     let inits: Vec<&Line> = lines.iter().filter(|l| l.tag == "SINIT").collect();
@@ -747,13 +783,25 @@ fn replay_server(lines: &[Line], world: &World, speed: i8, o: &Options, wear: f3
         // Nobody else in the world: park the second player far away.
         None => ServerPlayer::new([1000.5, world.floor_y, 1000.5], 0.0, 0.0, speed),
     };
-    let cfg = ServerCfg { infinite_health: true, sword_wear: wear, ..ServerCfg::default() };
+    let mut cfg = ServerCfg { infinite_health: true, sword_wear: wear, ..ServerCfg::default() };
+    if fmt >= 4 {
+        // What the players wear and whether a hit costs health.
+        cfg.infinite_health = head.i("res") != 0;
+        cfg.armor = head.i("armor") as i32;
+        cfg.prot = 4 * prot_points(head.i("prot") as i32);
+        cfg.feather = feather_points(head.i("ff") as i32);
+        cfg.ench_damage = head.i("sharp") as f32 * 1.25f32;
+    }
     let mut kb = KbProfile::VANILLA;
     if o.wrong_knockback {
         // Proves that the comparison notices a small error.
         kb.horizontal = 0.41;
     }
     let mut sv = Server::new(mk(inits.get(0)), mk(inits.get(1)), kb, cfg);
+    if fmt >= 4 {
+        // The rig seeds the generator Protection draws from.
+        sv.ench_rand = Some(JavaRandom::new(head.i("eseed")));
+    }
     let mut rng = Rng::new(1);
     let mut out: Vec<(usize, S2C)> = Vec::new();
     let mut want: Vec<(usize, S2C)> = Vec::new();
@@ -790,7 +838,7 @@ fn replay_server(lines: &[Line], world: &World, speed: i8, o: &Options, wear: f3
             None => !states.is_empty(),
             // Server lines after the state lines belong to the next tick (or
             // are strays written while the recording was shutting down).
-            Some(l) => !states.is_empty() && (l.tag == "SP" || l.tag == "SS" || (l.tag == "ST" && l.words[0] != tick)),
+            Some(l) => !states.is_empty() && (l.tag == "SP" || l.tag == "SS" || l.tag == "SH" || (l.tag == "ST" && l.words[0] != tick)),
         };
         if flush {
             sv.frozen.clear();
@@ -817,6 +865,13 @@ fn replay_server(lines: &[Line], world: &World, speed: i8, o: &Options, wear: f3
             rep.count("blocked hits", sv.hits.iter().filter(|h| h.blocked).count());
             rep.count("swords sent again", want.iter().filter(|w| matches!(w.1, S2C::SetSlot { slot: SLOT_SWORD, .. })).count());
             rep.count("hits without the sword", sv.hits.iter().filter(|h| h.damage <= 1.5).count());
+            rep.count("health lost, in tenths", sv.p.iter().map(|p| (p.health_lost * 10.0).round() as usize).sum());
+            rep.count("health got back", sv.p.iter().map(|p| p.health_gained.round() as usize).sum());
+            for p in sv.p.iter_mut() {
+                p.health_lost = 0.0;
+                p.health_gained = 0.0;
+            }
+            rep.count("health updates", want.iter().filter(|w| matches!(w.1, S2C::Health { .. })).count());
             rep.count("pearls landed", sv.landings.len());
             rep.count("pearls landed on a player", sv.landings.iter().filter(|l| l.on_player).count());
             rep.count("ticks with a pearl in flight", !sv.pearls.is_empty() as usize);
@@ -961,6 +1016,15 @@ fn replay_server(lines: &[Line], world: &World, speed: i8, o: &Options, wear: f3
                     let ad = if p.equip.0 == Item::Sword { sv.cfg.damage as f64 } else { 1.0 };
                     ok &= fd("attack damage", ad, st.d("ad"), &mut rep);
                 }
+                if st.has("sat") {
+                    ok &= fd("health", p.health as f64, st.f("hp") as f64, &mut rep);
+                    ok &= fi("food", p.food.level as i64, st.i("food"), &mut rep);
+                    ok &= fd("saturation", p.food.saturation as f64, st.f("sat") as f64, &mut rep);
+                    ok &= fd("exhaustion", p.food.exhaustion as f64, st.f("exh") as f64, &mut rep);
+                    ok &= fi("food timer", p.food.timer as i64, st.i("ft"), &mut rep);
+                    ok &= fd("health told", p.last_health as f64, st.f("lhp") as f64, &mut rep);
+                    ok &= fi("food told", p.last_food as i64, st.i("lfood"), &mut rep);
+                }
                 if st.has("hm") {
                     ok &= fi("has moved", p.has_moved as i64, st.i("hm"), &mut rep);
                     ok &= fd("last x", p.last_pos[0], st.d("lpx"), &mut rep);
@@ -1041,6 +1105,13 @@ fn replay_server(lines: &[Line], world: &World, speed: i8, o: &Options, wear: f3
                 states.push(l);
             }
             "SE" => pearl_states.push(l),
+            // The rig gave a player its health back, before the packets of
+            // this tick.
+            "SH" => {
+                let who = l.words[1].parse::<usize>().unwrap();
+                sv.p[who].set_health(MAX_HEALTH);
+                rep.count("refills by the rig", 1);
+            }
             _ => {}
         }
     }
@@ -1100,7 +1171,7 @@ pub fn replay(text: &str, o: &Options) -> Result<Outcome, String> {
     let fmt = if head.has("fmt") { head.i("fmt") } else { 1 };
     let wear = if fmt >= 2 { head.i("wear") as f32 } else { 0.0 };
     let client = if o.skip_client { Report::new(false) } else { replay_client(&lines, &world, speed, sens, o, fmt) };
-    let server = if o.skip_server { Report::new(false) } else { replay_server(&lines, &world, speed, o, wear, fmt) };
+    let server = if o.skip_server { Report::new(false) } else { replay_server(&lines, &world, speed, o, wear, fmt, head) };
     Ok(Outcome { client, server })
 }
 

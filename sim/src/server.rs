@@ -4,7 +4,7 @@
 //! tells each client where the other player and the pearls are.
 use crate::aabb::{dist_sq, Aabb, V3, EYE_HEIGHT};
 use crate::living::Living;
-use crate::mth::{self, Rng};
+use crate::mth::{self, JavaRandom, Rng};
 use crate::net::{Item, PearlEv, C2S, S2C, SLOT_PEARL, SLOT_SWORD};
 use crate::world::{RayHit, World};
 use std::collections::VecDeque;
@@ -81,8 +81,23 @@ pub struct ServerCfg {
     /// Sharpness bonus, added after the critical multiplier.
     pub ench_damage: f32,
     pub kb_ench: i32,
+    /// Both players have Resistance V and Saturation, as on a practice
+    /// server's combo arena: no hit costs health and nobody gets hungry.
     pub infinite_health: bool,
     pub fall_damage: bool,
+    /// Armour points worn (`getTotalArmorValue`): 20 for a full diamond set.
+    pub armor: i32,
+    /// What the armour's Protection adds up to against a hit, a
+    /// suffocation or a fall: see `prot_points`.
+    pub prot: i32,
+    /// What Feather Falling adds to that against a fall, which is also what
+    /// an ender pearl costs: see `feather_points`.
+    pub feather: i32,
+    /// Running, jumping, hitting and being hit use up food.
+    pub hunger: bool,
+    /// The game rule `naturalRegeneration`: a player with 18 food or more
+    /// gets half a heart back every 80 of its ticks.
+    pub natural_regen: bool,
     /// `maxHurtResistantTime`: a player can be hit again once half of it
     /// has passed (the game: 20, a hit every 10 ticks). Servers lower it.
     pub max_no_damage: i32,
@@ -105,10 +120,68 @@ impl Default for ServerCfg {
             kb_ench: 0,
             infinite_health: true,
             fall_damage: true,
+            armor: 0,
+            prot: 0,
+            feather: 0,
+            hunger: true,
+            natural_regen: true,
             max_no_damage: 20,
             sword_wear: 1.0,
             pearl_cooldown: 0,
         }
+    }
+}
+
+/// `EnchantmentProtection.calcModifierDamage` for one piece of armour with
+/// Protection of this level: 1, 2, 3 and 5 for levels I to IV.
+pub fn prot_points(level: i32) -> i32 {
+    if level <= 0 {
+        return 0;
+    }
+    let f = (6 + level * level) as f32 / 3.0f32;
+    mth::floor_f(f * 0.75f32)
+}
+
+/// The same for Feather Falling against a fall: 5, 8, 12 and 18.
+pub fn feather_points(level: i32) -> i32 {
+    if level <= 0 {
+        return 0;
+    }
+    let f = (6 + level * level) as f32 / 3.0f32;
+    mth::floor_f(f * 2.5f32)
+}
+
+/// What hurts a player (`DamageSource`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Source {
+    /// A hit by the other player: a block halves it and armour takes its
+    /// share.
+    Player(usize),
+    /// A fall, which is also what an ender pearl does to its thrower. It
+    /// goes past the block and the armour; Protection and Feather Falling
+    /// still count.
+    Fall,
+    /// The head inside a block. Past the block and the armour as well.
+    Wall,
+    /// Hunger. Nothing lessens it.
+    Starve,
+}
+
+/// `FoodStats`.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Food {
+    pub level: i32,
+    pub saturation: f32,
+    pub exhaustion: f32,
+    pub timer: i32,
+}
+
+impl Food {
+    pub const FULL: Food = Food { level: 20, saturation: 5.0, exhaustion: 0.0, timer: 0 };
+
+    #[inline]
+    fn add_exhaustion(&mut self, x: f32) {
+        self.exhaustion = (self.exhaustion + x).min(40.0f32);
     }
 }
 
@@ -172,6 +245,8 @@ pub fn pearl_heading(feet: V3, yaw: f32, pitch: f32) -> (V3, V3) {
 /// Damage a pearl does to its thrower on arrival (`DamageSource.fall`).
 pub const PEARL_DAMAGE: f32 = 5.0;
 
+pub const MAX_HEALTH: f32 = 20.0;
+
 /// Would `World.getEntitiesWithinAABB` find an entity filed under chunk
 /// `c` for the box `q`? It looks through the chunks within two blocks of
 /// the box and the 16-block slices within two blocks of its height.
@@ -217,6 +292,8 @@ pub struct Hit {
     pub blocked: bool,
     /// Damage after the block, before armour.
     pub damage: f32,
+    /// Health the hit took: what is left of it after armour and Protection.
+    pub dealt: f32,
 }
 
 #[derive(Clone, Debug)]
@@ -228,7 +305,10 @@ pub struct ServerPlayer {
     pub health: f32,
     pub is_airborne: bool,
     pub velocity_changed: bool,
+    /// The flags byte changed and has not been sent yet.
     pub meta_dirty: bool,
+    /// The same for the health, which is a watched value too.
+    pub health_dirty: bool,
     pub attr_dirty: bool,
     pub swing_in_progress: bool,
     pub swing_progress_int: i32,
@@ -268,6 +348,15 @@ pub struct ServerPlayer {
     pub autoblock: bool,
     /// Damage taken, before armour, since the caller last cleared it.
     pub damage_taken: f32,
+    /// Health lost and health got back since the caller last cleared them.
+    pub health_lost: f32,
+    pub health_gained: f32,
+    pub food: Food,
+    /// `lastHealth`, `lastFoodLevel` and `wasHungry`: what this player was
+    /// last told about itself.
+    pub last_health: f32,
+    pub last_food: i32,
+    pub was_hungry: bool,
     /// `inventory.currentItem`: the hotbar slot in hand.
     pub held: u8,
     /// Ender pearls left in the second hotbar slot.
@@ -306,6 +395,7 @@ impl ServerPlayer {
             is_airborne: false,
             velocity_changed: false,
             meta_dirty: false,
+            health_dirty: false,
             attr_dirty: false,
             swing_in_progress: false,
             swing_progress_int: 0,
@@ -324,6 +414,12 @@ impl ServerPlayer {
             slot_dirty: false,
             autoblock: false,
             damage_taken: 0.0,
+            health_lost: 0.0,
+            health_gained: 0.0,
+            food: Food::FULL,
+            last_health: 20.0,
+            last_food: 20,
+            was_hungry: false,
             held: SLOT_SWORD,
             pearls: 0,
             sword_wear: 0,
@@ -351,6 +447,48 @@ impl ServerPlayer {
         if self.using_item != u {
             self.using_item = u;
             self.meta_dirty = true;
+        }
+    }
+
+    /// `EntityLivingBase.setHealth`: between nothing and twenty, and a
+    /// watched value, so a change is sent to everybody.
+    pub fn set_health(&mut self, h: f32) {
+        let h = h.clamp(0.0f32, MAX_HEALTH);
+        if h.to_bits() != self.health.to_bits() {
+            if h > self.health {
+                self.health_gained += h - self.health;
+            } else {
+                self.health_lost += self.health - h;
+            }
+            self.health = h;
+            self.health_dirty = true;
+        }
+    }
+
+    #[inline]
+    pub fn alive(&self) -> bool {
+        self.health > 0.0
+    }
+
+    /// `EntityPlayer.addMovementStat` for a player on dry land: walking and
+    /// running along the ground make hungry, by the hundredth of a block.
+    fn movement_stat(&mut self, dx: f64, dz: f64) {
+        if self.l.body.on_ground {
+            let k = mth::round_f(mth::sqrt_d(dx * dx + dz * dz) * 100.0f32);
+            if k > 0 {
+                if self.l.sprinting {
+                    self.food.add_exhaustion(0.099999994f32 * k as f32 * 0.01f32);
+                } else {
+                    self.food.add_exhaustion(0.01f32 * k as f32 * 0.01f32);
+                }
+            }
+        }
+    }
+
+    /// `EntityLivingBase.heal`.
+    pub fn heal(&mut self, amount: f32) {
+        if self.health > 0.0 {
+            self.set_health(self.health + amount);
         }
     }
 
@@ -430,6 +568,9 @@ pub struct Server {
     /// rule, and a pearl that has gone through its own thrower into the
     /// ground does put the thrower there.
     pub pearl_guard: bool,
+    /// Replaying a recording: the generator the game drew the random part
+    /// of Protection from, at the point the recording starts.
+    pub ench_rand: Option<JavaRandom>,
 }
 
 /// Packets produced by the server: (destination client, packet).
@@ -452,6 +593,7 @@ impl Server {
             spawned: Vec::new(),
             frozen: Vec::new(),
             pearl_guard: false,
+            ench_rand: None,
         }
     }
 
@@ -641,7 +783,7 @@ impl Server {
                 let (yaw, pitch) = (self.p[thrower].l.yaw, self.p[thrower].l.pitch);
                 self.set_player_location(thrower, to, yaw, pitch, out);
                 self.p[thrower].l.body.fall_distance = 0.0;
-                self.attack_entity_from(thrower, PEARL_DAMAGE, None, rng, out);
+                self.attack_entity_from(thrower, PEARL_DAMAGE, Source::Fall, rng, out);
                 self.landings.push(Landing { thrower, pos: to, on_player: hit_player.is_some(), ticks: ticks_in_air });
             }
             self.pearls[k].dead = true;
@@ -783,6 +925,7 @@ impl Server {
 
         self.on_update_entity(i, world, rng, out);
 
+        let hunger = self.cfg.hunger && !self.cfg.infinite_health;
         let p = &mut self.p[i];
         p.set_position_and_rotation(last, f1, f2);
         let d11 = d[0] - p.l.body.pos[0];
@@ -802,6 +945,10 @@ impl Server {
         if p.l.body.on_ground && !pkt_ground && d12 > 0.0 {
             p.l.jump();
             p.is_airborne = true;
+            // EntityPlayer.jump
+            if hunger {
+                p.food.add_exhaustion(if p.l.sprinting { 0.8f32 } else { 0.2f32 });
+            }
         }
         p.l.body.move_entity(world, d11, d12, d13, false);
         p.l.body.on_ground = pkt_ground;
@@ -811,6 +958,9 @@ impl Server {
         let e13 = d[2] - p.l.body.pos[2];
         let flag1 = e11 * e11 + 0.0 + e13 * e13 > 0.0625; // "moved wrongly!"
         p.set_position_and_rotation(d, f1, f2);
+        if hunger {
+            p.movement_stat(d[0] - last[0], d[2] - last[2]);
+        }
         let flag2 = !world.collides(&p.l.body.bb.contract(f3, f3, f3));
         if flag && (flag1 || !flag2) {
             self.set_player_location(i, last, f1, f2, out);
@@ -832,7 +982,7 @@ impl Server {
                 if self.cfg.fall_damage {
                     let dmg = (dist - 3.0f32).ceil() as i32;
                     if dmg > 0 {
-                        self.attack_entity_from(i, dmg as f32, None, rng, out);
+                        self.attack_entity_from(i, dmg as f32, Source::Fall, rng, out);
                     }
                 }
             }
@@ -853,8 +1003,9 @@ impl Server {
         // EntityLivingBase.onEntityUpdate: a player whose head is inside a
         // block suffocates. A pearl that lands against a ceiling or close
         // to a wall puts its thrower there.
+        let hunger = self.cfg.hunger && !self.cfg.infinite_health;
         if inside_opaque_block(world, self.p[i].l.body.pos) {
-            self.attack_entity_from(i, 1.0, None, rng, out);
+            self.attack_entity_from(i, 1.0, Source::Wall, rng, out);
         }
         {
             let p = &mut self.p[i];
@@ -879,7 +1030,13 @@ impl Server {
             } else {
                 p.swing_progress_int = 0;
             }
+            let before = p.l.body.pos;
             p.l.living_update(world, 0.0, 0.0, false, false);
+            // EntityPlayer.moveEntityWithHeading counts the distance moved.
+            if hunger {
+                let now = p.l.body.pos;
+                p.movement_stat(now[0] - before[0], now[2] - before[2]);
+            }
         }
         // collideWithNearbyEntities: exists only on the server in 1.8.
         let j = 1 - i;
@@ -910,6 +1067,55 @@ impl Server {
             }
         }
         self.p[i].l.player_post();
+        // The end of EntityPlayer.onUpdate, then of
+        // EntityPlayerMP.onUpdateEntity.
+        if !self.cfg.infinite_health {
+            self.food_update(i, rng, out);
+        }
+        let p = &mut self.p[i];
+        let hungry = p.food.saturation == 0.0;
+        if p.health != p.last_health || p.last_food != p.food.level || hungry != p.was_hungry {
+            out.push((i, S2C::Health { health: p.health, food: p.food.level, saturation: p.food.saturation }));
+            p.last_health = p.health;
+            p.last_food = p.food.level;
+            p.was_hungry = hungry;
+        }
+    }
+
+    /// `FoodStats.onUpdate` on normal difficulty.
+    fn food_update(&mut self, i: usize, rng: &mut Rng, out: &mut Outbox) {
+        let hunger = self.cfg.hunger;
+        let regen = self.cfg.natural_regen;
+        let p = &mut self.p[i];
+        if p.food.exhaustion > 4.0f32 {
+            p.food.exhaustion -= 4.0f32;
+            if p.food.saturation > 0.0 {
+                p.food.saturation = (p.food.saturation - 1.0f32).max(0.0f32);
+            } else {
+                p.food.level = (p.food.level - 1).max(0);
+            }
+        }
+        if regen && p.food.level >= 18 && p.health > 0.0 && p.health < MAX_HEALTH {
+            p.food.timer += 1;
+            if p.food.timer >= 80 {
+                p.heal(1.0);
+                if hunger {
+                    p.food.add_exhaustion(3.0f32);
+                }
+                p.food.timer = 0;
+            }
+        } else if p.food.level <= 0 {
+            p.food.timer += 1;
+            if p.food.timer >= 80 {
+                let starve = p.health > 1.0;
+                p.food.timer = 0;
+                if starve {
+                    self.attack_entity_from(i, 1.0, Source::Starve, rng, out);
+                }
+            }
+        } else {
+            p.food.timer = 0;
+        }
     }
 
     /// `processUseEntity` with action ATTACK, then
@@ -942,7 +1148,7 @@ impl Server {
             f += f1;
             let saved = self.p[v].l.body.motion;
             let n_hits = self.hits.len();
-            let flag2 = self.attack_entity_from(v, f, Some(a), rng, out);
+            let flag2 = self.attack_entity_from(v, f, Source::Player(a), rng, out);
             if flag2 {
                 // ItemSword.hitEntity -> damageItem, for the item in hand.
                 let wear = self.cfg.sword_wear;
@@ -959,6 +1165,11 @@ impl Server {
                     self.p[a].l.body.motion[0] *= 0.6;
                     self.p[a].l.body.motion[2] *= 0.6;
                     self.p[a].set_sprinting(false);
+                }
+                // The game adds this at the very end; nothing in between
+                // reads it.
+                if self.cfg.hunger && !self.cfg.infinite_health {
+                    self.p[a].food.add_exhaustion(0.3f32);
                 }
                 if self.p[v].velocity_changed {
                     let mut m = self.p[v].l.body.motion;
@@ -1024,25 +1235,25 @@ impl Server {
 
     /// `EntityLivingBase.attackEntityFrom` as reached through
     /// `EntityPlayerMP` and `EntityPlayer`.
-    fn attack_entity_from(&mut self, v: usize, amount: f32, attacker: Option<usize>, rng: &mut Rng, out: &mut Outbox) -> bool {
+    fn attack_entity_from(&mut self, v: usize, amount: f32, src: Source, rng: &mut Rng, out: &mut Outbox) -> bool {
         if self.p[v].health <= 0.0 || amount == 0.0 {
             return false;
         }
         let mut flag = true;
-        let mut dealt = 0.0;
+        let mut dealt = (0.0, 0.0);
         let max = self.cfg.max_no_damage;
         if (self.p[v].hurt_resistant_time as f32) > max as f32 / 2.0f32 {
             if amount <= self.p[v].last_damage {
                 return false;
             }
             let extra = amount - self.p[v].last_damage;
-            self.damage_entity(v, extra, attacker.is_some());
+            self.damage_entity(v, extra, src, rng);
             self.p[v].last_damage = amount;
             flag = false;
         } else {
             self.p[v].last_damage = amount;
             self.p[v].hurt_resistant_time = max;
-            dealt = self.damage_entity(v, amount, attacker.is_some());
+            dealt = self.damage_entity(v, amount, src, rng);
             self.p[v].hurt_time = 10;
         }
         if flag {
@@ -1051,7 +1262,7 @@ impl Server {
             out.push((v, S2C::Hurt { own: true }));
             // setBeenAttacked
             self.p[v].velocity_changed = true;
-            if let Some(a) = attacker {
+            if let Source::Player(a) = src {
                 let mut d1 = self.p[a].l.body.pos[0] - self.p[v].l.body.pos[0];
                 let mut d0 = self.p[a].l.body.pos[2] - self.p[v].l.body.pos[2];
                 while d1 * d1 + d0 * d0 < 1.0E-4 {
@@ -1067,31 +1278,71 @@ impl Server {
                     kb: [0.0; 3],
                     dist: 0.0,
                     blocked: self.p[v].using_item,
-                    damage: dealt,
+                    damage: dealt.0,
+                    dealt: dealt.1,
                 });
             }
         }
         true
     }
 
-    /// `EntityPlayer.damageEntity` up to the armour. Returns the damage
-    /// that is left after a block. A fall cannot be blocked.
-    fn damage_entity(&mut self, v: usize, mut amount: f32, blockable: bool) -> f32 {
-        if blockable && self.p[v].using_item && amount > 0.0 {
+    /// `EntityPlayer.damageEntity`: the block, the armour, Protection, then
+    /// the health. Returns the damage that is left after the block and the
+    /// health that was taken in the end.
+    fn damage_entity(&mut self, v: usize, mut amount: f32, src: Source, rng: &mut Rng) -> (f32, f32) {
+        let direct = matches!(src, Source::Player(_));
+        if direct && self.p[v].using_item && amount > 0.0 {
             amount = (1.0f32 + amount) * 0.5f32;
         }
+        let blocked = amount;
         self.p[v].damage_taken += amount;
-        if !self.cfg.infinite_health && amount != 0.0 {
-            let p = &mut self.p[v];
-            let h = (p.health - amount).clamp(0.0, 20.0);
-            if h != p.health {
-                p.health = h;
-                // Health is a watched value, so the tracker entry updates
-                // on this tick even when the counter is odd.
-                p.meta_dirty = true;
+        if self.cfg.infinite_health {
+            // Resistance V leaves nothing of it.
+            return (blocked, 0.0);
+        }
+        // applyArmorCalculations. The armour's own wear is left out.
+        if direct {
+            let i = 25 - self.cfg.armor;
+            let f = amount * i as f32;
+            amount = f / 25.0f32;
+        }
+        // applyPotionDamageCalculations
+        if src != Source::Starve {
+            if amount <= 0.0 {
+                amount = 0.0;
+            } else {
+                // EnchantmentHelper.getEnchantmentModifierDamage: half of
+                // what the enchantments add up to counts for certain and
+                // the other half by chance, drawn anew for every hit.
+                let mut m = self.cfg.prot + if src == Source::Fall { self.cfg.feather } else { 0 };
+                m = m.clamp(0, 25);
+                let bound = (m >> 1) + 1;
+                let roll = match self.ench_rand.as_mut() {
+                    Some(r) => r.next_int(bound),
+                    None => (rng.next_u64() % bound as u64) as i32,
+                };
+                let mut k = ((m + 1) >> 1) + roll;
+                if k > 20 {
+                    k = 20;
+                }
+                if k > 0 {
+                    let l = 25 - k;
+                    let f1 = amount * l as f32;
+                    amount = f1 / 25.0f32;
+                }
             }
         }
-        amount
+        if amount != 0.0 {
+            // DamageSource.getHungerDamage: nothing for a source that goes
+            // past the armour.
+            if direct && self.cfg.hunger {
+                self.p[v].food.add_exhaustion(0.3f32);
+            }
+            let before = self.p[v].health;
+            self.p[v].set_health(before - amount);
+            return (blocked, before - self.p[v].health);
+        }
+        (blocked, 0.0)
     }
 
     /// `EntityLivingBase.knockBack`.
@@ -1175,7 +1426,7 @@ impl Server {
     fn tracker_update(&mut self, i: usize, out: &mut Outbox) {
         let other = 1 - i;
         let p = &mut self.p[i];
-        if p.update_counter % 2 == 0 || p.is_airborne || p.meta_dirty {
+        if p.update_counter % 2 == 0 || p.is_airborne || p.meta_dirty || p.health_dirty {
             p.ticks_since_teleport += 1;
             let pos = p.l.body.pos;
             let k = mth::floor_d(pos[0] * 32.0);
@@ -1211,10 +1462,13 @@ impl Server {
                 }
             }
             // sendMetadataToAllAssociatedPlayers: tracking players, then self.
-            if p.meta_dirty {
+            if p.meta_dirty || p.health_dirty {
+                let flags = if p.meta_dirty { Some((p.l.sprinting, p.using_item)) } else { None };
+                let health = if p.health_dirty { Some(p.health) } else { None };
                 p.meta_dirty = false;
-                out.push((other, S2C::Meta { own: false, sprinting: p.l.sprinting, using: p.using_item }));
-                out.push((i, S2C::Meta { own: true, sprinting: p.l.sprinting, using: p.using_item }));
+                p.health_dirty = false;
+                out.push((other, S2C::Meta { own: false, flags, health }));
+                out.push((i, S2C::Meta { own: true, flags, health }));
             }
             if p.attr_dirty {
                 p.attr_dirty = false;

@@ -86,6 +86,8 @@ pub struct RemotePlayer {
     /// The flag the server sets while this player uses an item: with a
     /// sword in hand, it is shown blocking.
     pub using: bool,
+    /// Its health, which the server tells everybody.
+    pub health: f32,
     /// What this player holds, as the server last said: the item, and the
     /// wear of a sword or the size of a stack of pearls.
     pub item: Item,
@@ -199,6 +201,7 @@ impl RemotePlayer {
             swing_in_progress: false,
             swing_progress_int: 0,
             using: false,
+            health: 20.0,
             item: Item::Sword,
             item_n: 0,
             ticks_since_hurt: 1000,
@@ -354,6 +357,10 @@ pub struct LocalPlayer {
     pub synced: u8,
     /// Ender pearls in the second hotbar slot, as this client counts them.
     pub pearls: u8,
+    /// Health, food and saturation as the server last said.
+    pub health: f32,
+    pub food: i32,
+    pub saturation: f32,
     /// Bookkeeping for observations, not game state.
     pub last_kb: V3,
     pub ticks_since_kb: i32,
@@ -395,6 +402,9 @@ impl LocalPlayer {
             held: SLOT_SWORD,
             synced: SLOT_SWORD,
             pearls: 0,
+            health: 20.0,
+            food: 20,
+            saturation: 5.0,
             last_kb: [0.0; 3],
             ticks_since_kb: 1000,
             ticks_since_hurt: 1000,
@@ -748,17 +758,42 @@ impl Client {
             S2C::Look { yaw, pitch, on_ground } => self.rp.rel_move([0, 0, 0], Some((yaw, pitch)), on_ground),
             S2C::LookMove { d, yaw, pitch, on_ground } => self.rp.rel_move(d, Some((yaw, pitch)), on_ground),
             S2C::Teleport { p, yaw, pitch, on_ground } => self.rp.teleport(p, yaw, pitch, on_ground),
-            S2C::Meta { own, sprinting, using } => {
-                if own {
-                    // The flags byte is overwritten without going through
-                    // setSprinting, so neither the modifier nor
-                    // sprintingTicksLeft changes here.
-                    self.lp.l.sprinting = sprinting;
-                    self.lp.flag_using = using;
-                } else {
-                    self.rp.sprinting = sprinting;
-                    self.rp.using = using;
+            S2C::Meta { own, flags, health } => {
+                if let Some((sprinting, using)) = flags {
+                    if own {
+                        // The flags byte is overwritten without going through
+                        // setSprinting, so neither the modifier nor
+                        // sprintingTicksLeft changes here.
+                        self.lp.l.sprinting = sprinting;
+                        self.lp.flag_using = using;
+                    } else {
+                        self.rp.sprinting = sprinting;
+                        self.rp.using = using;
+                    }
                 }
+                // The health is a watched value like the flags, and a
+                // player is sent its own as well.
+                if let Some(h) = health {
+                    if own {
+                        self.lp.health = h;
+                    } else {
+                        self.rp.health = h;
+                    }
+                }
+            }
+            // handleUpdateHealth -> EntityPlayerSP.setPlayerSPHealth
+            S2C::Health { health, food, saturation } => {
+                let lp = &mut self.lp;
+                let f = lp.health - health;
+                if f <= 0.0 {
+                    lp.health = health.clamp(0.0f32, 20.0f32);
+                } else {
+                    // damageEntity takes the difference off again.
+                    lp.health = (lp.health - f).clamp(0.0f32, 20.0f32);
+                    lp.hurt_time = 10;
+                }
+                lp.food = food;
+                lp.saturation = saturation;
             }
             // handleSetSlot puts a new stack object into the hotbar.
             S2C::SetSlot { slot, count } => match slot {
@@ -962,17 +997,19 @@ impl Client {
         push_out_of_blocks(world, &mut lp.l.body.motion, px - w, py, pz - w);
         push_out_of_blocks(world, &mut lp.l.body.motion, px + w, py, pz - w);
         push_out_of_blocks(world, &mut lp.l.body.motion, px + w, py, pz + w);
-        if lp.l.body.on_ground && !flag2 && lp.mi_forward >= f && !lp.l.sprinting && !lp.using_item {
+        // Sprinting takes more than three drumsticks of food.
+        let flag3 = lp.food as f32 > 6.0f32;
+        if lp.l.body.on_ground && !flag2 && lp.mi_forward >= f && !lp.l.sprinting && flag3 && !lp.using_item {
             if lp.sprint_toggle_timer <= 0 && !inp.sprint_key {
                 lp.sprint_toggle_timer = 7;
             } else {
                 lp.set_sprinting(true);
             }
         }
-        if !lp.l.sprinting && lp.mi_forward >= f && !lp.using_item && inp.sprint_key {
+        if !lp.l.sprinting && lp.mi_forward >= f && flag3 && !lp.using_item && inp.sprint_key {
             lp.set_sprinting(true);
         }
-        if lp.l.sprinting && (lp.mi_forward < f || lp.l.body.collided_h) {
+        if lp.l.sprinting && (lp.mi_forward < f || lp.l.body.collided_h || !flag3) {
             lp.set_sprinting(false);
         }
         // EntityPlayer.onLivingUpdate -> EntityLivingBase.onLivingUpdate.

@@ -596,6 +596,7 @@ pub fn new_match(p: &Params, rng: &mut Rng, mode: Mode) -> (Match, [f64; 2], Bot
         max_no_damage,
         sword_wear: if p.sword_wear >= 0.0 { p.sword_wear as f32 } else { [1.0f32, 0.25, 0.25, 0.0][(rng.next_u64() % 4) as usize] },
         pearl_cooldown: (rng.range(p.pearl_cd_s[0], p.pearl_cd_s[1].max(p.pearl_cd_s[0])) * 20.0).round().max(0.0) as i32,
+        ..ServerCfg::default()
     };
     let pearls = if rng.chance(p.pearl_prob) { p.pearls.clamp(0.0, 64.0) as u8 } else { 0 };
     let seed = rng.next_u64();

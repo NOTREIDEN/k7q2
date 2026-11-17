@@ -24,3 +24,12 @@ pearl4      pearl      64    blocks=1 unbreakable=1 speed=-1
 pearl5      pearl      65    many=1 fake=0.05
 pearlsolo1  pearlsolo  71
 pearlsolo2  pearlsolo  72    sensitivity=0.3 speed=-1
+hp1         fight      81    health=1 armor=1 prot=2 ff=4 sharp=2
+hp2         fight      82    health=1 refill=15.5 sensitivity=0.83
+hp3         fight      83    health=1 armor=1 prot=4 sharp=5 speed=0 eseed=77
+hp4         block      84    health=1 armor=1 prot=2 sharp=3 holds=1
+hp5         pearl      85    health=1 armor=1 prot=2 ff=4 sharp=2 blocks=1
+hp6         pearl      96    health=1 armor=1 many=1 fake=0.05 refill=8
+hp7         fight      87    health=1 armor=1 prot=1 food=8,0
+hp8         fight      88    health=1 armor=1 prot=3 food=1,0 refill=4
+hp9         pearlsolo  89    health=1 armor=1 prot=2 ff=2 refill=10

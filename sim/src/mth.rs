@@ -164,3 +164,46 @@ impl Rng {
         }
     }
 }
+
+/// `java.util.Random`. The game draws the random part of what Protection
+/// takes off a hit from one of these, so a recording made with a known seed
+/// can be followed draw by draw.
+#[derive(Clone, Debug)]
+pub struct JavaRandom(u64);
+
+impl JavaRandom {
+    const MASK: u64 = (1 << 48) - 1;
+
+    pub fn new(seed: i64) -> Self {
+        JavaRandom((seed as u64 ^ 0x5DEECE66D) & Self::MASK)
+    }
+    #[inline]
+    fn next(&mut self, bits: u32) -> i32 {
+        self.0 = (self.0.wrapping_mul(0x5DEECE66D).wrapping_add(0xB)) & Self::MASK;
+        (self.0 >> (48 - bits)) as i32
+    }
+    /// `nextInt(bound)` for a positive bound.
+    pub fn next_int(&mut self, bound: i32) -> i32 {
+        let mut r = self.next(31);
+        let m = bound - 1;
+        if bound & m == 0 {
+            r = ((bound as i64 * r as i64) >> 31) as i32;
+        } else {
+            let mut u = r;
+            loop {
+                r = u % bound;
+                if u.wrapping_sub(r).wrapping_add(m) >= 0 {
+                    break;
+                }
+                u = self.next(31);
+            }
+        }
+        r
+    }
+}
+
+/// `Math.round(float)`: the nearest whole number, halves upwards.
+#[inline]
+pub fn round_f(a: f32) -> i32 {
+    (a as f64 + 0.5).floor() as i32
+}

@@ -277,6 +277,17 @@ def main():
         lines.append("sensitivity " + opts["sensitivity"])
         f = float(opts["sensitivity"]) * 0.6 + 0.2
         per_count = 0.15 * f * f * f * 8.0
+    # The kit, for any scene: health=1 makes hits cost health (no Resistance, no
+    # Saturation), armor=1 is a diamond set that does not wear, prot and ff are
+    # the levels of Protection on all four pieces and of Feather Falling on the
+    # boots, sharp is Sharpness on the sword, food=LEVEL,SATURATION is what the
+    # players start with, refill is the health below which the rig gives a
+    # player everything back.
+    for k in ("health", "armor", "prot", "ff", "sharp", "refill", "eseed"):
+        if k in opts:
+            lines.append("%s %s" % (k, opts[k]))
+    if "food" in opts:
+        lines.append("food " + opts["food"].replace(",", " "))
     if name == "basic":
         seq = idle + [(1, 0, 0, 0, 0, 0, 0)] * 25 + [(1, 0, 0, 1, 0, 0, 0)] * 40 + [(1, 0, 1, 1, 0, 0, 0)] * 40 \
             + [(0, 0, 0, 0, 0, 0, 0)] * 15 + [(1, 1, 0, 1, 0, 4, 0)] * 30 + [(0, -1, 1, 0, 0, -10, 3)] * 30 \

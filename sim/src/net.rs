@@ -76,9 +76,13 @@ pub enum S2C {
     LookMove { d: [i8; 3], yaw: i8, pitch: i8, on_ground: bool },
     /// S18 teleport, absolute position in 1/32 block.
     Teleport { p: [i32; 3], yaw: i8, pitch: i8, on_ground: bool },
-    /// S1C entity metadata carrying the flags byte: bit 3 is sprinting,
-    /// bit 4 is set while the player uses an item (blocks).
-    Meta { own: bool, sprinting: bool, using: bool },
+    /// S1C entity metadata: the watched values that changed. `flags` is the
+    /// flags byte as (sprinting, using an item): bit 3 is sprinting and
+    /// bit 4 is set while the player uses an item (blocks). `health` is the
+    /// player's health, which every client is told, the player's own too.
+    Meta { own: bool, flags: Option<(bool, bool)>, health: Option<f32> },
+    /// S06 update health, to the player itself: health, food and saturation.
+    Health { health: f32, food: i32, saturation: f32 },
     /// S2F set slot for a hotbar slot of the receiving player: a new stack
     /// of `count` items (0 empties the slot). The server sends it for the
     /// sword when a hit has cost it durability, and for the pearls after a

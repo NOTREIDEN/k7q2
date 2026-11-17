@@ -91,6 +91,14 @@ public final class Rig {
     static final List<int[]> blocks = new ArrayList<int[]>();
     static boolean unbreakable = false;
     static int pearls = 0;
+    // The kit. With health on, hits cost health: no Resistance and no Saturation.
+    static boolean health = false, armor = false;
+    static int prot = 0, feather = 0, sharp = 0;
+    static int startFood = 20;
+    static float startSat = 5.0F;
+    /** A player whose health is below this at the start of a server tick gets all of it back. */
+    static float refill = 6.0F;
+    static long enchSeed = 1234L;
     /** Where the server last put the scripted player; it answers on the next tick, as a client does. */
     static double[] fakeTeleport = null;
     static boolean useDown = false;
@@ -160,13 +168,32 @@ public final class Rig {
                 unbreakable = !p[1].equals("0");
             } else if (p[0].equals("pearls")) {
                 pearls = Integer.parseInt(p[1]);
+            } else if (p[0].equals("health")) {
+                health = !p[1].equals("0");
+            } else if (p[0].equals("armor")) {
+                armor = !p[1].equals("0");
+            } else if (p[0].equals("prot")) {
+                prot = Integer.parseInt(p[1]);
+            } else if (p[0].equals("ff")) {
+                feather = Integer.parseInt(p[1]);
+            } else if (p[0].equals("sharp")) {
+                sharp = Integer.parseInt(p[1]);
+            } else if (p[0].equals("food")) {
+                startFood = Integer.parseInt(p[1]);
+                startSat = Float.parseFloat(p[2]);
+            } else if (p[0].equals("refill")) {
+                refill = Float.parseFloat(p[1]);
+            } else if (p[0].equals("eseed")) {
+                enchSeed = Long.parseLong(p[1]);
             } else if (p[0].equals("block")) {
                 blocks.add(new int[] {Integer.parseInt(p[1]), Integer.parseInt(p[2]), Integer.parseInt(p[3])});
             }
         }
         r.close();
         log("HEADER ticks=" + inputs.size() + " speed=" + speedAmp + " sensitivity=" + hf(sensitivity)
-            + " fake=" + (fakeStart != null ? 1 : 0) + " blocks=" + blocks.size() + " fmt=3 wear=" + (unbreakable ? 0 : 1) + " pearls=" + pearls);
+            + " fake=" + (fakeStart != null ? 1 : 0) + " blocks=" + blocks.size() + " fmt=4 wear=" + (unbreakable ? 0 : 1) + " pearls=" + pearls
+            + " res=" + (health ? 0 : 1) + " armor=" + (armor ? 20 : 0) + " prot=" + (armor ? prot : 0) + " ff=" + (armor ? feather : 0)
+            + " sharp=" + sharp + " eseed=" + enchSeed);
         for (int[] b : blocks) log("BLOCK " + b[0] + " " + b[1] + " " + b[2]);
     }
 
@@ -205,6 +232,8 @@ public final class Rig {
             gs.particleSetting = 2;
             gs.viewBobbing = false;
             gs.smoothCamera = false;
+            // Hunger takes health down to half a heart on this setting and no further.
+            gs.difficulty = net.minecraft.world.EnumDifficulty.NORMAL;
             WorldSettings ws = new WorldSettings(1L, WorldSettings.GameType.SURVIVAL, false, false, WorldType.FLAT);
             ws.setWorldName("3;minecraft:bedrock,2*minecraft:dirt,minecraft:grass;0;");
             ws.enableCommands();
@@ -302,7 +331,7 @@ public final class Rig {
             + " rtpitch=" + hd((Double) get(o, c, "otherPlayerMPPitch"))
             + " rog=" + (o.onGround ? 1 : 0) + " rspr=" + (o.isSprinting() ? 1 : 0) + " rht=" + o.hurtTime
             + " rswing=" + (o.isSwingInProgress ? 1 : 0) + " rswp=" + o.swingProgressInt
-            + " reat=" + (o.isEating() ? 1 : 0);
+            + " reat=" + (o.isEating() ? 1 : 0) + " rhp=" + hf(o.getHealth());
     }
 
     static String local(EntityPlayerSP p) {
@@ -329,7 +358,8 @@ public final class Rig {
             + " lcc=" + get(Minecraft.getMinecraft(), Minecraft.class, "leftClickCounter")
             + " sd=" + wear(p) + " held=" + p.inventory.currentItem
             + " cpi=" + get(Minecraft.getMinecraft().playerController, net.minecraft.client.multiplayer.PlayerControllerMP.class, "currentPlayerItem")
-            + " pc=" + count(p) + " pe=" + clientPearls(Minecraft.getMinecraft());
+            + " pc=" + count(p) + " pe=" + clientPearls(Minecraft.getMinecraft())
+            + " hp=" + hf(p.getHealth()) + " sat=" + hf(p.getFoodStats().getSaturationLevel());
     }
 
     /** Pearls in the second hotbar slot. */
@@ -534,18 +564,50 @@ public final class Rig {
     static void prepare(EntityPlayerMP p) {
         p.clearActivePotions();
         if (speedAmp >= 0) p.addPotionEffect(new PotionEffect(Potion.moveSpeed.id, 10000000, speedAmp, false, false));
-        p.addPotionEffect(new PotionEffect(Potion.resistance.id, 10000000, 4, false, false));
-        p.addPotionEffect(new PotionEffect(Potion.saturation.id, 10000000, 0, false, false));
+        if (!health) {
+            p.addPotionEffect(new PotionEffect(Potion.resistance.id, 10000000, 4, false, false));
+            p.addPotionEffect(new PotionEffect(Potion.saturation.id, 10000000, 0, false, false));
+        }
         ItemStack sword = new ItemStack(Items.diamond_sword);
-        if (unbreakable) {
-            NBTTagCompound tag = new NBTTagCompound();
-            tag.setBoolean("Unbreakable", true);
-            sword.setTagCompound(tag);
+        if (sharp > 0) sword.addEnchantment(net.minecraft.enchantment.Enchantment.sharpness, sharp);
+        if (unbreakable) unbreakable(sword);
+        if (armor) {
+            // Boots, leggings, chestplate, helmet. They do not wear: armour that wears is
+            // sent again after every hit, and nothing else comes of it in a duel.
+            net.minecraft.item.Item[] set = {Items.diamond_boots, Items.diamond_leggings, Items.diamond_chestplate, Items.diamond_helmet};
+            for (int i = 0; i < 4; i++) {
+                ItemStack a = new ItemStack(set[i]);
+                if (prot > 0) a.addEnchantment(net.minecraft.enchantment.Enchantment.protection, prot);
+                if (i == 0 && feather > 0) a.addEnchantment(net.minecraft.enchantment.Enchantment.featherFalling, feather);
+                unbreakable(a);
+                p.inventory.armorInventory[i] = a;
+            }
+        }
+        if (health) {
+            p.getFoodStats().setFoodLevel(startFood);
+            set(p.getFoodStats(), net.minecraft.util.FoodStats.class, "foodSaturationLevel", Float.valueOf(startSat));
+            set(p.getFoodStats(), net.minecraft.util.FoodStats.class, "foodExhaustionLevel", Float.valueOf(0.0F));
+            set(p.getFoodStats(), net.minecraft.util.FoodStats.class, "foodTimer", Integer.valueOf(0));
         }
         p.inventory.mainInventory[0] = sword;
         if (pearls > 0) p.inventory.mainInventory[1] = new ItemStack(Items.ender_pearl, pearls);
         p.inventory.currentItem = 0;
         p.setHealth(p.getMaxHealth());
+    }
+
+    static void unbreakable(ItemStack s) {
+        if (s.getTagCompound() == null) s.setTagCompound(new NBTTagCompound());
+        s.getTagCompound().setBoolean("Unbreakable", true);
+    }
+
+    static void set(Object o, Class<?> c, String name, Object v) {
+        try {
+            Field f = c.getDeclaredField(name);
+            f.setAccessible(true);
+            f.set(o, v);
+        } catch (Exception e) {
+            throw new RuntimeException(e);
+        }
     }
 
     static EntityTrackerEntry entry(EntityPlayerMP p) {
@@ -584,6 +646,12 @@ public final class Rig {
             + " sd=" + wear(p) + " held=" + p.inventory.currentItem + " pc=" + count(p)
             + " ad=" + hd(p.getEntityAttribute(SharedMonsterAttributes.attackDamage).getAttributeValue())
             + " rit=" + get(p, EntityPlayerMP.class, "respawnInvulnerabilityTicks")
+            + " sat=" + hf(p.getFoodStats().getSaturationLevel())
+            + " exh=" + hf((Float) get(p.getFoodStats(), net.minecraft.util.FoodStats.class, "foodExhaustionLevel"))
+            + " ft=" + get(p.getFoodStats(), net.minecraft.util.FoodStats.class, "foodTimer")
+            + " lhp=" + hf((Float) get(p, EntityPlayerMP.class, "lastHealth"))
+            + " lfood=" + get(p, EntityPlayerMP.class, "lastFoodLevel")
+            + " wh=" + (((Boolean) get(p, EntityPlayerMP.class, "wasHungry")) ? 1 : 0)
             + net(p.playerNetServerHandler)
             + " ccx=" + p.chunkCoordX + " ccy=" + p.chunkCoordY + " ccz=" + p.chunkCoordZ + " atc=" + (p.addedToChunk ? 1 : 0)
             + tracker(p);
@@ -634,11 +702,23 @@ public final class Rig {
             }
             if (!serverRecording) {
                 serverRecording = true;
+                // The random part of what Protection takes off a hit comes from this generator.
+                ((java.util.Random) get(null, net.minecraft.enchantment.EnchantmentHelper.class, "enchantmentRand")).setSeed(enchSeed);
                 log("SINIT " + sp(real));
                 if (fake != null) log("SINIT " + sp(fake));
             }
             stick++;
             inServerTick = true;
+            if (health) {
+                // Nobody is to die in a scene: a player that is low gets everything back.
+                EntityPlayerMP[] both = {real, fake};
+                for (EntityPlayerMP p : both) {
+                    if (p != null && p.getHealth() < refill) {
+                        log("SH " + stick + " " + who(p));
+                        p.setHealth(p.getMaxHealth());
+                    }
+                }
+            }
             if (fakeTeleport != null && fake != null) {
                 // What a client sends back when the server has moved it.
                 double[] t = fakeTeleport;
