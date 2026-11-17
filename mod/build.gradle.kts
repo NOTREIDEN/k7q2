@@ -16,14 +16,6 @@ java {
 }
 
 loom {
-    runConfigs {
-        "client" {
-            // gradle runClient -Pselftest: the mod tries itself out and the game shuts down (see SelfTest).
-            if (project.hasProperty("selftest")) {
-                vmArgs.add("-Dpvpai.selftest=true")
-            }
-        }
-    }
     forge {
         pack200Provider.set(dev.architectury.pack200.java.Pack200Adapter())
     }
@@ -66,3 +58,21 @@ tasks.named<net.fabricmc.loom.task.RemapJarTask>("remapJar") {
 }
 
 tasks.assemble.get().dependsOn(tasks.named("remapJar"))
+
+// gradle selftest: a Forge client in which the mod tries itself out and which then shuts
+// down (see SelfTest). The plugin's own runClient, which does not pass the checks of this
+// Gradle, as a plain task.
+tasks.register<JavaExec>("selftest") {
+    val run = net.fabricmc.loom.configuration.ide.RunConfig.runConfig(project, loom.runConfigs.getByName("client"))
+    dependsOn("downloadAssets")
+    classpath = run.sourceSet.runtimeClasspath
+    mainClass.set(run.mainClass)
+    jvmArgs(run.vmArgs)
+    jvmArgs("-Dpvpai.selftest=true")
+    args(run.programArgs)
+    workingDir = file(run.runDir)
+    environment(run.envVariables)
+    doFirst {
+        workingDir.mkdirs()
+    }
+}
