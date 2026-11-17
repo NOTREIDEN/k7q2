@@ -29,11 +29,16 @@ pub struct BotParams {
     /// either side, just in front of it, behind it or straight at it. 1 is
     /// about once per cooldown when there is room for it.
     pub pearl_attack: f64,
-    /// How readily it throws a pearl to get away after three hits taken in
-    /// a row.
+    /// How readily it throws a pearl after three hits taken in a row: to
+    /// the side or the back of the opponent most of the time if it also
+    /// throws pearls to attack, and away from the opponent otherwise.
     pub pearl_escape: f64,
     /// Client ticks it waits between pearls: the server's cooldown.
     pub pearl_cd: i32,
+    /// Ticks it aims ahead of the opponent on top of the flight of the
+    /// pearl: the turn, the click, the way to the server and the age of
+    /// what it sees of the opponent.
+    pub pearl_lead: f64,
 }
 
 impl BotParams {
@@ -52,6 +57,7 @@ impl BotParams {
                 pearl_attack: 0.0,
                 pearl_escape: 0.0,
                 pearl_cd: 0,
+                pearl_lead: 3.0,
             },
             2 => BotParams {
                 level,
@@ -66,6 +72,7 @@ impl BotParams {
                 pearl_attack: 0.3,
                 pearl_escape: 0.0,
                 pearl_cd: 0,
+                pearl_lead: 3.0,
             },
             3 => BotParams {
                 level,
@@ -80,6 +87,7 @@ impl BotParams {
                 pearl_attack: 0.7,
                 pearl_escape: 0.4,
                 pearl_cd: 0,
+                pearl_lead: 3.0,
             },
             _ => BotParams {
                 level: 4,
@@ -94,6 +102,7 @@ impl BotParams {
                 pearl_attack: 1.0,
                 pearl_escape: 0.8,
                 pearl_cd: 0,
+                pearl_lead: 3.0,
             },
         }
     }
@@ -114,12 +123,18 @@ pub struct BotState {
     /// 0: no throw under way. 1: turning to the direction of the throw.
     /// 2: throw on this tick. 3: take the sword again.
     pub pearl_stage: u8,
-    /// The spot the throw under way is meant to reach.
+    /// The spot the throw under way, or the last one, is meant to reach,
+    /// and why it was thrown: 1 to attack, 2 to get out of a combo by
+    /// landing next to the opponent, 3 to get away (0: nothing thrown yet).
     pub pearl_to: V3,
+    pub pearl_kind: u8,
     /// Ticks until the next pearl may be thrown.
     pearl_wait: i32,
     /// Hits taken since it last landed one.
     taken_run: i32,
+    /// What it does about the combo it is in, chosen at its third hit: a
+    /// pearl to the side or the back of the opponent, or one away from it.
+    counter: bool,
     /// How the opponent has been moving per tick lately, as seen, with the
     /// jitter of single ticks smoothed out.
     pub seen_vel: [f64; 2],
@@ -182,13 +197,17 @@ pub fn pearl_pitch(dist: f64, drop: f64) -> f64 {
     best.1
 }
 
-/// A spot for the bot to throw a pearl at, or `None`.
-fn pearl_target(c: &Client, world: &World, p: &BotParams, st: &BotState, hdist: f64, rng: &mut Rng) -> Option<V3> {
+/// A spot for the bot to throw a pearl at and the kind of throw it is (see
+/// `BotState::pearl_kind`), or `None`.
+fn pearl_target(c: &Client, world: &World, p: &BotParams, st: &BotState, hdist: f64, rng: &mut Rng) -> Option<(V3, u8)> {
     let (me, them) = (c.lp.l.body.pos, c.rp.pos);
     let lim = world.half - 1.0;
     let inside = |q: &V3| q[0].abs() <= lim && q[2].abs() <= lim;
     let dir = if hdist > 1e-6 { [(them[0] - me[0]) / hdist, (them[2] - me[2]) / hdist] } else { [0.0, 1.0] };
-    if st.taken_run >= 3 && rng.chance(0.5 * p.pearl_escape) {
+    // Three hits taken in a row: time to get out of the combo.
+    let comboed = st.taken_run >= 3 && rng.chance(0.5 * p.pearl_escape);
+    let counter = comboed && st.counter;
+    if comboed && !counter {
         // Away from the opponent, 10 to 18 blocks from here.
         for _ in 0..12 {
             let ang = rng.range(-1.2, 1.2);
@@ -197,39 +216,43 @@ fn pearl_target(c: &Client, world: &World, p: &BotParams, st: &BotState, hdist: 
             let r = rng.range(10.0, 18.0);
             let q = [me[0] + d[0] * r, me[1], me[2] + d[1] * r];
             if inside(&q) {
-                return Some(q);
+                return Some((q, 3));
             }
         }
         // Cornered: anywhere far from the opponent.
         for _ in 0..12 {
             let q = [rng.range(-lim, lim), me[1], rng.range(-lim, lim)];
             if (q[0] - them[0]).hypot(q[2] - them[2]) > 9.0 && (q[0] - me[0]).hypot(q[2] - me[2]) > 6.0 {
-                return Some(q);
+                return Some((q, 3));
             }
         }
         return None;
     }
-    // Towards the opponent: often from far away, now and then in a fight.
-    let chance = if hdist > 7.0 {
-        0.04
-    } else if hdist > 3.5 {
-        0.006
-    } else {
-        0.0
-    };
-    // Not in the half second after a hit on the opponent, while it is being
-    // thrown about.
-    if c.rp.ticks_since_hurt <= 10 || !rng.chance(chance * p.pearl_attack) {
-        return None;
+    if !counter {
+        // Towards the opponent: often from far away, now and then in a
+        // fight, and not in the half second after a hit on the opponent,
+        // while it is being thrown about.
+        let chance = if hdist > 7.0 {
+            0.05
+        } else if hdist > 3.5 {
+            0.015
+        } else {
+            0.0
+        };
+        if c.rp.ticks_since_hurt <= 10 || !rng.chance(chance * p.pearl_attack) {
+            return None;
+        }
     }
     let side = [-dir[1], dir[0]];
-    let r = rng.f64();
-    let off = if r < 0.4 {
+    // Out of a combo it goes to the side or the back of the opponent, where
+    // the opponent has to turn the furthest.
+    let r = if counter { rng.range(0.1, 0.85) } else { rng.f64() };
+    let off = if r < 0.4 || (counter && r < 0.5) {
         // Next to it, left or right.
         let w = rng.range(1.6, 2.6) * if rng.chance(0.5) { 1.0 } else { -1.0 };
         let along = rng.range(-0.6, 0.6);
         [side[0] * w + dir[0] * along, side[1] * w + dir[1] * along]
-    } else if r < 0.7 {
+    } else if r < 0.7 && !counter {
         // Just in front of it.
         let a = rng.range(1.8, 2.8);
         [-dir[0] * a, -dir[1] * a]
@@ -242,12 +265,11 @@ fn pearl_target(c: &Client, world: &World, p: &BotParams, st: &BotState, hdist: 
         [0.0, 0.0]
     };
     // Where the opponent will be when the pearl gets there: after the
-    // flight and three ticks for the turn, the click, the way to the server
-    // and the age of what the bot sees of the opponent. A player on foot
+    // flight and the ticks of `pearl_lead`. A player on foot
     // loses about half its speed every tick and gains what its keys add,
     // so the way it moves now fades within a few ticks, and the bot takes
     // it to end up mostly running the way it faces.
-    let n = (hdist / 1.4).min(20.0) + 3.0;
+    let n = (hdist / 1.4).min(20.0) + p.pearl_lead;
     let run = crate::living::Attr { sprint: true, ..c.lp.l.attr }.value() * 2.1;
     let yaw = (c.rp.yaw as f64).to_radians();
     let v = st.seen_vel;
@@ -256,11 +278,18 @@ fn pearl_target(c: &Client, world: &World, p: &BotParams, st: &BotState, hdist: 
     let fade = keep * (1.0 - keep.powf(n)) / (1.0 - keep);
     let moved = [goal[0] * n + (v[0] - goal[0]) * fade, goal[1] * n + (v[1] - goal[1]) * fade];
     let q = [them[0] + moved[0] + off[0], them[1], them[2] + moved[1] + off[1]];
-    let q = [q[0].clamp(-lim, lim), q[1], q[2].clamp(-lim, lim)];
-    if (q[0] - me[0]).hypot(q[2] - me[2]) < 3.0 {
-        return None;
+    let mut q = [q[0].clamp(-lim, lim), q[1], q[2].clamp(-lim, lim)];
+    let far = (q[0] - me[0]).hypot(q[2] - me[2]);
+    if far < 3.0 {
+        if !counter {
+            return None;
+        }
+        // The opponent is coming this way: the same direction, further, so
+        // that the pearl ends up past it.
+        let d = if far > 0.3 { [(q[0] - me[0]) / far, (q[2] - me[2]) / far] } else { dir };
+        q = [(me[0] + d[0] * 3.5).clamp(-lim, lim), q[1], (me[2] + d[1] * 3.5).clamp(-lim, lim)];
     }
-    Some(q)
+    Some((q, if counter { 2 } else { 1 }))
 }
 
 pub fn act(c: &Client, world: &World, cfg: &ClientCfg, p: &BotParams, st: &mut BotState, rng: &mut Rng) -> Input {
@@ -367,6 +396,9 @@ pub fn act(c: &Client, world: &World, cfg: &ClientCfg, p: &BotParams, st: &mut B
     }
     if lp.hurt_time == 10 {
         st.taken_run += 1;
+        if st.taken_run == 3 {
+            st.counter = p.pearl_attack > 0.0 && rng.chance(0.65);
+        }
     }
     if (rp.hurt_time == 10 && lp.ticks_since_attack <= 12) || lp.ticks_since_hurt > 30 {
         st.taken_run = 0;
@@ -382,8 +414,9 @@ pub fn act(c: &Client, world: &World, cfg: &ClientCfg, p: &BotParams, st: &mut B
                 && lp.held == SLOT_SWORD
                 && st.block_left == 0;
             if ready {
-                if let Some(q) = pearl_target(c, world, p, st, hdist, rng) {
+                if let Some((q, kind)) = pearl_target(c, world, p, st, hdist, rng) {
                     st.pearl_to = q;
+                    st.pearl_kind = kind;
                     st.pearl_stage = 1;
                     st.taken_run = 0;
                 }

@@ -24,6 +24,7 @@ PARAM = {
     "kb_plugin": 55, "kb_preset": 56,
     "w_damage": 57, "opp_autoblock": 58, "sword_wear": 59, "bot_block": 60,
     "pearls": 61, "pearl_prob": 62, "pearl_cd_min_s": 63, "pearl_cd_max_s": 64, "bot_pearl": 65,
+    "bot_pearl_lead": 66,
 }
 
 STAT_NAMES = [
@@ -45,7 +46,7 @@ VIEW_PLAYER = [
 VIEW_GLOBAL = ["ticks_left", "ep_len", "arena_half", "floor_y", "ping0", "ping1", "cps0", "cps1",
                "reach1", "kb_taken1", "backtrack1_ms",
                "kb_kind", "kb_h", "kb_v", "kb_friction", "hit_delay", "autoblock1", "sword_wear",
-               "pearl_cd_s"]
+               "pearl_cd_s", "bot_pearl_kind", "bot_pearl_x", "bot_pearl_z"]
 
 SELF_PLAY = 0
 BOT = 1

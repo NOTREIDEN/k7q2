@@ -36,7 +36,7 @@ pub const PRIV_DIM: usize = 54;
 pub const STATS_DIM: usize = 38;
 /// Floats per player and in total written by `Env::write_view`.
 pub const VIEW_PLAYER: usize = 30;
-pub const VIEW_DIM: usize = 2 * VIEW_PLAYER + 19;
+pub const VIEW_DIM: usize = 2 * VIEW_PLAYER + 22;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Mode {
@@ -163,6 +163,9 @@ pub struct Params {
     pub pearl_cd_s: [f64; 2],
     /// Scales how often scripted bots throw pearls. 0 turns it off.
     pub bot_pearl: f64,
+    /// Ticks the bots aim ahead of their opponent on top of the flight of
+    /// the pearl.
+    pub bot_pearl_lead: f64,
 }
 
 impl Default for Params {
@@ -224,6 +227,7 @@ impl Default for Params {
             pearl_prob: 0.8,
             pearl_cd_s: [10.0, 16.0],
             bot_pearl: 1.0,
+            bot_pearl_lead: 3.0,
         }
     }
 }
@@ -299,6 +303,7 @@ impl Params {
             63 => self.pearl_cd_s[0] = v,
             64 => self.pearl_cd_s[1] = v,
             65 => self.bot_pearl = v,
+            66 => self.bot_pearl_lead = v,
             _ => return false,
         }
         true
@@ -628,6 +633,7 @@ pub fn new_match(p: &Params, rng: &mut Rng, mode: Mode) -> (Match, [f64; 2], Bot
     bot.pearl_attack *= p.bot_pearl;
     bot.pearl_escape *= p.bot_pearl;
     bot.pearl_cd = m.s.cfg.pearl_cooldown;
+    bot.pearl_lead = p.bot_pearl_lead;
     (m, ping, bot)
 }
 
@@ -1088,6 +1094,11 @@ impl Env {
         o[g + 16] = s.p[1].autoblock as i32 as f32;
         o[g + 17] = s.cfg.sword_wear;
         o[g + 18] = s.cfg.pearl_cooldown as f32 / 20.0;
+        // The last pearl of the scripted bot: why it was thrown and where
+        // it was meant to land.
+        o[g + 19] = self.bot_state.pearl_kind as f32;
+        o[g + 20] = self.bot_state.pearl_to[0] as f32;
+        o[g + 21] = self.bot_state.pearl_to[2] as f32;
     }
 
     /// What agent `id` can know from its own client.

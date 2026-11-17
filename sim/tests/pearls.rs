@@ -246,3 +246,20 @@ fn bots_throw_their_pearls_away_from_a_combo() {
     assert!(far / n > 0.85, "{far} of {n}");
     assert!(moved > 8.0, "moved {moved}");
 }
+
+#[test]
+fn bots_answer_a_combo_with_a_pearl_to_the_side_or_the_back() {
+    // A strong bot without pearls against a weak one that uses its pearls
+    // both ways.
+    let l = bot_pearls([(4, 0.0, 0.0), (2, 1.0, 1.0)], 40);
+    let n = l.len() as f64;
+    let near = l.iter().filter(|x| x.0 < 4.5).count() as f64;
+    let far = l.iter().filter(|x| x.0 > 7.0).count() as f64;
+    let mut hist = [0; 12];
+    for x in &l {
+        hist[(x.0 as usize).min(11)] += 1;
+    }
+    println!("{} pearls, {:.0} % within 4.5 blocks of the opponent, {:.0} % more than 7 away; by block {:?}", n, 100.0 * near / n, 100.0 * far / n, hist);
+    assert!(n > 80.0, "{n} pearls");
+    assert!(near / n > 0.6, "{near} of {n}");
+}
