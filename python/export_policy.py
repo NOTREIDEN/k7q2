@@ -81,7 +81,8 @@ def main():
     ap.add_argument("out")
     ap.add_argument("--check", default=None)
     args = ap.parse_args()
-    policy, ck, _ = load_policy(args.checkpoint, sim_dims())
+    # A control the weights were trained without stays at rest in the game.
+    policy, ck, _ = load_policy(args.checkpoint, sim_dims(), still=True)
     policy.eval()
     write_policy(policy, ck.get("samples", 0), args.out)
     print(f"{args.out}: {ck.get('samples', 0) / 1e6:.0f}M samples, {policy.enc[0].in_features} inputs, controls {policy.act_dims}")

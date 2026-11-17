@@ -9,7 +9,7 @@
 //! the reward that agent earned since its previous action.
 use crate::aabb::{dist, V3};
 use crate::agent::{aim_error, clip, local, Agent, Duel};
-pub use crate::agent::{decode_action, ACT_DIMS, ACT_HEADS, OBS_DIM, PITCH_BINS, YAW_BINS};
+pub use crate::agent::{decode_action, ACT_DIMS, ACT_HEADS, FLICK_BINS, OBS_DIM, PITCH_BINS, YAW_BINS};
 use crate::bot::{self, BotParams, BotState};
 use crate::client::{ClientCfg, Edge, Input, TickOut, INV_SHUT, MAX_BACKTRACK};
 use crate::mth::Rng;
@@ -26,12 +26,12 @@ pub const MISS_POINTS: f32 = 2.0;
 /// How many ticks of looking away `w_pot_time` counts before a potion is
 /// thrown, and as many after it.
 pub const POT_TIME_TICKS: i32 = 10;
-/// The degrees of a turn undone at once that `w_shake` counts in full, and
-/// how many ticks the view may have stood still in between.
 /// The food from which the game heals a player by itself, and the food a
 /// player needs more than to sprint.
 pub const FOOD_TO_HEAL: i32 = 18;
 pub const FOOD_TO_SPRINT: i32 = 6;
+/// The degrees of a turn undone at once that `w_shake` counts in full, and
+/// how many ticks the view may have stood still in between.
 pub const SHAKE_DEG: f32 = 6.0;
 pub const SHAKE_TICKS: i32 = 2;
 pub const PRIV_DIM: usize = 71;

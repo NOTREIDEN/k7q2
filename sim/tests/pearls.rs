@@ -8,7 +8,7 @@ use pvpsim::mth::Rng;
 use pvpsim::net::SLOT_SWORD;
 
 /// Stand still, mouse at rest, no button down.
-const IDLE: [i32; ACT_HEADS] = [0, 0, 0, 0, 0, 13, 10, 0, 0, 0];
+const IDLE: [i32; ACT_HEADS] = [0, 0, 0, 0, 0, 13, 10, 0, 0, 0, 0];
 
 fn params() -> Params {
     let mut p = Params::default();

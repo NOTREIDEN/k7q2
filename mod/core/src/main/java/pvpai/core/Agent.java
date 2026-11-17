@@ -15,8 +15,10 @@ import java.util.Random;
  * once the client has made its tick with them.
  */
 public final strictfp class Agent {
-    /** Choices of each control: forward, strafe, jump, sprint key, attack, yaw, pitch, right button, pearl, and the rest of the hotbar. */
-    public static final int[] ACT_DIMS = {3, 3, 2, 2, 2, 31, 29, 2, 2, 7};
+    /** Choices of each control: forward, strafe, jump, sprint key, attack, yaw, pitch, right button, pearl, the rest of the hotbar, and a flick of the mouse. */
+    public static final int[] ACT_DIMS = {3, 3, 2, 2, 2, 31, 29, 2, 2, 7, 6};
+    /** Mouse counts a flick adds to the yaw of its tick: an eighth of a turn, a quarter either way, or half a turn. */
+    public static final int[] FLICK_BINS = {0, -300, 300, -600, 600, 1200};
     /** Mouse counts per tick; the four large ones at the end are a quarter turn and a half turn each way. */
     public static final int[] YAW_BINS = {
         -377, -233, -144, -89, -55, -34, -21, -13, -8, -5, -3, -2, -1, 0, 1, 2, 3, 5, 8, 13, 21, 34, 55, 89, 144, 233, 377, -600, 600,
@@ -155,7 +157,7 @@ public final strictfp class Agent {
         k.jump = a[2] != 0;
         k.sprintKey = a[3] != 0;
         k.attack = a[4] != 0;
-        k.dx = YAW_BINS[pick(a[5], 31)];
+        k.dx = YAW_BINS[pick(a[5], 31)] + (a.length > 10 ? FLICK_BINS[pick(a[10], 6)] : 0);
         k.dy = PITCH_BINS[pick(a[6], 29)];
         k.useItem = a.length > 7 && a[7] != 0;
         return k;

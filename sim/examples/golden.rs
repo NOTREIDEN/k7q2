@@ -60,7 +60,8 @@ fn main() {
         for call in 0..6000 {
             let wild = (call / 200) % 2 == 1;
             for i in 0..n {
-                for k in 0..ACT_HEADS {
+                // The controls the reference was made with; one added since stays at nothing.
+                for k in 0..10 {
                     let r = rng.next_u64();
                     act[i * ACT_HEADS + k] = if wild || r % 8 == 0 { ((r >> 8) % ACT_DIMS[k] as u64) as i32 } else { [1, 0, 0, 1, 1, 13, 10, 0, 0, 0][k] };
                 }

@@ -71,7 +71,7 @@ def main():
           + (", same connection and clicks for both" if args.fair else ""))
     print("version    wins  duels  hits/min  taken/min  dmg/min  taken  potions/min  theirs  pearls/min  theirs")
     for i, name in enumerate(names + [None]):
-        other = agent if name is None else load_policy(os.path.join(args.pool, name), dims)[0].eval()
+        other = agent if name is None else load_policy(os.path.join(args.pool, name), dims, still=True)[0].eval()
         st = duel(agent, other, args.duels, args.seconds, 77 + i, params)
         ended = st["deaths0"] + st["deaths1"]
         mins = st["ticks0"] / 1200.0

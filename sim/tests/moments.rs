@@ -1,9 +1,9 @@
 //! Half turns of the view, what the opponent's last pearl tells, and what
 //! it costs to heal the opponent, to fight on hungry and to stay slow.
-use pvpsim::env::{Env, Mode, Params, ACT_HEADS, OBS_DIM, PRIV_DIM, YAW_BINS};
+use pvpsim::env::{Env, Mode, Params, ACT_DIMS, ACT_HEADS, FLICK_BINS, OBS_DIM, PRIV_DIM, YAW_BINS};
 
 /// Stand still, mouse at rest, no button down.
-const IDLE: [i32; ACT_HEADS] = [0, 0, 0, 0, 0, 13, 10, 0, 0, 0];
+const IDLE: [i32; ACT_HEADS] = [0, 0, 0, 0, 0, 13, 10, 0, 0, 0, 0];
 /// The pitch choice that looks down the fastest of the first set.
 const DOWN: i32 = 26;
 
@@ -83,6 +83,30 @@ fn a_half_turn_and_a_quarter_turn_take_one_tick() {
     turned(&e, -90.0);
     run(&mut e, 2, |k| with(5, [28, 13][k]));
     turned(&e, 0.0);
+}
+
+#[test]
+fn a_flick_is_added_to_the_yaw_of_its_tick() {
+    assert_eq!(ACT_DIMS[10] as usize, FLICK_BINS.len());
+    assert_eq!(FLICK_BINS, [0, -300, 300, -600, 600, 1200]);
+    let mut e = Env::new(Mode::SelfPlay, params(), 1);
+    let yaw = |e: &Env| e.m.c[0].lp.l.yaw;
+    let mut at = yaw(&e);
+    // Each flick by itself, with the mouse otherwise at rest: 0.15 degrees a count.
+    for (choice, by) in [(1, -45.0), (2, 45.0), (3, -90.0), (4, 90.0), (5, 180.0), (0, 0.0)] {
+        run(&mut e, 2, |k| with(10, [choice, 0][k]));
+        assert!((yaw(&e) - at - by).abs() < 1e-3, "flick {choice}: {} from {at}, not by {by}", yaw(&e));
+        at = yaw(&e);
+    }
+    // With a turn of the yaw control in the same tick the two add up:
+    // a quarter turn and 21 counts more the same way.
+    assert_eq!(YAW_BINS[20], 21);
+    run(&mut e, 2, |k| {
+        let mut a = with(10, [4, 0][k]);
+        a[5] = [20, 13][k];
+        a
+    });
+    assert!((yaw(&e) - at - 93.15).abs() < 1e-3, "{} from {at}", yaw(&e));
 }
 
 #[test]

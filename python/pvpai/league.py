@@ -83,7 +83,7 @@ class League:
             if m is not None and m.stamp == stamp:
                 continue
             try:
-                policy, _, _ = load_policy(path, self.dims)
+                policy, _, _ = load_policy(path, self.dims, still=True)
             except Exception:
                 # Half written, or not a checkpoint: look again next time.
                 continue

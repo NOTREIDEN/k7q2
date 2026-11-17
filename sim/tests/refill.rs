@@ -7,7 +7,7 @@ use pvpsim::env::{Env, Mode, Params, ACT_HEADS, OBS_DIM, PRIV_DIM};
 use pvpsim::net::{Item, Rows, SLOT_SWORD};
 
 /// Stand still, mouse at rest, no button down.
-const IDLE: [i32; ACT_HEADS] = [0, 0, 0, 0, 0, 13, 10, 0, 0, 0];
+const IDLE: [i32; ACT_HEADS] = [0, 0, 0, 0, 0, 13, 10, 0, 0, 0, 0];
 /// What the last control asks for.
 const THROW: i32 = 1;
 const DRINK: i32 = 2;

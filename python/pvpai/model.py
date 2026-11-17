@@ -16,8 +16,17 @@ PEARL_BIAS = [0.0, -4.5]
 # control later gained a drink, a meal and a stop, and then a healing
 # potion and a potion of Speed from the inventory.
 POTION_BIAS = [0.0, -4.5, -5.0, -5.0, -5.0, -4.0, -4.0]
+# And of a flick of the mouse: one tick in twenty, a fifth of those for
+# each of the five. Rare enough that a fight goes on as it did, often
+# enough that every state sees all of them tried within minutes: the turns
+# of the yaw control as large as these had gone so far out of use that
+# nothing brought them back, and turning round took half a second.
+FLICK_BIAS = [0.0, -4.5, -4.5, -4.5, -4.5, -4.5]
 # Controls that do not start evenly, by their position among the controls.
-START_BIAS = {7: USE_BIAS, 8: PEARL_BIAS, 9: POTION_BIAS}
+START_BIAS = {7: USE_BIAS, 8: PEARL_BIAS, 9: POTION_BIAS, 10: FLICK_BIAS}
+# The preference of every choice but the first of a control that an old
+# version kept as an opponent never had: it goes on playing as it did.
+NEVER = -30.0
 # Where a choice added to a control that already exists starts: as a copy
 # of the control's first choice (in every one of these controls, doing
 # nothing) made rarer by this much, so that the policy plays as before
@@ -163,15 +172,16 @@ class Policy(nn.Module):
         return logp, ent, self.value(hs, priv)
 
 
-def fit_state(sd, policy):
+def fit_state(sd, policy, still=False):
     """Stored weights made to fit a policy that has since gained inputs,
     controls or choices of a control. New inputs get zero weight, a new
     control depends on nothing yet and has its starting preference, and a
     new choice of an old control starts as a rare copy of the control's
     first choice, so the policy plays as before until it learns to use
     them. A control listed in `RESTART` for a
-    control that is being added starts over as well. Returns the weights
-    and whether anything was added."""
+    control that is being added starts over as well. With `still`, for a
+    version that is not trained any more, a new control stays at its first
+    choice instead. Returns the weights and whether anything was added."""
     out, grown = {}, False
     again = {h for new, hs in RESTART.items() if f"heads.{new}.bias" not in sd for h in hs}
     for k, ref in policy.state_dict().items():
@@ -179,6 +189,8 @@ def fit_state(sd, policy):
         head = int(part[1]) if part[0] == "heads" else None
         if k not in sd or head in again:
             start = start_bias(head, ref.shape[0]) if head is not None and part[2] == "bias" else None
+            if still and k not in sd and head is not None and part[2] == "bias":
+                start = [0.0] + [NEVER] * (ref.shape[0] - 1)
             out[k] = torch.tensor(start, dtype=ref.dtype) if start is not None else torch.zeros_like(ref)
             grown = True
         elif sd[k].shape != ref.shape:
@@ -206,11 +218,11 @@ def fit_state(sd, policy):
     return out, grown
 
 
-def load_policy(path, dims=None):
+def load_policy(path, dims=None, still=False):
     """The policy stored in a checkpoint, with the checkpoint itself and
     whether inputs or controls were added. `dims` is what the simulator
     now gives and takes (`pvpai.env.sim_dims()`); a checkpoint trained
-    with less is grown to fit, see `fit_state`."""
+    with less is grown to fit, see `fit_state`, which `still` is for."""
     ck = torch.load(path, map_location="cpu", weights_only=False)
     sd = {k: v.float() for k, v in ck["policy"].items()}
     hidden = sd["lstm.weight_hh_l0"].shape[1]
@@ -219,6 +231,6 @@ def load_policy(path, dims=None):
         obs, priv = max(obs, dims[0]), max(priv, dims[1])
         acts = [max(a, d) for a, d in zip(acts, dims[2])] + list(dims[2][len(acts):])
     policy = Policy(obs, priv, acts, hidden)
-    sd, grown = fit_state(sd, policy)
+    sd, grown = fit_state(sd, policy, still)
     policy.load_state_dict(sd)
     return policy, ck, grown

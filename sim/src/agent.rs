@@ -14,7 +14,7 @@ use crate::net::{refill_click, shift_click, Item, Kind, SLOT_FOOD, SLOT_PEARL, S
 use crate::server::{splash_heal, throw_heading, MAX_HEALTH, POTION_HEAL};
 use crate::world::{RayHit, World};
 
-pub const ACT_HEADS: usize = 10;
+pub const ACT_HEADS: usize = 11;
 /// forward, strafe, jump, sprint key, attack, yaw bin, pitch bin, right
 /// mouse button (block with the sword), throw a pearl, and what to do with
 /// the rest of the hotbar: nothing, throw a healing potion, drink the
@@ -32,7 +32,15 @@ pub const ACT_HEADS: usize = 10;
 /// inventory is the inventory key, a shift click on the potion on the next
 /// tick, and the key again on the third; asked for on every tick, another
 /// potion comes down on each (see `Agent::refill_keys`).
-pub const ACT_DIMS: [i32; ACT_HEADS] = [3, 3, 2, 2, 2, 31, 29, 2, 2, 7];
+///
+/// The last control is a flick of the mouse, added to the yaw of the same
+/// tick: nothing, an eighth of a turn or a quarter either way, or half a
+/// turn (see `FLICK_BINS`). The yaw control alone had settled on small
+/// turns so firmly that its large ones were never tried again; a control
+/// of its own starts the same in every state and is learnt from there.
+pub const ACT_DIMS: [i32; ACT_HEADS] = [3, 3, 2, 2, 2, 31, 29, 2, 2, 7, 6];
+/// Mouse counts a flick adds to the yaw of its tick.
+pub const FLICK_BINS: [i32; 6] = [0, -300, 300, -600, 600, 1200];
 /// Mouse counts per tick. One count is 0.15 degrees at sensitivity 0.5.
 /// The four large ones at the end came later, for turning away from the
 /// opponent and back within a tick or two: 600 counts are a quarter turn
@@ -885,7 +893,7 @@ pub fn decode_action(a: &[i32]) -> Input {
         sprint_key: a[3] != 0,
         attack: a[4] != 0,
         extra_clicks: 0,
-        dx: YAW_BINS[pick(a[5], 31)],
+        dx: YAW_BINS[pick(a[5], 31)] + if a.len() > 10 { FLICK_BINS[pick(a[10], 6)] } else { 0 },
         dy: PITCH_BINS[pick(a[6], 29)],
         use_item: a.len() > 7 && a[7] != 0,
         use_again: false,

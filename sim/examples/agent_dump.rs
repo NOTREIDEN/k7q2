@@ -194,7 +194,7 @@ impl Chooser {
     fn next(&mut self) -> [i32; ACT_HEADS] {
         let wild = (self.tick / 200) % 2 == 1;
         self.tick += 1;
-        let mut a = [1, 0, 0, 1, 1, 13, 10, 0, 0, 0];
+        let mut a = [1, 0, 0, 1, 1, 13, 10, 0, 0, 0, 0];
         for (k, x) in a.iter_mut().enumerate() {
             let r = self.rng.next_u64();
             if wild || r % 8 == 0 {

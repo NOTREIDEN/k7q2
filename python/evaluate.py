@@ -43,9 +43,10 @@ def main():
     ap.add_argument("--health", action="store_true", help="real health, armour and healing potions; a duel ends with a death")
     ap.add_argument("--lib", default=None, help="path to libpvpsim.so")
     ap.add_argument("--no-block", action="store_true", help="the agent never holds the right button with its sword")
+    ap.add_argument("--still", action="store_true", help="a control the checkpoint was trained without stays at rest")
     args = ap.parse_args()
 
-    policy, ck, _ = load_policy(args.checkpoint, sim_dims(args.lib))
+    policy, ck, _ = load_policy(args.checkpoint, sim_dims(args.lib), still=args.still)
     policy.eval()
     ticks = int(args.seconds * 20)
     print(f"checkpoint with {ck.get('samples', 0)/1e6:.1f}M samples; {args.duels} duels of {args.seconds:.0f} s per level")
