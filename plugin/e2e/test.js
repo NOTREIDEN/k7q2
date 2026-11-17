@@ -101,7 +101,7 @@ function join(name) {
     bot.on('error', e => console.log(name + ': ' + e))
     bot.on('messagestr', m => bot.said.push(m))
     bot._client.on('entity_velocity', p => {
-      if (bot.entity && p.entityId === bot.entity.id) bot.vel.push([p.velocityX, p.velocityY, p.velocityZ])
+      if (bot.entity && p.entityId === bot.entity.id) bot.vel.push([p.velocity.x, p.velocity.y, p.velocity.z])
     })
     setTimeout(() => reject(new Error(name + ' did not get into the world')), 60000)
   })
@@ -109,7 +109,8 @@ function join(name) {
 
 async function place(bot, x, y, z, yaw) {
   const moved = new Promise(resolve => bot.once('forcedMove', resolve))
-  say(`tp ${bot.username} ${x} ${y} ${z} ${yaw} 0`)
+  // With its decimals: the game puts a whole number in the middle of its block.
+  say(`tp ${bot.username} ${x.toFixed(2)} ${y.toFixed(2)} ${z.toFixed(2)} ${yaw} 0`)
   await Promise.race([moved, sleep(3000)])
 }
 
