@@ -30,7 +30,7 @@ use pvpsim::world::World;
 use std::io::Write;
 
 /// Parameter numbers of `Params::set` and the values of the training runs.
-const SETTINGS: [(i32, f64); 22] = [
+const SETTINGS: [(i32, f64); 23] = [
     (20, 0.7),
     (48, 0.5),
     (57, 1.0),
@@ -42,8 +42,9 @@ const SETTINGS: [(i32, f64); 22] = [
     (96, 5.0),
     (97, 0.5),
     (104, 2.0),
-    (105, 0.3),
+    (105, 0.5),
     (106, 31.0),
+    (113, 0.4),
     (107, 12.0),
     (108, 28.0),
     (110, 1.5),

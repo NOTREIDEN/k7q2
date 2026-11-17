@@ -399,6 +399,18 @@ fn the_extreme_lesson_is_a_bot_that_nothing_gets_off() {
         seen[Env::new(Mode::Bot, p, seed).lesson as usize] += 1;
     }
     assert!(seen[0] == 0 && seen[1..].iter().all(|&n| n > 8), "{seen:?}");
+    // It can be given a share of its own among the lessons, the others
+    // sharing the rest; two players that both learn still do not get it.
+    p.extreme_share = 0.5;
+    let mut seen = [0; 6];
+    for seed in 0..200 {
+        assert!(Env::new(Mode::SelfPlay, p, seed).lesson <= 4);
+        seen[Env::new(Mode::Bot, p, seed).lesson as usize] += 1;
+    }
+    assert!(seen[0] == 0 && (80..=120).contains(&seen[5]) && seen[1..5].iter().all(|&n| n > 12), "{seen:?}");
+    p.extreme_share = 1.0;
+    assert!((0..40).all(|seed| Env::new(Mode::Bot, p, seed).lesson == 5));
+    p.extreme_share = -1.0;
 
     // The bot goes round the first player, which only stands there and
     // is knocked about: in ten seconds it has been on most sides of it,

@@ -6,7 +6,7 @@ use pvpsim::env::{Mode, VecEnv, ACT_DIMS, ACT_HEADS, OBS_DIM, PRIV_DIM, STATS_DI
 use pvpsim::mth::Rng;
 
 /// Parameter numbers of `Params::set` and the values of the training runs.
-const SETTINGS: [(i32, f64); 22] = [
+const SETTINGS: [(i32, f64); 23] = [
     (20, 0.7),   // kb_random
     (48, 0.5),   // opp_edge_prob
     (57, 1.0),   // w_damage
@@ -18,8 +18,9 @@ const SETTINGS: [(i32, f64); 22] = [
     (96, 5.0),   // w_fed
     (97, 0.5),   // refill_prob
     (104, 2.0),  // w_stock
-    (105, 0.3),  // lesson_prob
+    (105, 0.5),  // lesson_prob
     (106, 31.0), // lessons
+    (113, 0.4),  // extreme_share
     (107, 12.0), // lesson_dist_min
     (108, 28.0), // lesson_dist_max
     (110, 1.5),  // w_miss

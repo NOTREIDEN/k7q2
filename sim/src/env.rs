@@ -271,6 +271,10 @@ pub struct Params {
     /// thrown with it there.
     pub lesson_prob: f64,
     pub lessons: u32,
+    /// Of the lessons against a scripted bot, the share that is the extreme
+    /// one. Its duels are short, so that as one lesson among five it gets
+    /// little of the playing time. Negative: as likely as any other.
+    pub extreme_share: f64,
     /// How far apart a lesson starts.
     pub lesson_dist: [f64; 2],
     /// The last seconds of Speed, in which a potion of it is worth
@@ -376,6 +380,7 @@ impl Default for Params {
             refill_who: 0,
             bot_refill: 1.0,
             bot_runner: 0.0,
+            extreme_share: -1.0,
             w_stock: 0.0,
             lesson_prob: 0.0,
             lessons: 15,
@@ -503,6 +508,7 @@ impl Params {
             110 => self.w_miss = v as f32,
             111 => self.w_pot_time = v as f32,
             112 => self.bot_runner = v,
+            113 => self.extreme_share = v,
             _ => return false,
         }
         true
@@ -793,7 +799,14 @@ pub fn new_duel(p: &Params, rng: &mut Rng, mode: Mode) -> (Match, [f64; 2], BotP
     // as they always did.
     let offered = if mode == Mode::Bot { 31 } else { 15 };
     let lesson = if p.lesson_prob > 0.0 && p.lessons & offered != 0 && rng.chance(p.lesson_prob) {
-        let on: Vec<u8> = (0..5u8).filter(|k| (p.lessons & offered) >> k & 1 != 0).collect();
+        let mut on: Vec<u8> = (0..5u8).filter(|k| (p.lessons & offered) >> k & 1 != 0).collect();
+        if p.extreme_share >= 0.0 && on.len() > 1 && on.contains(&4) {
+            if rng.chance(p.extreme_share) {
+                on = vec![4];
+            } else {
+                on.retain(|&k| k != 4);
+            }
+        }
         1 + on[(rng.next_u64() % on.len() as u64) as usize]
     } else {
         0
