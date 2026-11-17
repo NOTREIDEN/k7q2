@@ -14,19 +14,29 @@ five decompiled sources that you provide; everything else is `Rig.java`.
 For every client tick: the packets the client handled before the tick, the
 keys, clicks and mouse counts applied, the packets it sent, and afterwards
 the local player (position, motion, angles, sprint state, timers, the
-crosshair pick) and the other player as this client sees it.
+crosshair pick as nothing, the player or a block, whether it is blocking
+with its sword, the right click delay) and the other player as this client
+sees it, including whether it is shown blocking.
 
 For every server tick: the packets handled from each player, the packets
 sent to each player, and afterwards both players (position, motion, hurt
 timers, last damage, fall distance, the movement check's state, the chunk
-they are filed under) and their entity tracker entries.
+they are filed under, whether the server has them blocking) and their
+entity tracker entries.
+
+The packets written down are the ones a sword duel is made of: movement,
+swings, attacks, sprint and sneak actions, the right click (`C08`, and the
+two `C02` interact packets that go with it when the crosshair is on the
+player), the release of the block (`C07`), and from the server the entity
+tracker's packets, velocity, teleports, the flags byte and the sword being
+sent again after a hit that wore it (`S2F`).
 
 Doubles and floats are written as raw bits, so the comparison is exact.
 
 The second player is scripted on the server: it has no client. Its packets
 are injected on the server thread and what the server sends to it is only
 written down. It can stand at a spot relative to the real player (`FRONT`),
-walk towards a point (`GOTO`), jump, sprint, swing and attack.
+walk towards a point (`GOTO`), jump, sprint, swing, attack and block.
 
 ## How the replay works
 
@@ -71,8 +81,9 @@ hex numbers decoded, for reading one by hand.
 
 ## Scripts
 
-One line per client tick, `C forward strafe jump sprint attack dx dy`, plus
-optional lines:
+One line per client tick, `C forward strafe jump sprint attack dx dy use`,
+plus optional lines. `attack` is the number of left clicks in the tick,
+`use` is 1 while the right button is held and may be left out:
 
 | Line | Meaning |
 |---|---|
@@ -80,6 +91,7 @@ optional lines:
 | `fake x y z yaw pitch` | add the scripted second player there |
 | `speed N` | Speed amplifier for both, `1` is Speed II (default), `-1` none |
 | `sensitivity X` | mouse slider, 0 to 1 (default 0.5) |
+| `unbreakable 1` | swords that do not wear, so the server never sends one again |
 | `block x y z` | a stone block |
 | `pen lo hi` | keep the scripted player's spots inside this square |
 | `settle N` | ticks to wait before recording starts (default 100) |
@@ -87,10 +99,16 @@ optional lines:
 | `F tick FRONT dist angle height yaw pitch` | stand `dist` from the real player, `angle` degrees off its line of sight, facing it |
 | `F tick GOTO x z step height yaw pitch` | walk towards a point, one step at most |
 | `F tick SPRINT 0/1`, `SWING`, `ATTACK`, `GROUND 0/1` | the matching packet |
+| `F tick USE`, `RELEASE` | scripted player: start and stop blocking |
 
-Both players get Resistance V and Saturation, so hits do no damage and
-knock back in full, which is the infinite-health setting of training stage
-one. The world is a flat grass floor at y = 4.
+Both players hold a diamond sword and get Resistance V and Saturation, so
+hits do no damage and knock back in full, which is the infinite-health
+setting of training stage one. The world is a flat grass floor at y = 4.
+
+The first line of a recording says which format it is (`fmt=2` has the
+right button, the block and the kind of crosshair pick) and whether the
+swords wear. Recordings without it are older and are compared on what they
+hold.
 
 ## Hooks
 

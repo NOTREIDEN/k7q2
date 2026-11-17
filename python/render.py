@@ -111,8 +111,9 @@ def rot_x(pts, pivot, ang):
     return np.stack([d[:, 0], y, z], 1) + pivot
 
 
-def player_quads(pos, yaw, pitch, walk, amp, swing, team, hurt):
-    """World-space quads (corners, normal, colour) of one blocky player."""
+def player_quads(pos, yaw, pitch, walk, amp, swing, team, hurt, block=False):
+    """World-space quads (corners, normal, colour) of one blocky player.
+    With `block` the sword is held upright in front of the body."""
     cy, sy = math.cos(math.radians(yaw)), math.sin(math.radians(yaw))
 
     def to_world(p):
@@ -126,13 +127,18 @@ def player_quads(pos, yaw, pitch, walk, amp, swing, team, hurt):
     leg = math.sin(walk) * amp * 0.9
     arm_swing = -math.sin(swing * math.pi) * 1.7 if swing is not None else 0.0
     head = math.radians(max(-80.0, min(80.0, pitch)))
+    arm = -leg * 0.8 - 0.35 + arm_swing
+    sword = (box((-6.6, 10.5, 1), (-5.4, 12.5, 17)), (0, 22, 0), arm, [SWORD] * 6)
+    if block:
+        arm = -1.15
+        sword = (box((-5.2, 13, 7.2), (-0.8, 31, 8.4)), (0, 22, 0), 0.0, [SWORD] * 6)
     parts = [
         (box((0, 0, -2), (4, 12, 2)), (0, 12, 0), -leg, [team["legs"]] * 6),
         (box((-4, 0, -2), (0, 12, 2)), (0, 12, 0), leg, [team["legs"]] * 6),
         (box((-4, 12, -2), (4, 24, 2)), (0, 12, 0), 0.0, [team["body"]] * 6),
         (box((4, 12, -2), (8, 24, 2)), (0, 22, 0), leg * 0.8, [team["body"]] * 6),
-        (box((-8, 12, -2), (-4, 24, 2)), (0, 22, 0), -leg * 0.8 - 0.35 + arm_swing, [team["body"]] * 6),
-        (box((-6.6, 10.5, 1), (-5.4, 12.5, 17)), (0, 22, 0), -leg * 0.8 - 0.35 + arm_swing, [SWORD] * 6),
+        (box((-8, 12, -2), (-4, 24, 2)), (0, 22, 0), arm, [team["body"]] * 6),
+        sword,
         (box((-4, 24, -4), (4, 32, 4)), (0, 24, 0), -head, [SKIN, SKIN, SKIN, HAIR, HAIR, SKIN]),
         (box((1, 27.5, 4.05), (3, 29.5, 4.1)), (0, 24, 0), -head, [EYE] * 6),
         (box((-3, 27.5, 4.05), (-1, 29.5, 4.1)), (0, 24, 0), -head, [EYE] * 6),
@@ -188,7 +194,8 @@ def draw_scene(img, cam, players, half, floor_y, skip=None):
     for i, p in enumerate(players):
         if i == skip:
             continue
-        quads += player_quads(p["pos"], p["yaw"], p["pitch"], p["walk"], p["amp"], p["swing"], TEAM[i], p["hurt"])
+        quads += player_quads(p["pos"], p["yaw"], p["pitch"], p["walk"], p["amp"], p["swing"], TEAM[i], p["hurt"],
+                              p.get("block", False))
     order = []
     for corners, n, col in quads:
         centre = corners.mean(0)
@@ -239,6 +246,8 @@ class Segment:
             "amp": min(float(self.speed[p, t1]) * 4.0, 1.0),
             "swing": since / 6.0 if 0 <= since < 6 else None,
             "hurt": self.col(p, "hurt_time")[t1] > 0,
+            # Shown blocking when the server has the player blocking, which is what others see.
+            "block": "blocking" in self.pi and self.col(p, "blocking")[t1] > 0,
         }
 
 
@@ -269,11 +278,19 @@ def hud(img, seg, t, fonts, inset_box):
                 edge.append(f"KB {100 * seg.g('kb_taken1'):.0f} %")
             if seg.g("backtrack1_ms") > 0:
                 edge.append(f"backtrack {seg.g('backtrack1_ms'):.0f} ms")
-        box_w = 330 if not edge else 470
-        d.rectangle([x - 14 if p == 0 else x - box_w, 16, x + 330 if p == 0 else x + 14, 198 if edge else 168],
+            if "autoblock1" in seg.gi and seg.g("autoblock1") > 0:
+                edge.append("autoblock")
+        blocks = "blocked" in seg.pi
+        low = 158 + (30 if blocks else 0)
+        box_w = 330 if not edge else 520
+        d.rectangle([x - 14 if p == 0 else x - box_w, 16, x + 330 if p == 0 else x + 14, low + (40 if edge else 10)],
                     fill=(0, 0, 0, 96))
+        if blocks:
+            # Damage dealt in hearts (two points each) and hits taken on a block.
+            text(d, (x, 158), f"Daño: {seg.col(p, 'damage')[tick] / 2:.0f} corazones   Bloqueó: {int(seg.col(p, 'blocked')[tick])}",
+                 small, (225, 225, 225), anchor)
         if edge:
-            text(d, (x, 158), "Ventaja: " + ", ".join(edge), small, (255, 214, 120), anchor)
+            text(d, (x, low), "Ventaja: " + ", ".join(edge), small, (255, 214, 120), anchor)
         text(d, (x, 22), seg.names[p], mid, TEAM[p]["ui"], anchor)
         text(d, (x, 60), f"Golpes: {hits}", mid, (255, 255, 255), anchor)
         text(d, (x, 98), f"Con sprint: {100 * sprint // max(hits, 1)} %   CPS: {cps:.1f}", small, (225, 225, 225), anchor)
@@ -290,6 +307,8 @@ def hud(img, seg, t, fonts, inset_box):
         d.rectangle([bx, by, bx + sz, by + sz], fill=(255, 255, 255, 215) if on else (0, 0, 0, 110))
         d.text((bx + sz / 2, by + sz / 2), label, font=mid, fill=(20, 20, 20) if on else (235, 235, 235), anchor="mm")
     wide = [("SALTO", k("jump") > 0), ("SPRINT", seg.col(0, "sprinting")[tick] > 0), ("CLIC", k("attack") > 0)]
+    if "using" in seg.pi:
+        wide.append(("BLOQ", k("using") > 0))
     for i, (label, on) in enumerate(wide):
         bx, by = x0 + i * 122, y0 + 2 * (sz + 6)
         d.rectangle([bx, by, bx + 116, by + 40], fill=(255, 255, 255, 215) if on else (0, 0, 0, 110))
@@ -392,9 +411,10 @@ def main():
          "-pix_fmt", "yuv420p", "-movflags", "+faststart", args.out], stdin=subprocess.PIPE)
     n = 0
     for seg in segs:
+        server_kb = "kb_kind" in seg.gi and seg.g("kb_kind") > 0
         lines = [f"{seg.names[0]} contra {seg.names[1]}",
                  f"Entrenada con {seg.samples/1e6:.0f} millones de pasos en el simulador de 1.8.9",
-                 "Speed II, vida infinita, knockback de vanilla"]
+                 "Speed II, vida infinita, knockback de " + ("servidor" if server_kb else "vanilla")]
         for img in title(size, lines, args.fps):
             ff.stdin.write(img.tobytes())
         for img in frames(seg, size, args.fps, args.ss):

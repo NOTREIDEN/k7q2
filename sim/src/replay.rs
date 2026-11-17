@@ -69,7 +69,7 @@ fn s2c(l: &Line, at: usize, own_id: i64) -> Option<S2C> {
             let p: Vec<&str> = e.split(':').collect();
             if p[0] == "0" {
                 let flags: i64 = p[2].parse().unwrap();
-                return Some(S2C::Meta { own: id("entityId"), sprinting: flags & 8 != 0 });
+                return Some(S2C::Meta { own: id("entityId"), sprinting: flags & 8 != 0, using: flags & 16 != 0 });
             }
         }
         return None;
@@ -97,6 +97,11 @@ fn s2c(l: &Line, at: usize, own_id: i64) -> Option<S2C> {
             return Some(S2C::Props { own: id("entityId"), base, speed_amp: amp, sprint });
         }
         return None;
+    }
+    if class == "S2FPacketSetSlot" {
+        // Slot 36 of the player's own inventory is the first hotbar slot,
+        // where the sword is.
+        return if l.i("windowId") == 0 && l.i("slot") == 36 { Some(S2C::SetSlot) } else { None };
     }
     if class == "S08PacketPlayerPosLook" {
         assert!(l.s("field_179835_f") == "[]", "a relative teleport is not modelled");
@@ -151,7 +156,15 @@ fn c2s(l: &Line, at: usize) -> Option<C2S> {
     }
     match class {
         "C0APacketAnimation" => Some(C2S::Swing),
-        "C02PacketUseEntity" => if l.s("action") == "ATTACK" { Some(C2S::Attack) } else { None },
+        "C02PacketUseEntity" => match l.s("action") {
+            "ATTACK" => Some(C2S::Attack),
+            "INTERACT_AT" => Some(C2S::InteractAt),
+            "INTERACT" => Some(C2S::Interact),
+            _ => None,
+        },
+        "C08PacketPlayerBlockPlacement" => Some(if l.i("placedBlockDirection") == 255 { C2S::UseItem } else { C2S::UseBlock }),
+        // Starting and giving up on breaking a block is not modelled.
+        "C07PacketPlayerDigging" => if l.s("status") == "RELEASE_USE_ITEM" { Some(C2S::ReleaseUse) } else { None },
         "C0BPacketEntityAction" => match l.s("action") {
             "START_SPRINTING" => Some(C2S::Sprint(true)),
             "STOP_SPRINTING" => Some(C2S::Sprint(false)),
@@ -238,7 +251,7 @@ impl Report {
     }
 }
 
-fn replay_client(lines: &[Line], world: &World, speed: i8, sens: f32, o: &Options) -> Report {
+fn replay_client(lines: &[Line], world: &World, speed: i8, sens: f32, o: &Options, fmt: i64) -> Report {
     let (resync, verbose) = (o.resync, o.verbose);
     let mut rep = Report::new(verbose);
     let init = match lines.iter().find(|l| l.tag == "CINIT") {
@@ -274,6 +287,12 @@ fn replay_client(lines: &[Line], world: &World, speed: i8, sens: f32, o: &Option
         lp.mi_strafe = l.f("mis");
         lp.mi_jump = l.b("mij");
         lp.hurt_time = l.i("ht") as i32;
+        if l.has("use") {
+            lp.using_item = l.b("use");
+            lp.use_gen = lp.stack_gen;
+            lp.right_click_delay = l.i("rcd") as i32;
+            lp.flag_using = l.b("eat");
+        }
     };
     let load_remote = |c: &mut Client, l: &Line| {
         let r = &mut c.rp;
@@ -292,6 +311,9 @@ fn replay_client(lines: &[Line], world: &World, speed: i8, sens: f32, o: &Option
         r.hurt_time = l.i("rht") as i32;
         r.swing_in_progress = l.b("rswing");
         r.swing_progress_int = l.i("rswp") as i32;
+        if l.has("reat") {
+            r.using = l.b("reat");
+        }
     };
     load(&mut c, init);
     if has_remote {
@@ -321,6 +343,9 @@ fn replay_client(lines: &[Line], world: &World, speed: i8, sens: f32, o: &Option
                     if let S2C::PosLook { .. } = p {
                         rep.count("teleports back", 1);
                     }
+                    if p == S2C::SetSlot {
+                        rep.count("swords sent again", 1);
+                    }
                     c.handle(p, &mut out);
                 }
             }
@@ -343,10 +368,18 @@ fn replay_client(lines: &[Line], world: &World, speed: i8, sens: f32, o: &Option
                     dx: n(6),
                     dy: -n(7),
                     extra_clicks: 0,
+                    use_item: w.len() > 8 && n(8) != 0,
                 };
+                let was_using = c.lp.using_item;
                 let t = c.tick(world, &inp, &cfg, &mut out);
                 rep.count("clicks", inp.attack as usize);
                 rep.count("ticks on target", t.pick.entity as usize);
+                rep.count("right clicks", t.used as usize);
+                rep.count("ticks blocking", c.lp.using_item as usize);
+                rep.count("clicks lost to a block", t.swallowed as usize);
+                // A block that ended without the button being let go: the
+                // server was not told.
+                rep.count("blocks dropped silently", (was_using && !c.lp.using_item && inp.use_item) as usize);
                 // Gather what the real client sent and its state after the tick.
                 let mut state = None;
                 while i < lines.len() {
@@ -402,7 +435,17 @@ fn replay_client(lines: &[Line], world: &World, speed: i8, sens: f32, o: &Option
                 ok &= fi("sprint timer", lp.sprint_toggle_timer as i64, st.i("stt"), &mut rep);
                 ok &= fi("hurt time", lp.hurt_time as i64, st.i("ht"), &mut rep);
                 ok &= fi("wall contact", lp.l.body.collided_h as i64, st.i("ch"), &mut rep);
-                ok &= fi("pick", t.pick.entity as i64, st.i("pick"), &mut rep);
+                if fmt >= 2 {
+                    let kind = if t.pick.entity { 1 } else if t.pick.block { 2 } else { 0 };
+                    ok &= fi("pick", kind, st.i("pick"), &mut rep);
+                    ok &= fi("blocking", lp.using_item as i64, st.i("use"), &mut rep);
+                    ok &= fi("click delay", lp.right_click_delay as i64, st.i("rcd"), &mut rep);
+                    ok &= fi("own use flag", lp.flag_using as i64, st.i("eat"), &mut rep);
+                    ok &= fd("input forward", lp.mi_forward as f64, st.f("mif") as f64, &mut rep);
+                    ok &= fd("input strafe", lp.mi_strafe as f64, st.f("mis") as f64, &mut rep);
+                } else {
+                    ok &= fi("pick", t.pick.entity as i64, st.i("pick"), &mut rep);
+                }
                 ok &= rep.note("packets sent", out == sent, || {
                     format!(
                         "tick {tick}: simulator [{}], game [{}]",
@@ -422,6 +465,9 @@ fn replay_client(lines: &[Line], world: &World, speed: i8, sens: f32, o: &Option
                     ok &= fi("other sprint", r.sprinting as i64, st.i("rspr"), &mut rep);
                     ok &= fi("other swing", r.swing_in_progress as i64, st.i("rswing"), &mut rep);
                     ok &= fi("other swing t", r.swing_progress_int as i64, st.i("rswp"), &mut rep);
+                    if st.has("reat") {
+                        ok &= fi("other use flag", r.using as i64, st.i("reat"), &mut rep);
+                    }
                 }
                 rep.ticks += 1;
                 out.clear();
@@ -450,7 +496,7 @@ fn replay_client(lines: &[Line], world: &World, speed: i8, sens: f32, o: &Option
 fn about_self(p: &S2C) -> bool {
     match p {
         S2C::Velocity { own, .. } | S2C::Hurt { own } | S2C::Meta { own, .. } | S2C::Props { own, .. } => *own,
-        S2C::PosLook { .. } => true,
+        S2C::PosLook { .. } | S2C::SetSlot => true,
         _ => false,
     }
 }
@@ -477,6 +523,10 @@ fn load_server(p: &mut ServerPlayer, l: &Line) {
     p.is_airborne = l.b("ab");
     p.swing_in_progress = l.b("swing");
     p.swing_progress_int = l.i("swp") as i32;
+    if l.has("use") {
+        p.using_item = l.b("use");
+    }
+    p.slot_dirty = false;
     p.meta_dirty = false;
     p.attr_dirty = false;
     if l.has("hm") {
@@ -502,7 +552,7 @@ fn load_server(p: &mut ServerPlayer, l: &Line) {
 
 /// The server half: feed the recorded packets of both players to the
 /// simulator's server and compare its state and everything it sends.
-fn replay_server(lines: &[Line], world: &World, speed: i8, o: &Options) -> Report {
+fn replay_server(lines: &[Line], world: &World, speed: i8, o: &Options, wear: f32) -> Report {
     let (resync, verbose) = (o.resync, o.verbose);
     let mut rep = Report::new(verbose);
     let inits: Vec<&Line> = lines.iter().filter(|l| l.tag == "SINIT").collect();
@@ -520,7 +570,7 @@ fn replay_server(lines: &[Line], world: &World, speed: i8, o: &Options) -> Repor
         // Nobody else in the world: park the second player far away.
         None => ServerPlayer::new([1000.5, world.floor_y, 1000.5], 0.0, 0.0, speed),
     };
-    let cfg = ServerCfg { infinite_health: true, ..ServerCfg::default() };
+    let cfg = ServerCfg { infinite_health: true, sword_wear: wear, ..ServerCfg::default() };
     let mut kb = KbProfile::VANILLA;
     if o.wrong_knockback {
         // Proves that the comparison notices a small error.
@@ -552,6 +602,8 @@ fn replay_server(lines: &[Line], world: &World, speed: i8, o: &Options) -> Repor
             rep.count("hits", sv.hits.len());
             rep.count("sprint hits", sv.hits.iter().filter(|h| h.sprint).count());
             rep.count("critical hits", sv.hits.iter().filter(|h| h.crit).count());
+            rep.count("blocked hits", sv.hits.iter().filter(|h| h.blocked).count());
+            rep.count("swords sent again", want.iter().filter(|w| w.1 == S2C::SetSlot).count());
             sv.hits.clear();
             if verbose {
                 println!("server tick {tick}");
@@ -608,6 +660,10 @@ fn replay_server(lines: &[Line], world: &World, speed: i8, o: &Options) -> Repor
                 ok &= fi("jump ticks", p.l.jump_ticks as i64, st.i("jt"), &mut rep);
                 ok &= fi("swing", p.swing_in_progress as i64, st.i("swing"), &mut rep);
                 ok &= fi("swing time", p.swing_progress_int as i64, st.i("swp"), &mut rep);
+                if st.has("blk") {
+                    ok &= fi("blocking", p.using_item as i64, st.i("blk"), &mut rep);
+                    ok &= fi("use flag", p.using_item as i64, st.i("eat"), &mut rep);
+                }
                 if st.has("hm") {
                     ok &= fi("has moved", p.has_moved as i64, st.i("hm"), &mut rep);
                     ok &= fd("last x", p.last_pos[0], st.d("lpx"), &mut rep);
@@ -661,6 +717,9 @@ fn replay_server(lines: &[Line], world: &World, speed: i8, o: &Options) -> Repor
                     rep.count("packets in", 1);
                     if p == C2S::Attack {
                         rep.count("attacks", 1);
+                    }
+                    if p == C2S::UseItem {
+                        rep.count("blocks", 1);
                     }
                     sv.handle(who, p, world, &mut rng, &mut out);
                     handled_any = true;
@@ -734,8 +793,12 @@ pub fn replay(text: &str, o: &Options) -> Result<Outcome, String> {
         .map(|l| [l.words[0].parse().unwrap(), l.words[1].parse().unwrap(), l.words[2].parse().unwrap()])
         .collect();
     let world = World::with_blocks(4.0, &blocks);
-    let client = if o.skip_client { Report::new(false) } else { replay_client(&lines, &world, speed, sens, o) };
-    let server = if o.skip_server { Report::new(false) } else { replay_server(&lines, &world, speed, o) };
+    // Recordings made before blocking was modelled say nothing about the
+    // sword being sent again, so the simulator must not send it either.
+    let fmt = if head.has("fmt") { head.i("fmt") } else { 1 };
+    let wear = if fmt >= 2 { head.i("wear") as f32 } else { 0.0 };
+    let client = if o.skip_client { Report::new(false) } else { replay_client(&lines, &world, speed, sens, o, fmt) };
+    let server = if o.skip_server { Report::new(false) } else { replay_server(&lines, &world, speed, o, wear) };
     Ok(Outcome { client, server })
 }
 

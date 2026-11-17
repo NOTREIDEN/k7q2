@@ -13,6 +13,20 @@ pub enum C2S {
     Sprint(bool),
     /// C03 and its subclasses C04, C05, C06.
     Player { pos: Option<V3>, rot: Option<(f32, f32)>, on_ground: bool },
+    /// C02 use entity, action INTERACT_AT, on the other player: the first
+    /// thing a right click on a player sends. Nothing comes of it with a
+    /// sword in hand.
+    InteractAt,
+    /// C02 use entity, action INTERACT, the second thing it sends.
+    Interact,
+    /// C08 block placement on the block under the crosshair. Nothing comes
+    /// of it with a sword in hand.
+    UseBlock,
+    /// C08 block placement with direction 255: use the held item. With a
+    /// sword this starts blocking.
+    UseItem,
+    /// C07 player digging, action RELEASE_USE_ITEM: stop blocking.
+    ReleaseUse,
 }
 
 /// Server to client. `own` means the packet is about the receiving player.
@@ -30,8 +44,12 @@ pub enum S2C {
     LookMove { d: [i8; 3], yaw: i8, pitch: i8, on_ground: bool },
     /// S18 teleport, absolute position in 1/32 block.
     Teleport { p: [i32; 3], yaw: i8, pitch: i8, on_ground: bool },
-    /// S1C entity metadata carrying the flags byte.
-    Meta { own: bool, sprinting: bool },
+    /// S1C entity metadata carrying the flags byte: bit 3 is sprinting,
+    /// bit 4 is set while the player uses an item (blocks).
+    Meta { own: bool, sprinting: bool, using: bool },
+    /// S2F set slot for the held item of the receiving player. The server
+    /// sends it when the sword has lost durability on a hit.
+    SetSlot,
     /// S20 entity properties for `generic.movementSpeed`.
     Props { own: bool, base: f64, speed_amp: i8, sprint: bool },
     /// S0B animation 0 (arm swing) of the other player.

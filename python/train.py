@@ -106,7 +106,7 @@ def main():
             print(f"start: {'continuing from the weights of the last run' if loaded else 'no earlier weights'}, "
                   f"{total_samples/1e6:.1f}M samples so far", flush=True)
     if args.init and not loaded:
-        old, ck, grown = load_policy(args.init, any_env.obs_dim)
+        old, ck, grown = load_policy(args.init, (any_env.obs_dim, any_env.priv_dim, any_env.act_dims))
         policy.load_state_dict(old.state_dict())
         if not grown and "opt" in ck:
             opt.load_state_dict(ck["opt"])
@@ -222,6 +222,13 @@ def main():
                         on_target=st["on_target0"] / st["ticks0"],
                         aim_err_deg=st["aim_err_sum0"] / st["ticks0"],
                         max_combo=st["max_combo_sum0"] / st["episodes"],
+                        # Share of own ticks spent blocking, share of the hits taken
+                        # that landed on a block, and damage dealt and taken per minute.
+                        block_frac=st["use_ticks0"] / st["ticks0"],
+                        blocked_frac=st["blocked0"] / max(st["hits1"], 1.0),
+                        crit_frac=st["crits0"] / max(st["hits0"], 1.0),
+                        damage_per_min=st["damage0"] / mins0,
+                        damage_taken_per_min=st["damage1"] / mins0,
                     )
             window.clear()
         log.write(json.dumps(row) + "\n")
@@ -232,7 +239,9 @@ def main():
             print(f"it {iters:4d} {total_samples/1e6:7.2f}M {row['sps']:6.0f}/s ent {info['entropy']:.2f} "
                   f"kl {info['kl']:.4f} r {info['mean_step_reward']:+.4f} | bot: hit/min {b.get('hits_per_min', 0):5.1f} "
                   f"taken {b.get('taken_per_min', 0):5.1f} on-target {b.get('on_target', 0):.2f} aim {b.get('aim_err_deg', 0):5.1f} "
-                  f"sprint {b.get('sprint_hit_frac', 0):.2f} | self: hit/min {s.get('hits_per_min', 0):5.1f} combo {s.get('max_combo', 0):.1f} "
+                  f"sprint {b.get('sprint_hit_frac', 0):.2f} block {b.get('block_frac', 0):.2f} blocked {b.get('blocked_frac', 0):.2f} "
+                  f"dmg {b.get('damage_per_min', 0):4.0f}/{b.get('damage_taken_per_min', 0):4.0f} "
+                  f"| self: hit/min {s.get('hits_per_min', 0):5.1f} combo {s.get('max_combo', 0):.1f} "
                   f"aim {s.get('aim_err_deg', 0):5.1f}", flush=True)
             for name, whats in sync_log.items():
                 print(f"sync between {name}: {len(whats)} rounds, last: {whats[-1]}; together "

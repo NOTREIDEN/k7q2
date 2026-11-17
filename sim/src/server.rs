@@ -84,12 +84,25 @@ pub struct ServerCfg {
     /// `maxHurtResistantTime`: a player can be hit again once half of it
     /// has passed (the game: 20, a hit every 10 ticks). Servers lower it.
     pub max_no_damage: i32,
+    /// Chance that a hit costs the sword a point of durability: 1 for a
+    /// plain sword, 0.25 with Unbreaking III, 0 for an unbreakable one.
+    /// The server then sends the attacker its sword again, and a client
+    /// that gets it while blocking stops blocking on its own side only.
+    pub sword_wear: f32,
 }
 
 impl Default for ServerCfg {
     fn default() -> Self {
         // Diamond sword in 1.8: 1 (hand) + 7.
-        ServerCfg { damage: 8.0, ench_damage: 0.0, kb_ench: 0, infinite_health: true, fall_damage: true, max_no_damage: 20 }
+        ServerCfg {
+            damage: 8.0,
+            ench_damage: 0.0,
+            kb_ench: 0,
+            infinite_health: true,
+            fall_damage: true,
+            max_no_damage: 20,
+            sword_wear: 1.0,
+        }
     }
 }
 
@@ -104,6 +117,10 @@ pub struct Hit {
     pub kb: V3,
     /// Attacker to victim distance on the server, feet to feet.
     pub dist: f64,
+    /// The victim was blocking with its sword on the server.
+    pub blocked: bool,
+    /// Damage after the block, before armour.
+    pub damage: f32,
 }
 
 #[derive(Clone, Debug)]
@@ -144,6 +161,17 @@ pub struct ServerPlayer {
     pub last_ground_y: f64,
     /// Went above the plugin's height limit and has not landed since.
     pub touched_top: bool,
+    /// `isUsingItem()`: blocking with the sword, as far as the server
+    /// knows. The using-item flag other players see is the same thing.
+    pub using_item: bool,
+    /// The sword lost durability and is sent again on the next tick.
+    pub slot_dirty: bool,
+    /// Stands for a client that blocks around every hit it takes, without
+    /// slowing down or giving up its own hits: the server always has it
+    /// blocking.
+    pub autoblock: bool,
+    /// Damage taken, before armour, since the caller last cleared it.
+    pub damage_taken: f32,
 }
 
 /// `chunkCoordX/Y/Z` for a position.
@@ -181,6 +209,20 @@ impl ServerPlayer {
             client_sprint: false,
             last_ground_y: pos[1],
             touched_top: false,
+            using_item: false,
+            slot_dirty: false,
+            autoblock: false,
+            damage_taken: 0.0,
+        }
+    }
+
+    /// `EntityPlayer.setItemInUse` / `clearItemInUse` with the flag other
+    /// players see.
+    pub fn set_using(&mut self, u: bool) {
+        let u = u || self.autoblock;
+        if self.using_item != u {
+            self.using_item = u;
+            self.meta_dirty = true;
         }
     }
 
@@ -266,6 +308,13 @@ impl Server {
                 self.p[from].client_sprint = s;
             }
             C2S::Player { pos, rot, on_ground } => self.process_player(from, pos, rot, on_ground, world, rng, out),
+            // processUseEntity for the two interactions and the block
+            // placement on a block: nothing changes with a sword in hand.
+            C2S::InteractAt | C2S::Interact | C2S::UseBlock => {}
+            // tryUseItem -> ItemSword.onItemRightClick -> setItemInUse
+            C2S::UseItem => self.p[from].set_using(true),
+            // processPlayerDigging RELEASE_USE_ITEM -> stopUsingItem
+            C2S::ReleaseUse => self.p[from].set_using(false),
         }
     }
 
@@ -461,6 +510,11 @@ impl Server {
             let n_hits = self.hits.len();
             let flag2 = self.attack_entity_from(v, f, Some(a), rng, out);
             if flag2 {
+                // ItemSword.hitEntity -> damageItem
+                let wear = self.cfg.sword_wear;
+                if wear >= 1.0 || (wear > 0.0 && rng.f64() < wear as f64) {
+                    self.p[a].slot_dirty = true;
+                }
                 if i > 0 {
                     let yaw = self.p[a].l.yaw;
                     let ax = (-mth::sin(yaw * mth::PI_F / 180.0f32) * i as f32 * self.kb.extra_horizontal) as f64;
@@ -539,19 +593,20 @@ impl Server {
             return false;
         }
         let mut flag = true;
+        let mut dealt = 0.0;
         let max = self.cfg.max_no_damage;
         if (self.p[v].hurt_resistant_time as f32) > max as f32 / 2.0f32 {
             if amount <= self.p[v].last_damage {
                 return false;
             }
             let extra = amount - self.p[v].last_damage;
-            self.damage_entity(v, extra);
+            self.damage_entity(v, extra, attacker.is_some());
             self.p[v].last_damage = amount;
             flag = false;
         } else {
             self.p[v].last_damage = amount;
             self.p[v].hurt_resistant_time = max;
-            self.damage_entity(v, amount);
+            dealt = self.damage_entity(v, amount, attacker.is_some());
             self.p[v].hurt_time = 10;
         }
         if flag {
@@ -568,13 +623,28 @@ impl Server {
                     d0 = (rng.f64() - rng.f64()) * 0.01;
                 }
                 self.knock_back(v, d1, d0);
-                self.hits.push(Hit { attacker: a, victim: v, sprint: false, crit: false, kb: [0.0; 3], dist: 0.0 });
+                self.hits.push(Hit {
+                    attacker: a,
+                    victim: v,
+                    sprint: false,
+                    crit: false,
+                    kb: [0.0; 3],
+                    dist: 0.0,
+                    blocked: self.p[v].using_item,
+                    damage: dealt,
+                });
             }
         }
         true
     }
 
-    fn damage_entity(&mut self, v: usize, amount: f32) {
+    /// `EntityPlayer.damageEntity` up to the armour. Returns the damage
+    /// that is left after a block. A fall cannot be blocked.
+    fn damage_entity(&mut self, v: usize, mut amount: f32, blockable: bool) -> f32 {
+        if blockable && self.p[v].using_item && amount > 0.0 {
+            amount = (1.0f32 + amount) * 0.5f32;
+        }
+        self.p[v].damage_taken += amount;
         if !self.cfg.infinite_health && amount != 0.0 {
             let p = &mut self.p[v];
             let h = (p.health - amount).clamp(0.0, 20.0);
@@ -585,6 +655,7 @@ impl Server {
                 p.meta_dirty = true;
             }
         }
+        amount
     }
 
     /// `EntityLivingBase.knockBack`.
@@ -609,9 +680,14 @@ impl Server {
     /// `EntityPlayerMP.onUpdate` for both players, the entity tracker, then
     /// the network tick.
     pub fn tick(&mut self, out: &mut Outbox) {
-        for p in self.p.iter_mut() {
+        for (i, p) in self.p.iter_mut().enumerate() {
             if p.hurt_resistant_time > 0 {
                 p.hurt_resistant_time -= 1;
+            }
+            // openContainer.detectAndSendChanges
+            if p.slot_dirty {
+                p.slot_dirty = false;
+                out.push((i, S2C::SetSlot));
             }
             p.chunk = chunk_of(p.l.body.pos);
         }
@@ -667,8 +743,8 @@ impl Server {
             // sendMetadataToAllAssociatedPlayers: tracking players, then self.
             if p.meta_dirty {
                 p.meta_dirty = false;
-                out.push((other, S2C::Meta { own: false, sprinting: p.l.sprinting }));
-                out.push((i, S2C::Meta { own: true, sprinting: p.l.sprinting }));
+                out.push((other, S2C::Meta { own: false, sprinting: p.l.sprinting, using: p.using_item }));
+                out.push((i, S2C::Meta { own: true, sprinting: p.l.sprinting, using: p.using_item }));
             }
             if p.attr_dirty {
                 p.attr_dirty = false;

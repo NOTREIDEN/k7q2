@@ -23,7 +23,8 @@ simulator and meant to be driven from a client mod.
     python train.py --minutes 30 --out runs/stage1
 
 Stage 1 trains sword duels with infinite health and Speed II: movement
-keys, mouse, clicks, sprint resets and knockback handling.
+keys, mouse, both mouse buttons, sprint resets, sword blocking and
+knockback handling.
 
 The agent is trained for the conditions it will play under: a ping of 160
 to 230 ms and 14 to 17 clicks per second, against opponents with an
@@ -39,6 +40,20 @@ limit and time between hits that plugins of the KnockbackManager kind
 set), and `opp_edge_prob` the share in which the opponent has a longer
 reach, takes less knockback or can still hit the agent where it was a
 moment ago (backtrack). The agent is not told which duel it is in.
+
+The right mouse button blocks with the sword, as in the game: half the
+damage of a hit, a slower walk, no sprint and no attacks while it is held,
+so one tick of it is also a sprint reset. `w_damage` makes a hit count by
+the damage it does (a critical hit 1.5 times, a blocked one a bit over
+half) instead of every hit counting the same. `opp_autoblock` is the share
+of opponents with an edge that the server always has blocking while they
+attack freely, and `bot_block` scales how much the scripted bots block.
+
+A hit wears the attacker's sword, the server sends the sword again, and a
+client that is blocking at that moment drops its block without telling the
+server (`sim/PARITY.md`). `sword_wear` sets how often that happens: 1 for
+a plain sword, 0.25 for Unbreaking III, 0 for an unbreakable one, and by
+default it is drawn for each duel.
 
 Check a checkpoint against each scripted bot level:
 

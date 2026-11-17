@@ -22,23 +22,25 @@ PARAM = {
     "opp_kb_taken_min": 51, "opp_kb_taken_max": 52,
     "opp_backtrack_min_ms": 53, "opp_backtrack_max_ms": 54,
     "kb_plugin": 55, "kb_preset": 56,
+    "w_damage": 57, "opp_autoblock": 58, "sword_wear": 59, "bot_block": 60,
 }
 
 STAT_NAMES = [
     "episodes", "ticks0", "ticks1", "hits0", "hits1", "sprint_hits0", "sprint_hits1",
     "swings0", "swings1", "attacks0", "attacks1", "on_target0", "on_target1",
     "aim_err_sum0", "max_combo_sum0", "reward_sum0",
+    "use_ticks0", "use_ticks1", "blocked0", "blocked1", "damage0", "damage1", "crits0", "crits1",
 ]
 
 # Per-player fields of VecEnv.view(), then the fields that follow both players.
 VIEW_PLAYER = [
     "x", "y", "z", "yaw", "pitch", "on_ground", "sprinting", "hurt_time", "ticks_since_swing",
     "forward", "strafe", "jump", "sprint_key", "attack", "hits", "combo", "sprint_hits",
-    "seen_x", "seen_y", "seen_z",
+    "seen_x", "seen_y", "seen_z", "using", "blocking", "blocked", "damage",
 ]
 VIEW_GLOBAL = ["ticks_left", "ep_len", "arena_half", "floor_y", "ping0", "ping1", "cps0", "cps1",
                "reach1", "kb_taken1", "backtrack1_ms",
-               "kb_kind", "kb_h", "kb_v", "kb_friction", "hit_delay"]
+               "kb_kind", "kb_h", "kb_v", "kb_friction", "hit_delay", "autoblock1", "sword_wear"]
 
 SELF_PLAY = 0
 BOT = 1
@@ -69,9 +71,13 @@ def _load(path):
     return lib
 
 
-def sim_obs_dim(lib_path=None):
-    """Number of observation values the simulator library gives."""
-    return int(_load(lib_path or default_lib_path()).pvp_obs_dim())
+def sim_dims(lib_path=None):
+    """What the simulator library gives and takes: (observation values,
+    values for the value function only, choices per control)."""
+    lib = _load(lib_path or default_lib_path())
+    dims = (ctypes.c_int32 * lib.pvp_act_heads())()
+    lib.pvp_act_dims(dims)
+    return int(lib.pvp_obs_dim()), int(lib.pvp_priv_dim()), [int(d) for d in dims]
 
 
 class VecEnv:

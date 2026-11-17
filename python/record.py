@@ -12,12 +12,12 @@ import argparse
 import numpy as np
 import torch
 
-from pvpai.env import BOT, SELF_PLAY, VIEW_GLOBAL, VIEW_PLAYER, VecEnv, sim_obs_dim
+from pvpai.env import BOT, SELF_PLAY, VIEW_GLOBAL, VIEW_PLAYER, VecEnv, sim_dims
 from pvpai.model import load_policy
 
 
 def load(path, lib=None):
-    policy, ck, _ = load_policy(path, sim_obs_dim(lib))
+    policy, ck, _ = load_policy(path, sim_dims(lib))
     policy.eval()
     return policy, ck.get("samples", 0)
 

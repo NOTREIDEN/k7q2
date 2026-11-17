@@ -6,8 +6,9 @@ speed is the amplifier of the Speed effect (1 = Speed II, -1 = none);
 sensitivity is the mouse slider from 0 to 1.
 
 A script holds one line per client tick (C forward strafe jump sprint attack
-dx dy) and, when a second player is present, its actions keyed by server
-tick (F tick ACTION ...)."""
+dx dy, and optionally a last field for the right mouse button) and, when a
+second player is present, its actions keyed by server tick (F tick ACTION
+...)."""
 import math, random, sys
 
 def hold(rng, n, lo, hi, choices, weights=None):
@@ -83,7 +84,50 @@ def fight_inputs(rng, n, jumps=True, wild=True, per_count=0.15):
             seq.append((fwd, st, jump, sprint, 1 if att else 0, dx, dy))
     return seq[:n]
 
-def fight_fake(rng, n, lines, hops=True, attacks=True):
+def with_use(rng, seq, holds=False):
+    """Add the right mouse button to fight inputs: quick taps together with a click (the
+    block hit), holds of every length with clicks going on underneath, bursts of presses, and
+    stretches without any. With `holds`, most blocks start on the tick of a click and are
+    kept up past the moment the server's answer to the hit comes back, which is when the
+    client drops its own block."""
+    out, i, n = [], 0, len(seq)
+    while i < n:
+        if holds:
+            mode = rng.choices(["none", "hithold", "hold", "after"], [1, 6, 1, 1])[0]
+        else:
+            mode = rng.choices(["none", "tap", "hold", "spam", "after"], [3, 4, 4, 1, 3])[0]
+        length = rng.randint(15, 70)
+        every, hold_len, gap = rng.randint(2, 12), rng.randint(2, 15), rng.randint(1, 10)
+        for k in range(length):
+            if i >= n:
+                break
+            f, st, j, spr, att, dx, dy = seq[i]
+            use = 0
+            if mode == "tap":
+                if k % every == 0:
+                    use = 1
+                    att = 1 if rng.random() < 0.8 else att
+            elif mode == "hold":
+                use = 1 if k % (hold_len + gap) < hold_len else 0
+            elif mode == "spam":
+                use = 1 if rng.random() < 0.5 else 0
+            elif mode == "hithold":
+                # Click and press on the same tick, then keep the button down for a while.
+                ph = k % (every + 9)
+                if ph == 0:
+                    keep = rng.choice([2, 2, 3, 3, 4, 5, 6, 8, 12])
+                att = 1 if ph == 0 or rng.random() < 0.5 else 0
+                use = 1 if ph < keep else 0
+            elif mode == "after":
+                # Click, then press on the next tick and keep it down a little while.
+                ph = k % (every + 4)
+                att = 1 if ph == 0 else att
+                use = 1 if 1 <= ph <= rng.choice([1, 2, 3, 3, 4, 6]) else 0
+            out.append((f, st, j, spr, att, dx, dy, use))
+            i += 1
+    return out
+
+def fight_fake(rng, n, lines, hops=True, attacks=True, blocks=False):
     """What the scripted player does on each server tick."""
     arc, air = jump_arc(), []
     dist, angle = 2.5, 0.0
@@ -106,6 +150,12 @@ def fight_fake(rng, n, lines, hops=True, attacks=True):
                     lines.append("F %d ATTACK" % t)
                 elif r < 0.31:
                     lines.append("F %d SWING" % t)
+            if blocks:
+                r = rng.random()
+                if r < 0.07:
+                    lines.append("F %d USE" % t)
+                elif r < 0.14:
+                    lines.append("F %d RELEASE" % t)
             r = rng.random()
             if r < 0.10:
                 lines.append("F %d SPRINT 1" % t)
@@ -129,6 +179,7 @@ def main():
     opts = dict(a.split("=") for a in sys.argv[4:])
     rng = random.Random(seed)
     lines, idle = [], [(0, 0, 0, 0, 0, 0, 0)] * 12
+    idle8 = [(0, 0, 0, 0, 0, 0, 0, 0)] * 12
     per_count = 0.15
     if "speed" in opts:
         lines.append("speed " + opts["speed"])
@@ -157,6 +208,14 @@ def main():
         lines.append("fake 0.5 4 3.0 180 0")
         seq = idle + fight_inputs(rng, 1000, per_count=per_count)
         fight_fake(rng, len(seq) + 60, lines)
+    elif name == "block":
+        # A fight in which both players block with the sword.
+        pen(lines)
+        lines.append("fake 0.5 4 3.0 180 0")
+        if opts.get("unbreakable", "0") != "0":
+            lines.append("unbreakable 1")
+        seq = idle8 + with_use(rng, fight_inputs(rng, 1000, per_count=per_count), holds=opts.get("holds", "0") != "0")
+        fight_fake(rng, len(seq) + 60, lines, blocks=True)
     elif name == "long":
         # Nobody leaves the ground and the scripted player never hits back, so that the
         # entity tracker reaches its periodic full position update.
@@ -195,7 +254,7 @@ def main():
                 t += 1
     else:
         raise SystemExit("unknown script " + name)
-    lines += ["C %d %d %d %d %d %d %d" % s for s in seq]
+    lines += ["C " + " ".join("%d" % v for v in s) for s in seq]
     open(out, "w").write("\n".join(lines) + "\n")
     print(out, len(seq), "ticks")
 

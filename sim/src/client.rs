@@ -26,6 +26,9 @@ pub struct Input {
     /// positive y looks down.
     pub dx: i32,
     pub dy: i32,
+    /// The right mouse button is down on this tick. Going from up to down
+    /// is a press; with a sword in hand that starts a block.
+    pub use_item: bool,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -52,6 +55,8 @@ impl ClientCfg {
 pub struct Pick {
     /// Crosshair is on the other player within attack reach.
     pub entity: bool,
+    /// Crosshair is on a block within block reach (and not on the player).
+    pub block: bool,
     /// Distance from the eye to the point where the ray enters the box.
     pub dist: f64,
 }
@@ -73,6 +78,9 @@ pub struct RemotePlayer {
     pub hurt_time: i32,
     pub swing_in_progress: bool,
     pub swing_progress_int: i32,
+    /// The flag the server sets while this player uses an item: with a
+    /// sword in hand, it is shown blocking.
+    pub using: bool,
     /// Bookkeeping for observations, not game state.
     pub ticks_since_hurt: i32,
 }
@@ -103,6 +111,7 @@ impl RemotePlayer {
             hurt_time: 0,
             swing_in_progress: false,
             swing_progress_int: 0,
+            using: false,
             ticks_since_hurt: 1000,
         }
     }
@@ -228,6 +237,20 @@ pub struct LocalPlayer {
     pub last_pitch: f32,
     pub position_update_ticks: i32,
     pub hurt_time: i32,
+    /// `isUsingItem()`: this client is blocking with the sword.
+    pub using_item: bool,
+    /// `Minecraft.rightClickDelayTimer`.
+    pub right_click_delay: i32,
+    /// The right button as it was on the previous tick.
+    pub use_key_down: bool,
+    /// Counts the times the server replaced the held item stack. A block
+    /// belongs to the stack it was started with: once the stack has been
+    /// replaced, the client drops the block on its own, without telling
+    /// the server.
+    pub stack_gen: u32,
+    pub use_gen: u32,
+    /// The using-item flag of this player as the server last sent it.
+    pub flag_using: bool,
     /// Bookkeeping for observations, not game state.
     pub last_kb: V3,
     pub ticks_since_kb: i32,
@@ -253,6 +276,12 @@ impl LocalPlayer {
             last_pitch: pitch,
             position_update_ticks: 0,
             hurt_time: 0,
+            using_item: false,
+            right_click_delay: 0,
+            use_key_down: false,
+            stack_gen: 0,
+            use_gen: 0,
+            flag_using: false,
             last_kb: [0.0; 3],
             ticks_since_kb: 1000,
             ticks_since_hurt: 1000,
@@ -298,6 +327,10 @@ pub struct TickOut {
     /// slowed itself down and dropped its own sprint.
     pub sprint_attack: bool,
     pub jumped: bool,
+    /// A right click was made (the block started or was asked for again).
+    pub used: bool,
+    /// Left clicks that were swallowed because the client was blocking.
+    pub swallowed: u8,
 }
 
 /// Ways a client can depart from the plain game. They stand for what some
@@ -372,13 +405,36 @@ pub fn pick_with(world: &World, eye: V3, own_bb: &Aabb, pitch: f32, yaw: f32, re
         }
     }
     let reach = dist(eye, vec33);
+    // A player under the crosshair but out of reach turns the pick into a
+    // miss, also when there is a block behind.
+    let mut too_far = false;
     if pointed && reach > reach_limit {
         pointed = false;
+        too_far = true;
     }
     if pointed && (d2 < d1 || trace == RayHit::None) {
-        Pick { entity: true, dist: reach }
+        Pick { entity: true, block: false, dist: reach }
     } else {
-        Pick { entity: false, dist: reach }
+        Pick { entity: false, block: !too_far && matches!(trace, RayHit::Block(_)), dist: reach }
+    }
+}
+
+/// `Minecraft.rightClickMouse` with a sword in hand.
+#[inline]
+fn right_click(lp: &mut LocalPlayer, pick: &Pick, out: &mut Vec<C2S>) {
+    lp.right_click_delay = 4;
+    if pick.entity {
+        // Neither interaction does anything, so the item is used as well.
+        out.push(C2S::InteractAt);
+        out.push(C2S::Interact);
+    } else if pick.block {
+        out.push(C2S::UseBlock);
+    }
+    // sendUseItem -> ItemSword.onItemRightClick -> setItemInUse
+    out.push(C2S::UseItem);
+    if !lp.using_item {
+        lp.using_item = true;
+        lp.use_gen = lp.stack_gen;
     }
 }
 
@@ -494,16 +550,20 @@ impl Client {
             S2C::Look { yaw, pitch, on_ground } => self.rp.rel_move([0, 0, 0], Some((yaw, pitch)), on_ground),
             S2C::LookMove { d, yaw, pitch, on_ground } => self.rp.rel_move(d, Some((yaw, pitch)), on_ground),
             S2C::Teleport { p, yaw, pitch, on_ground } => self.rp.teleport(p, yaw, pitch, on_ground),
-            S2C::Meta { own, sprinting } => {
+            S2C::Meta { own, sprinting, using } => {
                 if own {
                     // The flags byte is overwritten without going through
                     // setSprinting, so neither the modifier nor
                     // sprintingTicksLeft changes here.
                     self.lp.l.sprinting = sprinting;
+                    self.lp.flag_using = using;
                 } else {
                     self.rp.sprinting = sprinting;
+                    self.rp.using = using;
                 }
             }
+            // handleSetSlot puts a new stack object into the hotbar.
+            S2C::SetSlot => self.lp.stack_gen = self.lp.stack_gen.wrapping_add(1),
             S2C::Props { own, base, speed_amp, sprint } => {
                 if own {
                     self.lp.l.attr.base = base;
@@ -518,6 +578,10 @@ impl Client {
     /// One `Minecraft.runTick`: mouse, pick, click, then the entity updates.
     pub fn tick(&mut self, world: &World, inp: &Input, cfg: &ClientCfg, out: &mut Vec<C2S>) -> TickOut {
         let mut t = TickOut::default();
+
+        if self.lp.right_click_delay > 0 {
+            self.lp.right_click_delay -= 1;
+        }
 
         // Mouse movement accumulated since the previous tick.
         if inp.dx != 0 || inp.dy != 0 {
@@ -537,28 +601,61 @@ impl Client {
         // click into the air sets leftClickCounter, which swallows the
         // clicks that follow it in this tick.
         let clicks = if inp.attack { 1 + inp.extra_clicks } else { 0 };
-        for _ in 0..clicks {
-            out.push(C2S::Swing);
-            t.swung = true;
-            lp.ticks_since_swing = 0;
-            if !t.pick.entity {
-                break;
+        let press = inp.use_item && !lp.use_key_down;
+        lp.use_key_down = inp.use_item;
+        // A left click on a block starts breaking it, and until the end of
+        // the tick a right click does nothing.
+        let mut hitting_block = false;
+        if lp.using_item {
+            // Blocking: letting go of the button ends it, and every click
+            // and press of this tick is thrown away.
+            if !inp.use_item {
+                out.push(C2S::ReleaseUse);
+                lp.using_item = false;
             }
-            out.push(C2S::Attack);
-            t.attacked = true;
-            lp.ticks_since_attack = 0;
-            // attackTargetEntityWithCurrentItem on the client: the copy
-            // of the other player always reports a successful hit.
-            let i = cfg.kb_ench + if lp.l.sprinting { 1 } else { 0 };
-            if i > 0 {
-                lp.l.body.motion[0] *= 0.6;
-                lp.l.body.motion[2] *= 0.6;
-                lp.set_sprinting(false);
-                t.sprint_attack = true;
+            t.swallowed = clicks;
+        } else {
+            for _ in 0..clicks {
+                out.push(C2S::Swing);
+                t.swung = true;
+                lp.ticks_since_swing = 0;
+                if t.pick.block {
+                    hitting_block = true;
+                    continue;
+                }
+                if !t.pick.entity {
+                    break;
+                }
+                out.push(C2S::Attack);
+                t.attacked = true;
+                lp.ticks_since_attack = 0;
+                // attackTargetEntityWithCurrentItem on the client: the copy
+                // of the other player always reports a successful hit.
+                let i = cfg.kb_ench + if lp.l.sprinting { 1 } else { 0 };
+                if i > 0 {
+                    lp.l.body.motion[0] *= 0.6;
+                    lp.l.body.motion[2] *= 0.6;
+                    lp.set_sprinting(false);
+                    t.sprint_attack = true;
+                }
             }
+            if press && !hitting_block {
+                right_click(lp, &t.pick, out);
+                t.used = true;
+            }
+        }
+        // The button held down clicks again once the delay has run out.
+        if inp.use_item && lp.right_click_delay == 0 && !lp.using_item && !hitting_block {
+            right_click(lp, &t.pick, out);
+            t.used = true;
         }
 
         // --- EntityPlayerSP.onUpdate ---
+        // EntityPlayer.onUpdate: the item in use has to be the very stack
+        // that is in the hand.
+        if lp.using_item && lp.use_gen != lp.stack_gen {
+            lp.using_item = false;
+        }
         // onEntityUpdate
         if lp.hurt_time > 0 {
             lp.hurt_time -= 1;
@@ -591,6 +688,11 @@ impl Client {
             lp.mi_strafe -= 1.0;
         }
         lp.mi_jump = inp.jump;
+        if lp.using_item {
+            lp.mi_strafe *= 0.2f32;
+            lp.mi_forward *= 0.2f32;
+            lp.sprint_toggle_timer = 0;
+        }
         // pushOutOfBlocks at four points around the feet. They are inside
         // the player's own box, so this only acts on a player that has got
         // into a wall (which a server teleport next to one can do).
@@ -600,14 +702,14 @@ impl Client {
         push_out_of_blocks(world, &mut lp.l.body.motion, px - w, py, pz - w);
         push_out_of_blocks(world, &mut lp.l.body.motion, px + w, py, pz - w);
         push_out_of_blocks(world, &mut lp.l.body.motion, px + w, py, pz + w);
-        if lp.l.body.on_ground && !flag2 && lp.mi_forward >= f && !lp.l.sprinting {
+        if lp.l.body.on_ground && !flag2 && lp.mi_forward >= f && !lp.l.sprinting && !lp.using_item {
             if lp.sprint_toggle_timer <= 0 && !inp.sprint_key {
                 lp.sprint_toggle_timer = 7;
             } else {
                 lp.set_sprinting(true);
             }
         }
-        if !lp.l.sprinting && lp.mi_forward >= f && inp.sprint_key {
+        if !lp.l.sprinting && lp.mi_forward >= f && !lp.using_item && inp.sprint_key {
             lp.set_sprinting(true);
         }
         if lp.l.sprinting && (lp.mi_forward < f || lp.l.body.collided_h) {

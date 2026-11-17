@@ -15,21 +15,22 @@ use crate::server::{KbPlugin, KbProfile, ServerCfg};
 use crate::sim::{Match, NetCfg, Spawn, TICK_US};
 use crate::world::World;
 
-pub const ACT_HEADS: usize = 7;
-/// forward, strafe, jump, sprint key, attack, yaw bin, pitch bin.
-pub const ACT_DIMS: [i32; ACT_HEADS] = [3, 3, 2, 2, 2, 27, 21];
+pub const ACT_HEADS: usize = 8;
+/// forward, strafe, jump, sprint key, attack, yaw bin, pitch bin, right
+/// mouse button (block with the sword).
+pub const ACT_DIMS: [i32; ACT_HEADS] = [3, 3, 2, 2, 2, 27, 21, 2];
 /// Mouse counts per tick. One count is 0.15 degrees at sensitivity 0.5.
 pub const YAW_BINS: [i32; 27] = [
     -377, -233, -144, -89, -55, -34, -21, -13, -8, -5, -3, -2, -1, 0, 1, 2, 3, 5, 8, 13, 21, 34, 55, 89, 144, 233, 377,
 ];
 pub const PITCH_BINS: [i32; 21] = [-89, -55, -34, -21, -13, -8, -5, -3, -2, -1, 0, 1, 2, 3, 5, 8, 13, 21, 34, 55, 89];
 
-pub const OBS_DIM: usize = 63;
-pub const PRIV_DIM: usize = 32;
-pub const STATS_DIM: usize = 16;
+pub const OBS_DIM: usize = 68;
+pub const PRIV_DIM: usize = 48;
+pub const STATS_DIM: usize = 24;
 /// Floats per player and in total written by `Env::write_view`.
-pub const VIEW_PLAYER: usize = 20;
-pub const VIEW_DIM: usize = 2 * VIEW_PLAYER + 16;
+pub const VIEW_PLAYER: usize = 24;
+pub const VIEW_DIM: usize = 2 * VIEW_PLAYER + 18;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Mode {
@@ -132,6 +133,21 @@ pub struct Params {
     pub sensitivity: f32,
     pub damage: f32,
     pub kb_ench: i32,
+    /// How much the damage of a hit counts in its reward. 0: every hit is
+    /// worth the same. 1: a hit is worth its damage relative to a plain
+    /// one, so a critical hit counts one and a half times and a hit on a
+    /// blocking player a little over half.
+    pub w_damage: f32,
+    /// Among the opponents with an edge, the share that also block around
+    /// every hit they take (the server always has them blocking, and they
+    /// are shown blocking) without slowing down or losing clicks.
+    pub opp_autoblock: f64,
+    /// Chance that a hit costs the sword durability, which makes the
+    /// server send the sword again (see `ServerCfg::sword_wear`). Negative
+    /// draws it per duel: a plain sword, Unbreaking III or unbreakable.
+    pub sword_wear: f64,
+    /// Scales how often scripted bots block. 0 turns their blocking off.
+    pub bot_block: f64,
 }
 
 impl Default for Params {
@@ -185,6 +201,10 @@ impl Default for Params {
             sensitivity: 0.5,
             damage: 8.0,
             kb_ench: 0,
+            w_damage: 0.0,
+            opp_autoblock: 0.3,
+            sword_wear: -1.0,
+            bot_block: 1.0,
         }
     }
 }
@@ -251,6 +271,10 @@ impl Params {
             54 => self.opp_backtrack_ms[1] = v,
             55 => self.kb_plugin = v,
             56 => self.kb_preset = v as i32,
+            57 => self.w_damage = v as f32,
+            58 => self.opp_autoblock = v,
+            59 => self.sword_wear = v,
+            60 => self.bot_block = v,
             _ => return false,
         }
         true
@@ -268,6 +292,7 @@ pub fn decode_action(a: &[i32]) -> Input {
         extra_clicks: 0,
         dx: YAW_BINS[pick(a[5], 27)],
         dy: PITCH_BINS[pick(a[6], 21)],
+        use_item: a.len() > 7 && a[7] != 0,
     }
 }
 
@@ -310,6 +335,13 @@ pub struct Stats {
     pub aim_err_sum: [f64; 2],
     pub max_combo_sum: [f64; 2],
     pub reward_sum: [f64; 2],
+    /// Own ticks spent blocking.
+    pub use_ticks: [f64; 2],
+    /// Hits this player took while the server had it blocking.
+    pub blocked: [f64; 2],
+    /// Damage dealt, before armour.
+    pub damage: [f64; 2],
+    pub crits: [f64; 2],
 }
 
 impl Stats {
@@ -325,6 +357,10 @@ impl Stats {
             self.aim_err_sum[a] += o.aim_err_sum[a];
             self.max_combo_sum[a] += o.max_combo_sum[a];
             self.reward_sum[a] += o.reward_sum[a];
+            self.use_ticks[a] += o.use_ticks[a];
+            self.blocked[a] += o.blocked[a];
+            self.damage[a] += o.damage[a];
+            self.crits[a] += o.crits[a];
         }
     }
     pub fn write(&self, out: &mut [f64]) {
@@ -345,6 +381,14 @@ impl Stats {
             self.aim_err_sum[0],
             self.max_combo_sum[0],
             self.reward_sum[0],
+            self.use_ticks[0],
+            self.use_ticks[1],
+            self.blocked[0],
+            self.blocked[1],
+            self.damage[0],
+            self.damage[1],
+            self.crits[0],
+            self.crits[1],
         ];
         for (o, x) in out.iter_mut().zip(v.iter()) {
             *o = *x;
@@ -472,6 +516,7 @@ pub fn new_match(p: &Params, rng: &mut Rng, mode: Mode) -> (Match, [f64; 2], Bot
         infinite_health: p.infinite_health,
         fall_damage: p.fall_damage,
         max_no_damage,
+        sword_wear: if p.sword_wear >= 0.0 { p.sword_wear as f32 } else { [1.0f32, 0.25, 0.25, 0.0][(rng.next_u64() % 4) as usize] },
     };
     let seed = rng.next_u64();
     let mut m = Match::new(world, spawns, p.speed_amp, kb, scfg, ccfg, net, [0, c1, sv], seed);
@@ -483,6 +528,10 @@ pub fn new_match(p: &Params, rng: &mut Rng, mode: Mode) -> (Match, [f64; 2], Bot
             kb_taken: rng.range(p.opp_kb_taken[0], p.opp_kb_taken[1].max(p.opp_kb_taken[0])),
             backtrack: ((ms / 50.0).round().max(0.0) as usize).min(MAX_BACKTRACK) as u8,
         };
+        if rng.chance(p.opp_autoblock) {
+            m.s.p[1].autoblock = true;
+            m.s.p[1].set_using(true);
+        }
     }
     let mut bot = if mode == Mode::Bot {
         let lo = p.bot_level[0].round() as i64;
@@ -494,6 +543,8 @@ pub fn new_match(p: &Params, rng: &mut Rng, mode: Mode) -> (Match, [f64; 2], Bot
     if p.opp_cps_min >= 20.0 && bot.click_prob > 0.0 {
         bot.click_prob = 1.0;
     }
+    bot.blockhit *= p.bot_block;
+    bot.block_react *= p.bot_block;
     (m, ping, bot)
 }
 
@@ -571,9 +622,17 @@ impl Env {
         let (wh, wt) = (self.params.w_hit, self.params.w_taken);
         for k in 0..self.m.s.hits.len() {
             let h = self.m.s.hits[k];
-            self.rew_acc[h.attacker] += wh;
-            self.rew_acc[h.victim] -= wt;
+            let worth = 1.0 + self.params.w_damage * (h.damage / self.params.damage.max(0.5) - 1.0);
+            self.rew_acc[h.attacker] += wh * worth;
+            self.rew_acc[h.victim] -= wt * worth;
             self.ep.hits[h.attacker] += 1.0;
+            self.ep.damage[h.attacker] += h.damage as f64;
+            if h.blocked {
+                self.ep.blocked[h.victim] += 1.0;
+            }
+            if h.crit {
+                self.ep.crits[h.attacker] += 1.0;
+            }
             if h.sprint {
                 self.ep.sprint_hits[h.attacker] += 1.0;
                 self.rew_acc[h.attacker] += self.params.w_sprint_hit;
@@ -679,6 +738,9 @@ impl Env {
         }
         if out.attacked {
             self.ep.attacks[id] += 1.0;
+        }
+        if self.m.c[id].lp.using_item {
+            self.ep.use_ticks[id] += 1.0;
         }
         self.prev_inp[id] = *inp;
     }
@@ -794,6 +856,10 @@ impl Env {
             o[b + 17] = c.rp.pos[0] as f32;
             o[b + 18] = c.rp.pos[1] as f32;
             o[b + 19] = c.rp.pos[2] as f32;
+            o[b + 20] = lp.using_item as i32 as f32;
+            o[b + 21] = self.m.s.p[id].using_item as i32 as f32;
+            o[b + 22] = self.ep.blocked[id] as f32;
+            o[b + 23] = self.ep.damage[id] as f32;
         }
         let g = 2 * VIEW_PLAYER;
         o[g] = self.ticks_left as f32;
@@ -825,6 +891,8 @@ impl Env {
             }
         }
         o[g + 15] = s.cfg.max_no_damage as f32;
+        o[g + 16] = s.p[1].autoblock as i32 as f32;
+        o[g + 17] = s.cfg.sword_wear;
     }
 
     /// What agent `id` can know from its own client.
@@ -921,6 +989,15 @@ impl Env {
         o[60] = (avail >= 1.0 - 1e-9) as u8 as f32;
         o[61] = (avail / 2.0) as f32;
         o[62] = (self.cps[id] / 20.0) as f32;
+        // Blocking: whether this client is blocking, how long until a held
+        // button clicks again, whether the opponent is shown blocking, the
+        // button on the last tick, and what the server last said about
+        // this player's own block.
+        o[63] = lp.using_item as u8 as f32;
+        o[64] = lp.right_click_delay as f32 / 4.0;
+        o[65] = rp.using as u8 as f32;
+        o[66] = pi.use_item as u8 as f32;
+        o[67] = lp.flag_using as u8 as f32;
     }
 
     /// Extra inputs for the value function only: things a client cannot see.
@@ -968,6 +1045,33 @@ impl Env {
         o[29] = clip(dist(s.p[0].l.body.pos, s.p[1].l.body.pos) / 8.0, 4.0);
         o[30] = if self.mode == Mode::Bot { self.bot.level as f32 / 4.0 } else { -1.0 };
         o[31] = clip((self.ep.hits[id] - self.ep.hits[1 - id]) / 20.0, 3.0);
+        // Blocking as the server has it, each player's edge, and the rest
+        // of the server's settings.
+        o[32] = s.p[id].using_item as u8 as f32;
+        o[33] = s.p[1 - id].using_item as u8 as f32;
+        for (k, who) in [1 - id, id].into_iter().enumerate() {
+            let e = &self.m.c[who].edge;
+            o[34 + 3 * k] = (e.reach - 3.0) as f32 * 2.0;
+            o[35 + 3 * k] = e.kb_taken as f32;
+            o[36 + 3 * k] = e.backtrack as f32 / 4.0;
+        }
+        match s.plugin {
+            Some(k) => {
+                o[40] = 1.0;
+                o[41] = (k.h_ground / 0.4) as f32;
+                o[42] = (k.v_ground / 0.4) as f32;
+                o[45] = (k.h_air / 0.4) as f32;
+                o[46] = (k.v_air / 0.4) as f32;
+                o[47] = k.stop_sprint as u8 as f32;
+            }
+            None => {
+                for k in [40, 41, 42, 45, 46, 47] {
+                    o[k] = 0.0;
+                }
+            }
+        }
+        o[43] = s.cfg.max_no_damage as f32 / 20.0;
+        o[44] = s.cfg.sword_wear;
     }
 }
 

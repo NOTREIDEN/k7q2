@@ -11,3 +11,9 @@ long1       long       21
 wall1       wall       41
 wall2       wall       42
 wall3       wall       43
+block1      block      51
+block2      block      52    sensitivity=0.83
+block3      block      53    unbreakable=1
+block4      block      54    speed=-1
+block5      block      55    holds=1
+block6      block      56    holds=1 unbreakable=1

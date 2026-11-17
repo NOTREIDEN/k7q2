@@ -22,8 +22,9 @@ fn traces() -> Vec<String> {
 #[test]
 fn the_real_game_is_reproduced_bit_for_bit() {
     let files = traces();
-    assert!(files.len() >= 12, "expected the recordings in tests/traces, found {}", files.len());
+    assert!(files.len() >= 20, "expected the recordings in tests/traces, found {}", files.len());
     let (mut ticks, mut hits, mut sprint_hits, mut crits, mut attacks, mut teleports, mut kb) = (0, 0, 0, 0, 0, 0, 0);
+    let (mut blocked, mut right_clicks, mut lost, mut silent, mut swords) = (0, 0, 0, 0, 0);
     for f in &files {
         let r = replay(&read_trace(f).unwrap(), &Options::default()).unwrap_or_else(|e| panic!("{f}: {e}"));
         assert!(r.identical(), "{f}\n{}", r.describe());
@@ -34,12 +35,22 @@ fn the_real_game_is_reproduced_bit_for_bit() {
         attacks += r.client.get("attacks");
         teleports += r.server.get("teleports back");
         kb += r.client.get("knockbacks taken");
+        blocked += r.server.get("blocked hits");
+        right_clicks += r.client.get("right clicks");
+        lost += r.client.get("clicks lost to a block");
+        silent += r.client.get("blocks dropped silently");
+        swords += r.client.get("swords sent again");
     }
     // The recordings have to keep covering what a duel is made of.
     assert!(ticks > 15000, "ticks {ticks}");
     assert!(hits > 500 && sprint_hits > 300 && crits > 50, "hits {hits}, sprint {sprint_hits}, critical {crits}");
     assert!(attacks > 300 && kb > 400, "attacks {attacks}, knockbacks {kb}");
     assert!(teleports > 0, "no recording has the server putting a player back");
+    // Sword blocking: hits taken on a block, right clicks, clicks made
+    // while blocking, the server sending the sword again after a hit, and
+    // the client dropping its block when that arrives.
+    assert!(blocked > 150 && right_clicks > 400 && lost > 800, "blocked {blocked}, right clicks {right_clicks}, lost {lost}");
+    assert!(swords > 200 && silent >= 5, "swords sent again {swords}, blocks dropped silently {silent}");
 }
 
 #[test]

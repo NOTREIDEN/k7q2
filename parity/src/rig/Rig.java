@@ -36,6 +36,8 @@ import net.minecraft.network.NetworkManager;
 import net.minecraft.network.Packet;
 import net.minecraft.network.play.client.C02PacketUseEntity;
 import net.minecraft.network.play.client.C03PacketPlayer;
+import net.minecraft.network.play.client.C07PacketPlayerDigging;
+import net.minecraft.network.play.client.C08PacketPlayerBlockPlacement;
 import net.minecraft.network.play.client.C0APacketAnimation;
 import net.minecraft.network.play.client.C0BPacketEntityAction;
 import net.minecraft.network.play.server.S1CPacketEntityMetadata;
@@ -45,6 +47,9 @@ import net.minecraft.potion.PotionEffect;
 import net.minecraft.server.MinecraftServer;
 import net.minecraft.server.management.ItemInWorldManager;
 import net.minecraft.entity.DataWatcher;
+import net.minecraft.nbt.NBTTagCompound;
+import net.minecraft.util.BlockPos;
+import net.minecraft.util.EnumFacing;
 import net.minecraft.util.MathHelper;
 import net.minecraft.util.MovingObjectPosition;
 import net.minecraft.util.Vec3;
@@ -80,6 +85,8 @@ public final class Rig {
     static int speedAmp = 1;
     static float sensitivity = 0.5F;
     static final List<int[]> blocks = new ArrayList<int[]>();
+    static boolean unbreakable = false;
+    static boolean useDown = false;
 
     // State.
     static int state = 0, wait = 0;
@@ -119,8 +126,9 @@ public final class Rig {
             if (line.isEmpty() || line.startsWith("#")) continue;
             String[] p = line.split("\\s+");
             if (p[0].equals("C")) {
-                int[] in = new int[7];
-                for (int i = 0; i < 7; i++) in[i] = Integer.parseInt(p[1 + i]);
+                // forward strafe jump sprint attack dx dy [use]
+                int[] in = new int[8];
+                for (int i = 0; i < 8 && 1 + i < p.length; i++) in[i] = Integer.parseInt(p[1 + i]);
                 inputs.add(in);
             } else if (p[0].equals("F")) {
                 int t = Integer.parseInt(p[1]);
@@ -141,13 +149,15 @@ public final class Rig {
             } else if (p[0].equals("pen")) {
                 penLo = Double.parseDouble(p[1]);
                 penHi = Double.parseDouble(p[2]);
+            } else if (p[0].equals("unbreakable")) {
+                unbreakable = !p[1].equals("0");
             } else if (p[0].equals("block")) {
                 blocks.add(new int[] {Integer.parseInt(p[1]), Integer.parseInt(p[2]), Integer.parseInt(p[3])});
             }
         }
         r.close();
         log("HEADER ticks=" + inputs.size() + " speed=" + speedAmp + " sensitivity=" + hf(sensitivity)
-            + " fake=" + (fakeStart != null ? 1 : 0) + " blocks=" + blocks.size());
+            + " fake=" + (fakeStart != null ? 1 : 0) + " blocks=" + blocks.size() + " fmt=2 wear=" + (unbreakable ? 0 : 1));
         for (int[] b : blocks) log("BLOCK " + b[0] + " " + b[1] + " " + b[2]);
     }
 
@@ -238,12 +248,17 @@ public final class Rig {
             key(gs.keyBindJump, in[2] != 0);
             key(gs.keyBindSprint, in[3] != 0);
             if (in[4] != 0) KeyBinding.onTick(gs.keyBindAttack.getKeyCode());
+            // The right button: a press when it goes down, then held.
+            boolean use = in[7] != 0;
+            if (use && !useDown) KeyBinding.onTick(gs.keyBindUseItem.getKeyCode());
+            key(gs.keyBindUseItem, use);
+            useDown = use;
             if (in[5] != 0 || in[6] != 0) {
                 float f = gs.mouseSensitivity * 0.6F + 0.2F;
                 float f1 = f * f * f * 8.0F;
                 mc.thePlayer.setAngles((float) in[5] * f1, (float) in[6] * f1);
             }
-            log("CI " + ctick + " " + in[0] + " " + in[1] + " " + in[2] + " " + in[3] + " " + in[4] + " " + in[5] + " " + in[6]);
+            log("CI " + ctick + " " + in[0] + " " + in[1] + " " + in[2] + " " + in[3] + " " + in[4] + " " + in[5] + " " + in[6] + " " + in[7]);
             inClientTick = true;
             return;
         }
@@ -275,7 +290,8 @@ public final class Rig {
             + " rtz=" + hd((Double) get(o, c, "otherPlayerMPZ")) + " rtyaw=" + hd((Double) get(o, c, "otherPlayerMPYaw"))
             + " rtpitch=" + hd((Double) get(o, c, "otherPlayerMPPitch"))
             + " rog=" + (o.onGround ? 1 : 0) + " rspr=" + (o.isSprinting() ? 1 : 0) + " rht=" + o.hurtTime
-            + " rswing=" + (o.isSwingInProgress ? 1 : 0) + " rswp=" + o.swingProgressInt;
+            + " rswing=" + (o.isSwingInProgress ? 1 : 0) + " rswp=" + o.swingProgressInt
+            + " reat=" + (o.isEating() ? 1 : 0);
     }
 
     static String local(EntityPlayerSP p) {
@@ -296,7 +312,17 @@ public final class Rig {
             + " mif=" + hf(p.movementInput.moveForward) + " mis=" + hf(p.movementInput.moveStrafe)
             + " mij=" + (p.movementInput.jump ? 1 : 0)
             + " ht=" + p.hurtTime + " fall=" + hf(p.fallDistance) + " food=" + p.getFoodStats().getFoodLevel()
-            + " ch=" + (p.isCollidedHorizontally ? 1 : 0);
+            + " ch=" + (p.isCollidedHorizontally ? 1 : 0)
+            + " use=" + (p.isUsingItem() ? 1 : 0) + " eat=" + (p.isEating() ? 1 : 0)
+            + " rcd=" + get(Minecraft.getMinecraft(), Minecraft.class, "rightClickDelayTimer")
+            + " lcc=" + get(Minecraft.getMinecraft(), Minecraft.class, "leftClickCounter")
+            + " sd=" + wear(p);
+    }
+
+    /** Damage value of the held item, -1 with empty hands. */
+    static int wear(EntityPlayer p) {
+        ItemStack s = p.inventory.getCurrentItem();
+        return s == null ? -1 : s.getItemDamage();
     }
 
     static void clientInit(Minecraft mc) {
@@ -308,7 +334,9 @@ public final class Rig {
         inClientTick = false;
         try {
             MovingObjectPosition m = mc.objectMouseOver;
-            int pick = (m != null && m.typeOfHit == MovingObjectPosition.MovingObjectType.ENTITY) ? 1 : 0;
+            // 1 the other player, 2 a block, 0 nothing.
+            int pick = m == null ? 0 : m.typeOfHit == MovingObjectPosition.MovingObjectType.ENTITY ? 1
+                : m.typeOfHit == MovingObjectPosition.MovingObjectType.BLOCK ? 2 : 0;
             log("CT " + ctick + " " + local(mc.thePlayer) + " pick=" + pick + remote(other(mc)));
         } catch (Throwable t) {
             t.printStackTrace();
@@ -351,6 +379,7 @@ public final class Rig {
 
     static final String[] WANT = {
         "C03PacketPlayer", "C02PacketUseEntity", "C0APacketAnimation", "C0BPacketEntityAction", "C09PacketHeldItemChange",
+        "C07PacketPlayerDigging", "C08PacketPlayerBlockPlacement", "S2FPacketSetSlot",
         "S12PacketEntityVelocity", "S19PacketEntityStatus", "S19PacketEntityHeadLook", "S14PacketEntity", "S18PacketEntityTeleport",
         "S1CPacketEntityMetadata", "S20PacketEntityProperties", "S0BPacketAnimation", "S08PacketPlayerPosLook",
         "S1DPacketEntityEffect", "S1EPacketRemoveEntityEffect", "S06PacketUpdateHealth", "S0CPacketSpawnPlayer",
@@ -382,6 +411,14 @@ public final class Rig {
                     else if (v instanceof Boolean) sb.append(((Boolean) v) ? 1 : 0);
                     else if (v instanceof Number) sb.append(v);
                     else if (v instanceof Enum) sb.append(((Enum<?>) v).name());
+                    else if (v instanceof ItemStack) {
+                        ItemStack st = (ItemStack) v;
+                        sb.append(net.minecraft.item.Item.getIdFromItem(st.getItem())).append('/').append(st.getItemDamage())
+                            .append('/').append(st.stackSize);
+                    } else if (v instanceof BlockPos) {
+                        BlockPos b = (BlockPos) v;
+                        sb.append(b.getX()).append(',').append(b.getY()).append(',').append(b.getZ());
+                    }
                     else if (v instanceof int[]) {
                         int[] a = (int[]) v;
                         for (int i = 0; i < a.length; i++) sb.append(i > 0 ? "," : "").append(a[i]);
@@ -438,6 +475,8 @@ public final class Rig {
                 fake.setPositionAndRotation(fakeStart[0], fakeStart[1], fakeStart[2], (float) fakeStart[3], (float) fakeStart[4]);
                 fake.theItemInWorldManager.setGameType(WorldSettings.GameType.SURVIVAL);
                 server.getConfigurationManager().playerLoggedIn(fake);
+                // As for a player that joins: it is told about changes to its own inventory.
+                fake.addSelfToInternalCraftingInventory();
                 prepare(fake);
                 fakeNet.setPlayerLocation(fakeStart[0], fakeStart[1], fakeStart[2], (float) fakeStart[3], (float) fakeStart[4]);
                 fakeNet.processPlayer(new C03PacketPlayer.C06PacketPlayerPosLook(fakeStart[0], fakeStart[1], fakeStart[2],
@@ -455,7 +494,13 @@ public final class Rig {
         if (speedAmp >= 0) p.addPotionEffect(new PotionEffect(Potion.moveSpeed.id, 10000000, speedAmp, false, false));
         p.addPotionEffect(new PotionEffect(Potion.resistance.id, 10000000, 4, false, false));
         p.addPotionEffect(new PotionEffect(Potion.saturation.id, 10000000, 0, false, false));
-        p.inventory.mainInventory[0] = new ItemStack(Items.diamond_sword);
+        ItemStack sword = new ItemStack(Items.diamond_sword);
+        if (unbreakable) {
+            NBTTagCompound tag = new NBTTagCompound();
+            tag.setBoolean("Unbreakable", true);
+            sword.setTagCompound(tag);
+        }
+        p.inventory.mainInventory[0] = sword;
         p.inventory.currentItem = 0;
         p.setHealth(p.getMaxHealth());
     }
@@ -492,6 +537,8 @@ public final class Rig {
             + " attr=" + hd(p.getEntityAttribute(SharedMonsterAttributes.movementSpeed).getAttributeValue())
             + " fall=" + hf(p.fallDistance) + " hp=" + hf(p.getHealth()) + " food=" + p.getFoodStats().getFoodLevel()
             + " swing=" + (p.isSwingInProgress ? 1 : 0) + " swp=" + p.swingProgressInt
+            + " use=" + (p.isUsingItem() ? 1 : 0) + " eat=" + (p.isEating() ? 1 : 0) + " blk=" + (p.isBlocking() ? 1 : 0)
+            + " sd=" + wear(p)
             + " rit=" + get(p, EntityPlayerMP.class, "respawnInvulnerabilityTicks")
             + net(p.playerNetServerHandler)
             + " ccx=" + p.chunkCoordX + " ccy=" + p.chunkCoordY + " ccz=" + p.chunkCoordZ + " atc=" + (p.addedToChunk ? 1 : 0)
@@ -568,6 +615,11 @@ public final class Rig {
             p = new C0APacketAnimation();
         } else if (k.equals("ATTACK")) {
             p = new C02PacketUseEntity(real, C02PacketUseEntity.Action.ATTACK);
+        } else if (k.equals("USE")) {
+            // Right click with the held item, as a client sends it.
+            p = new C08PacketPlayerBlockPlacement(fake.inventory.getCurrentItem());
+        } else if (k.equals("RELEASE")) {
+            p = new C07PacketPlayerDigging(C07PacketPlayerDigging.Action.RELEASE_USE_ITEM, BlockPos.ORIGIN, EnumFacing.DOWN);
         } else {
             throw new RuntimeException("unknown fake action " + k);
         }
@@ -575,6 +627,8 @@ public final class Rig {
         if (p instanceof C03PacketPlayer) fakeNet.processPlayer((C03PacketPlayer) p);
         else if (p instanceof C0BPacketEntityAction) fakeNet.processEntityAction((C0BPacketEntityAction) p);
         else if (p instanceof C0APacketAnimation) fakeNet.handleAnimation((C0APacketAnimation) p);
+        else if (p instanceof C08PacketPlayerBlockPlacement) fakeNet.processPlayerBlockPlacement((C08PacketPlayerBlockPlacement) p);
+        else if (p instanceof C07PacketPlayerDigging) fakeNet.processPlayerDigging((C07PacketPlayerDigging) p);
         else fakeNet.processUseEntity((C02PacketUseEntity) p);
     }
 

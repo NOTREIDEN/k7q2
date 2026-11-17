@@ -17,6 +17,8 @@ import time
 
 import torch
 
+from pvpai.model import fit_state
+
 
 class DirBackend:
     """Files in `path`. With `read_path`, other members' files are looked
@@ -159,6 +161,9 @@ class Syncer:
         if own is not None:
             sds.append(own)
         mean = {k: torch.stack([sd[k].float() for sd in sds]).mean(0) for k in sds[0]}
+        # Weights from before the simulator gained inputs or controls are
+        # grown to fit, the same way on every machine.
+        mean, _ = fit_state(mean, policy)
         policy.load_state_dict(mean)
         vars_ = [c["vs"][0] for c in cks] + ([vs.var] if own is not None else [])
         vs.var = sum(vars_) / len(vars_)

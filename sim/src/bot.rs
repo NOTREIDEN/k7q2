@@ -18,15 +18,61 @@ pub struct BotParams {
     pub strafe: bool,
     pub wtap: bool,
     pub jump_reset: bool,
+    /// Chance to follow a hit with a short block (a block hit) instead of
+    /// letting go of W.
+    pub blockhit: f64,
+    /// Chance to block for a moment when the opponent starts a swing
+    /// within reach.
+    pub block_react: f64,
 }
 
 impl BotParams {
     pub fn level(level: u8) -> BotParams {
         match level {
-            0 | 1 => BotParams { level, max_turn: 4.0, aim_noise: 0.0, click_prob: 0.0, strafe: false, wtap: false, jump_reset: false },
-            2 => BotParams { level, max_turn: 12.0, aim_noise: 2.0, click_prob: 0.45, strafe: false, wtap: false, jump_reset: false },
-            3 => BotParams { level, max_turn: 30.0, aim_noise: 0.8, click_prob: 0.7, strafe: true, wtap: true, jump_reset: false },
-            _ => BotParams { level: 4, max_turn: 90.0, aim_noise: 0.2, click_prob: 1.0, strafe: true, wtap: true, jump_reset: true },
+            0 | 1 => BotParams {
+                level,
+                max_turn: 4.0,
+                aim_noise: 0.0,
+                click_prob: 0.0,
+                strafe: false,
+                wtap: false,
+                jump_reset: false,
+                blockhit: 0.0,
+                block_react: 0.0,
+            },
+            2 => BotParams {
+                level,
+                max_turn: 12.0,
+                aim_noise: 2.0,
+                click_prob: 0.45,
+                strafe: false,
+                wtap: false,
+                jump_reset: false,
+                blockhit: 0.0,
+                block_react: 0.0,
+            },
+            3 => BotParams {
+                level,
+                max_turn: 30.0,
+                aim_noise: 0.8,
+                click_prob: 0.7,
+                strafe: true,
+                wtap: true,
+                jump_reset: false,
+                blockhit: 0.25,
+                block_react: 0.0,
+            },
+            _ => BotParams {
+                level: 4,
+                max_turn: 90.0,
+                aim_noise: 0.2,
+                click_prob: 1.0,
+                strafe: true,
+                wtap: true,
+                jump_reset: true,
+                blockhit: 0.4,
+                block_react: 0.25,
+            },
         }
     }
 }
@@ -41,6 +87,8 @@ pub struct BotState {
     walk_left: i32,
     walk_turn: i32,
     walk_sprint: bool,
+    block_left: i32,
+    saw_swing: bool,
 }
 
 fn gauss(rng: &mut Rng) -> f64 {
@@ -107,12 +155,27 @@ pub fn act(c: &Client, world: &World, cfg: &ClientCfg, p: &BotParams, st: &mut B
     inp.forward = if hdist > 1.2 { 1 } else { 0 };
     if p.wtap {
         if rp.hurt_time == 10 && lp.ticks_since_attack <= 12 {
-            st.wtap_left = 2;
+            // A hit landed: reset the sprint, by letting go of W or by a
+            // short block.
+            if rng.chance(p.blockhit) {
+                st.block_left = 1 + (rng.next_u64() % 2) as i32;
+            } else {
+                st.wtap_left = 2;
+            }
         }
         if st.wtap_left > 0 {
             st.wtap_left -= 1;
             inp.forward = 0;
         }
+    }
+    let swing_starts = rp.swing_in_progress && !st.saw_swing;
+    st.saw_swing = rp.swing_in_progress;
+    if swing_starts && hdist < 3.6 && lp.hurt_time <= 1 && st.block_left == 0 && rng.chance(p.block_react) {
+        st.block_left = 2;
+    }
+    if st.block_left > 0 {
+        st.block_left -= 1;
+        inp.use_item = true;
     }
     if p.strafe && hdist < 6.0 {
         if st.strafe_left <= 0 {

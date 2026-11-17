@@ -233,8 +233,8 @@ fn server_echoes_sprint_metadata_to_the_player_itself() {
     let world = m.world.clone();
     m.s.handle(0, C2S::Sprint(true), &world, &mut m.rng, &mut out);
     m.s.tick(&mut out);
-    assert!(out.contains(&(0, S2C::Meta { own: true, sprinting: true })), "{out:?}");
-    assert!(out.contains(&(1, S2C::Meta { own: false, sprinting: true })), "{out:?}");
+    assert!(out.contains(&(0, S2C::Meta { own: true, sprinting: true, using: false })), "{out:?}");
+    assert!(out.contains(&(1, S2C::Meta { own: false, sprinting: true, using: false })), "{out:?}");
     let base = 0.1f32 as f64;
     assert!(out.contains(&(0, S2C::Props { own: true, base, speed_amp: 1, sprint: true })), "{out:?}");
 }
@@ -243,8 +243,8 @@ fn server_echoes_sprint_metadata_to_the_player_itself() {
 fn deterministic() {
     let run = || {
         let mut m = duel([0.0, 0.0, 0.0], 10.0, [1.0, 0.0, 3.0], 170.0, 1, 60);
-        let a = Input { forward: 1, strafe: 1, sprint_key: true, attack: true, dx: 3, dy: -1, jump: true, extra_clicks: 0 };
-        let b = Input { forward: 1, strafe: -1, sprint_key: true, attack: true, dx: -2, dy: 1, jump: false, extra_clicks: 0 };
+        let a = Input { forward: 1, strafe: 1, sprint_key: true, attack: true, dx: 3, dy: -1, jump: true, extra_clicks: 0, use_item: false };
+        let b = Input { forward: 1, strafe: -1, sprint_key: true, attack: true, dx: -2, dy: 1, jump: false, extra_clicks: 0, use_item: false };
         for _ in 0..400 {
             step(&mut m, &a, &b);
         }
@@ -274,4 +274,137 @@ fn block_ray_reports_the_last_cell_border_in_open_air() {
     }
     assert!(!w.blocked([0.5, 1.62, 0.5], [3.5, 1.62, 6.5]));
     assert!(w.blocked([0.5, 1.62, 0.5], [3.5, -0.5, 6.5]));
+}
+
+/// Player 0 hits player 1, who holds the right button from the start.
+/// Returns the damage of the first hit and whether the server counted it
+/// as blocked.
+fn first_hit_on(blocking: bool) -> (f32, bool) {
+    let mut m = duel([0.0, 0.0, 0.0], 0.0, [0.0, 0.0, 2.5], 180.0, -1, 20);
+    let idle = Input::default();
+    let hold = Input { use_item: blocking, ..Default::default() };
+    for _ in 0..4 {
+        step(&mut m, &idle, &hold);
+    }
+    let hit = Input { attack: true, ..Default::default() };
+    step(&mut m, &hit, &hold);
+    for _ in 0..4 {
+        step(&mut m, &idle, &hold);
+        if let Some(h) = m.s.hits.first() {
+            return (h.damage, h.blocked);
+        }
+    }
+    panic!("no hit");
+}
+
+#[test]
+fn a_blocked_hit_does_half_the_damage_plus_a_half() {
+    // EntityPlayer.damageEntity: (1 + damage) * 0.5 while blocking.
+    assert_eq!(first_hit_on(false), (8.0, false));
+    assert_eq!(first_hit_on(true), (4.5, true));
+}
+
+#[test]
+fn blocking_slows_down_and_swallows_clicks() {
+    let mut m = duel([0.0, 0.0, 0.0], 0.0, [0.0, 0.0, 2.5], 180.0, -1, 20);
+    // An unbreakable sword, so that the hit does not make the server send
+    // it again (see the test below).
+    m.s.cfg.sword_wear = 0.0;
+    let idle = Input::default();
+    // The button goes down: the block starts on that tick, after the click
+    // of the same tick has been made.
+    let id = m.advance();
+    assert_eq!(id, 0);
+    let r = m.client_tick(0, &Input { forward: 1, attack: true, use_item: true, ..Default::default() });
+    assert!(r.attacked && r.used && m.c[0].lp.using_item);
+    assert_eq!(m.c[0].lp.mi_forward, 0.2);
+    let id = m.advance();
+    m.client_tick(id, &idle);
+    // Held: clicks do nothing.
+    m.advance();
+    let r = m.client_tick(0, &Input { forward: 1, attack: true, use_item: true, ..Default::default() });
+    assert!(!r.swung && r.swallowed == 1 && m.c[0].lp.using_item);
+    let id = m.advance();
+    m.client_tick(id, &idle);
+    // Let go: the block ends, but the click of that tick is still lost.
+    m.advance();
+    let r = m.client_tick(0, &Input { forward: 1, attack: true, ..Default::default() });
+    assert!(!r.swung && !m.c[0].lp.using_item);
+    assert_eq!(m.c[0].lp.mi_forward, 1.0);
+    let id = m.advance();
+    m.client_tick(id, &idle);
+    m.advance();
+    let r = m.client_tick(0, &Input { forward: 1, attack: true, ..Default::default() });
+    assert!(r.swung);
+}
+
+#[test]
+fn a_block_hit_resets_the_sprint() {
+    // As `sprint_knockback_needs_a_sprint_reset`, but W stays down and the
+    // right button is tapped for one tick after each hit that registered.
+    let mut m = duel([0.0, 0.0, 0.0], 0.0, [0.0, 0.0, 2.6], 180.0, -1, 20);
+    let idle = Input::default();
+    let go = Input { forward: 1, sprint_key: true, ..Default::default() };
+    let hit = Input { forward: 1, sprint_key: true, attack: true, ..Default::default() };
+    step(&mut m, &go, &idle);
+    let mut sprint_flags = vec![];
+    let mut tap = 0;
+    for _ in 0..60 {
+        m.c[1].lp.l.body.motion = [0.0, -0.0784000015258789, 0.0];
+        m.c[0].lp.l.body.motion[2] = 0.0;
+        let inp = if tap > 0 { Input { use_item: true, ..hit } } else { hit };
+        if tap > 0 {
+            tap -= 1;
+        }
+        step(&mut m, &inp, &idle);
+        if m.c[0].rp.hurt_time == 9 {
+            tap = 1;
+        }
+        for h in m.s.hits.drain(..) {
+            sprint_flags.push(h.sprint);
+        }
+    }
+    assert!(sprint_flags.len() >= 4, "{sprint_flags:?}");
+    assert!(sprint_flags.iter().all(|s| *s), "{sprint_flags:?}");
+}
+
+#[test]
+fn the_sword_coming_back_ends_the_block_on_the_client_only() {
+    // Seen in the recordings of the real game: a hit costs the sword
+    // durability, the server sends the sword again, and a client that is
+    // blocking when it arrives drops the block without telling the server.
+    // If the button is then let go before it clicks again, the server keeps
+    // the player blocking.
+    let mut m = duel([0.0, 0.0, 0.0], 0.0, [0.0, 0.0, 2.5], 180.0, -1, 20);
+    let idle = Input::default();
+    let hold = Input { use_item: true, ..Default::default() };
+    step(&mut m, &Input { attack: true, use_item: true, ..Default::default() }, &idle);
+    assert!(m.c[0].lp.using_item);
+    let mut dropped_at = None;
+    for t in 0..6 {
+        step(&mut m, &hold, &idle);
+        if !m.c[0].lp.using_item {
+            dropped_at = Some(t);
+            break;
+        }
+    }
+    assert!(dropped_at.is_some(), "the client kept blocking");
+    for _ in 0..10 {
+        step(&mut m, &idle, &idle);
+    }
+    assert!(!m.c[0].lp.using_item);
+    assert!(m.s.p[0].using_item, "the server was told to stop");
+    assert!(m.c[1].rp.using, "the other player does not see the block");
+    // An unbreakable sword is never sent again, so nothing of this happens.
+    let mut m = duel([0.0, 0.0, 0.0], 0.0, [0.0, 0.0, 2.5], 180.0, -1, 20);
+    m.s.cfg.sword_wear = 0.0;
+    step(&mut m, &Input { attack: true, use_item: true, ..Default::default() }, &idle);
+    for _ in 0..6 {
+        step(&mut m, &hold, &idle);
+        assert!(m.c[0].lp.using_item);
+    }
+    for _ in 0..10 {
+        step(&mut m, &idle, &idle);
+    }
+    assert!(!m.s.p[0].using_item);
 }

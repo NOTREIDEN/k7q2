@@ -5,6 +5,11 @@ import torch
 import torch.nn as nn
 
 
+# Starting preference of the right mouse button: pressed on about three
+# ticks in a hundred.
+USE_BIAS = [0.0, -3.5]
+
+
 def _init(layer, gain):
     nn.init.orthogonal_(layer.weight, gain)
     nn.init.zeros_(layer.bias)
@@ -36,6 +41,9 @@ class Policy(nn.Module):
                 c = (n - 1) / 2
                 self.heads[h].bias.copy_(torch.tensor([-0.35 * abs(i - c) for i in range(n)]))
             self.heads[2].bias.copy_(torch.tensor([0.0, -1.7]))
+            if len(self.act_dims) > 7:
+                # Blocking costs clicks and speed, so it starts rare.
+                self.heads[7].bias.copy_(torch.tensor(USE_BIAS))
 
     def initial_state(self, n, device=None):
         z = torch.zeros(n, self.hidden, device=device)
@@ -94,20 +102,44 @@ class Policy(nn.Module):
         return logp, ent, self.value(hs, priv)
 
 
-def load_policy(path, obs_dim=None):
+def fit_state(sd, policy):
+    """Stored weights made to fit a policy that has since gained inputs or
+    controls. New inputs get zero weight and a new control depends on
+    nothing yet and has its starting preference, so the policy plays as
+    before until it learns to use them. Returns the weights and whether
+    anything was added."""
+    out, grown = {}, False
+    for k, ref in policy.state_dict().items():
+        if k not in sd:
+            if k.endswith("bias") and ref.numel() == len(USE_BIAS):
+                out[k] = torch.tensor(USE_BIAS, dtype=ref.dtype)
+            else:
+                out[k] = torch.zeros_like(ref)
+            grown = True
+        elif sd[k].shape != ref.shape:
+            w = torch.zeros_like(ref)
+            old = sd[k].float()
+            w[tuple(slice(0, n) for n in old.shape)] = old
+            out[k] = w
+            grown = True
+        else:
+            out[k] = sd[k].float()
+    return out, grown
+
+
+def load_policy(path, dims=None):
     """The policy stored in a checkpoint, with the checkpoint itself and
-    whether inputs were added. If the simulator now gives more observation
-    values than the checkpoint was trained with, the new ones start with
-    zero weight: the policy plays as before until it learns to use them."""
+    whether inputs or controls were added. `dims` is what the simulator
+    now gives and takes (`pvpai.env.sim_dims()`); a checkpoint trained
+    with less is grown to fit, see `fit_state`."""
     ck = torch.load(path, map_location="cpu", weights_only=False)
     sd = {k: v.float() for k, v in ck["policy"].items()}
     hidden = sd["lstm.weight_hh_l0"].shape[1]
-    old = sd["enc.0.weight"].shape[1]
-    n = max(obs_dim or old, old)
-    if n > old:
-        w = torch.zeros(hidden, n)
-        w[:, :old] = sd["enc.0.weight"]
-        sd["enc.0.weight"] = w
-    policy = Policy(n, ck["priv_dim"], ck["act_dims"], hidden)
+    obs, priv, acts = sd["enc.0.weight"].shape[1], ck["priv_dim"], list(ck["act_dims"])
+    if dims is not None:
+        obs, priv = max(obs, dims[0]), max(priv, dims[1])
+        acts = acts + list(dims[2][len(acts):])
+    policy = Policy(obs, priv, acts, hidden)
+    sd, grown = fit_state(sd, policy)
     policy.load_state_dict(sd)
-    return policy, ck, n > old
+    return policy, ck, grown
