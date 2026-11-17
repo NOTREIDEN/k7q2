@@ -648,6 +648,32 @@ def main():
                     lines.append("F %d ATTACK" % t)
                 lines.append("F %d FRONT %r %r 0.0 0 0" % (t, rng.choice([1.2, 1.5, 2.0]), float(angle)))
                 t += 1
+    elif name == "chase":
+        # For a policy at the keys: the other player walks after it and hits it when it
+        # can, with pauses, in the open or (walls=1) inside low walls. The keys written
+        # here are not used.
+        if opts.get("walls", "0") != "0":
+            pen(lines, half=int(opts.get("half", "10")), height=3)
+        lines.append("fake 0.5 4 6.0 180 0")
+        n_pearls, n_pots = int(opts.get("pearls", "16")), int(opts.get("potions", "6"))
+        lines.append("pearls %d" % n_pearls)
+        lines.append("potions %d" % n_pots)
+        lines.append("steak %s" % opts.get("steak", "64"))
+        if "inv" in opts:
+            stock(rng, lines, opts)
+        n = int(opts.get("ticks", "1200"))
+        seq = [(0,) * 9] * n
+        step, t = float(opts.get("step", "0.24")), 20
+        while t < n + 60:
+            # A stretch of chasing, then a pause.
+            for _ in range(rng.randint(60, 200)):
+                lines.append("F %d CHASE %r %r" % (t, step, rng.choice([1.5, 2.0, 2.5])))
+                if rng.random() < float(opts.get("hits", "0.45")):
+                    lines.append("F %d HIT" % t)
+                t += 1
+            for _ in range(rng.randint(5, 25)):
+                lines.append("F %d CHASE 0.0 2.0" % t)
+                t += 1
     else:
         raise SystemExit("unknown script " + name)
     # double=P: that share of the clicks are two clicks inside one tick, as a mouse clicked

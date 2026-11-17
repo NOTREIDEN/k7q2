@@ -133,6 +133,9 @@ public final class Rig {
     static long enchSeed = 1234L;
     /** Where the server last put the scripted player; it answers on the next tick, as a client does. */
     static double[] fakeTeleport = null;
+    /** For a scripted player that chases: the knock the server last gave it, as it wears off, and its height above the floor. */
+    static final double[] fakeKnock = new double[3];
+    static double fakeUp = 0.0;
     static boolean useDown = false;
 
     // State.
@@ -1079,6 +1082,30 @@ public final class Rig {
             double x = fake.posX + gx * f, z = fake.posZ + gz * f;
             float yaw = (float) (Math.atan2(-(real.posX - x), real.posZ - z) * 180.0 / Math.PI) + Float.parseFloat(a[7]);
             p = new C03PacketPlayer.C06PacketPlayerPosLook(x, 4.0 + up, z, yaw, Float.parseFloat(a[8]), up == 0.0);
+        } else if (k.equals("CHASE")) {
+            // F tick CHASE step keep: walk towards the real player, at most one step and no
+            // nearer than keep, facing it; knocked about by its hits roughly as a player is.
+            double gx = real.posX - fake.posX, gz = real.posZ - fake.posZ;
+            double len = Math.sqrt(gx * gx + gz * gz), step = Double.parseDouble(a[3]), keep = Double.parseDouble(a[4]);
+            double go = fakeUp > 0.0 ? step * 0.4 : step;
+            double f = len > keep ? Math.min(go, len - keep) / len : 0.0;
+            double x = Math.max(penLo, Math.min(penHi, fake.posX + gx * f + fakeKnock[0]));
+            double z = Math.max(penLo, Math.min(penHi, fake.posZ + gz * f + fakeKnock[2]));
+            fakeUp = Math.max(0.0, fakeUp + fakeKnock[1]);
+            fakeKnock[1] = fakeUp > 0.0 ? (fakeKnock[1] - 0.08) * 0.98 : 0.0;
+            double slow = fakeUp > 0.0 ? 0.91 : 0.546;
+            fakeKnock[0] *= slow;
+            fakeKnock[2] *= slow;
+            float yaw = (float) (Math.atan2(-(real.posX - x), real.posZ - z) * 180.0 / Math.PI);
+            p = new C03PacketPlayer.C06PacketPlayerPosLook(x, 4.0 + fakeUp, z, yaw, 0.0F, fakeUp == 0.0);
+        } else if (k.equals("HIT")) {
+            // F tick HIT: swing, and hit the real player if it is within reach.
+            p = new C0APacketAnimation();
+            log("SP " + stick + " 1 " + dump(p));
+            fakeNet.handleAnimation((C0APacketAnimation) p);
+            double dx = real.posX - fake.posX, dy = real.posY - fake.posY, dz = real.posZ - fake.posZ;
+            if (dx * dx + dz * dz > 3.0 * 3.0 || Math.abs(dy) > 2.0) return;
+            p = new C02PacketUseEntity(real, C02PacketUseEntity.Action.ATTACK);
         } else if (k.equals("GROUND")) {
             p = new C03PacketPlayer(!a[3].equals("0"));
         } else if (k.equals("SPRINT")) {
@@ -1163,6 +1190,14 @@ public final class Rig {
 
         public void sendPacket(Packet p) {
             if (serverRecording && !finished && wanted(p)) log("SS " + stick + " 1 " + dump(p) + exact(p));
+            if (p instanceof net.minecraft.network.play.server.S12PacketEntityVelocity) {
+                net.minecraft.network.play.server.S12PacketEntityVelocity v = (net.minecraft.network.play.server.S12PacketEntityVelocity) p;
+                if (v.getEntityID() == playerEntity.getEntityId()) {
+                    fakeKnock[0] = (double) v.getMotionX() / 8000.0;
+                    fakeKnock[1] = (double) v.getMotionY() / 8000.0;
+                    fakeKnock[2] = (double) v.getMotionZ() / 8000.0;
+                }
+            }
             if (serverRecording && p instanceof S08PacketPlayerPosLook) {
                 S08PacketPlayerPosLook t = (S08PacketPlayerPosLook) p;
                 fakeTeleport = new double[] {t.getX(), t.getY(), t.getZ(), t.getYaw(), t.getPitch()};
