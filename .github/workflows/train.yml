@@ -27,7 +27,7 @@ on:
           --param w_sprint_hit=0.3 --param w_reach_adv=0.03 --param w_combo=0.2
           --param w_close=0.06 --param close_dist=2.2
           --param kb_random=0.7 --param opp_edge_prob=0.5 --param w_damage=1
-          --param start_dist_max=16
+          --param start_dist_max=16 --param health_prob=0.8
       previous:
         description: Id of the run to continue from (empty starts from seed/stage1.pt)
         default: ""

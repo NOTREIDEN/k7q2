@@ -23,6 +23,9 @@ SKIN, HAIR, EYE = (226, 176, 134), (70, 46, 26), (40, 40, 60)
 SWORD = (118, 232, 220)
 PEARL = (22, 124, 108)
 PORTAL = (176, 92, 224)
+POTION = (226, 56, 96)
+SPLASH = (255, 122, 160)
+HEART, HEART_EMPTY = (232, 44, 52), (64, 22, 26)
 TEAM = [
     {"body": (58, 118, 224), "legs": (36, 48, 104), "ui": (96, 160, 255)},
     {"body": (214, 62, 52), "legs": (96, 40, 40), "ui": (255, 110, 96)},
@@ -120,10 +123,11 @@ def cube_quads(centre, size, color):
     return [(w[list(idx)], np.array(n, float), shade(color, np.array(n, float), False)) for idx, n in FACES]
 
 
-def player_quads(pos, yaw, pitch, walk, amp, swing, team, hurt, block=False, pearl=False):
+def player_quads(pos, yaw, pitch, walk, amp, swing, team, hurt, block=False, pearl=False, potion=False, empty=False):
     """World-space quads (corners, normal, colour) of one blocky player.
     With `block` the sword is held upright in front of the body; with
-    `pearl` the hand holds a pearl instead of the sword."""
+    `pearl` or `potion` the hand holds that instead of the sword, and with
+    `empty` nothing."""
     cy, sy = math.cos(math.radians(yaw)), math.sin(math.radians(yaw))
 
     def to_world(p):
@@ -141,6 +145,10 @@ def player_quads(pos, yaw, pitch, walk, amp, swing, team, hurt, block=False, pea
     sword = (box((-6.6, 10.5, 1), (-5.4, 12.5, 17)), (0, 22, 0), arm, [SWORD] * 6)
     if pearl:
         sword = (box((-7.6, 9.2, 0.4), (-4.4, 12.4, 3.6)), (0, 22, 0), arm, [PEARL] * 6)
+    elif potion:
+        sword = (box((-7.6, 8.6, 0.4), (-4.4, 12.6, 3.6)), (0, 22, 0), arm, [POTION] * 6)
+    elif empty:
+        sword = None
     elif block:
         arm = -1.15
         sword = (box((-5.2, 13, 7.2), (-0.8, 31, 8.4)), (0, 22, 0), 0.0, [SWORD] * 6)
@@ -150,11 +158,12 @@ def player_quads(pos, yaw, pitch, walk, amp, swing, team, hurt, block=False, pea
         (box((-4, 12, -2), (4, 24, 2)), (0, 12, 0), 0.0, [team["body"]] * 6),
         (box((4, 12, -2), (8, 24, 2)), (0, 22, 0), leg * 0.8, [team["body"]] * 6),
         (box((-8, 12, -2), (-4, 24, 2)), (0, 22, 0), arm, [team["body"]] * 6),
-        sword,
         (box((-4, 24, -4), (4, 32, 4)), (0, 24, 0), -head, [SKIN, SKIN, SKIN, HAIR, HAIR, SKIN]),
         (box((1, 27.5, 4.05), (3, 29.5, 4.1)), (0, 24, 0), -head, [EYE] * 6),
         (box((-3, 27.5, 4.05), (-1, 29.5, 4.1)), (0, 24, 0), -head, [EYE] * 6),
     ]
+    if sword is not None:
+        parts.append(sword)
     quads = []
     for corners, pivot, ang, colors in parts:
         if ang:
@@ -166,9 +175,10 @@ def player_quads(pos, yaw, pitch, walk, amp, swing, team, hurt, block=False, pea
     return quads
 
 
-def draw_scene(img, cam, players, half, floor_y, skip=None, pearls=(), marks=()):
-    """`pearls` are positions of pearls in flight; `marks` are (position,
-    strength 0..1) of places a pearl has just put a player."""
+def draw_scene(img, cam, players, half, floor_y, skip=None, pearls=(), marks=(), potions=(), splashes=()):
+    """`pearls` and `potions` are positions of those in flight; `marks` are
+    (position, strength 0..1) of places a pearl has just put a player and
+    `splashes` the same for places a potion has just broken."""
     d = ImageDraw.Draw(img)
     w, h = img.size
     # Sky.
@@ -204,13 +214,22 @@ def draw_scene(img, cam, players, half, floor_y, skip=None, pearls=(), marks=())
         col = tuple(int(g + (c - g) * k) for c, g in zip(PORTAL, GRASS_A))
         ring = [(pos[0] + r * math.cos(a), floor_y + 0.012, pos[2] + r * math.sin(a)) for a in np.linspace(0, 2 * math.pi, 18)[:-1]]
         cam.polygon(d, np.array(ring), col)
+    # Where a potion has just broken: a ring that spreads to the four
+    # blocks it reaches and fades.
+    for pos, k in splashes:
+        r = 0.4 + 3.6 * min((1 - k) * 3.0, 1.0)
+        col = tuple(int(g + (c - g) * k) for c, g in zip(SPLASH, GRASS_A))
+        ang = np.linspace(0, 2 * math.pi, 25)
+        for a0, a1 in zip(ang[:-1], ang[1:]):
+            cam.polygon(d, np.array([(pos[0] + q * math.cos(a), floor_y + 0.013, pos[2] + q * math.sin(a))
+                                     for q, a in ((r - 0.16, a0), (r, a0), (r, a1), (r - 0.16, a1))]), col)
     # Soft shadows, then the players' faces from far to near.
     for i, p in enumerate(players):
         if i == skip:
             continue
         ring = [(p["pos"][0] + 0.42 * math.cos(a), floor_y + 0.01, p["pos"][2] + 0.42 * math.sin(a)) for a in np.linspace(0, 2 * math.pi, 14)[:-1]]
         cam.polygon(d, np.array(ring), (70, 118, 54))
-    for q in pearls:
+    for q in list(pearls) + list(potions):
         ring = [(q[0] + 0.16 * math.cos(a), floor_y + 0.011, q[2] + 0.16 * math.sin(a)) for a in np.linspace(0, 2 * math.pi, 10)[:-1]]
         cam.polygon(d, np.array(ring), (70, 118, 54))
     quads = []
@@ -218,10 +237,12 @@ def draw_scene(img, cam, players, half, floor_y, skip=None, pearls=(), marks=())
         if i == skip:
             continue
         quads += player_quads(p["pos"], p["yaw"], p["pitch"], p["walk"], p["amp"], p["swing"], TEAM[i], p["hurt"],
-                              p.get("block", False), p.get("pearl", False))
+                              p.get("block", False), p.get("pearl", False), p.get("potion", False), p.get("empty", False))
     for q in pearls:
         # Drawn larger than the quarter block it is, so it can be followed.
         quads += cube_quads(q, 0.34, PEARL)
+    for q in potions:
+        quads += cube_quads(q, 0.34, POTION)
     order = []
     for corners, n, col in quads:
         centre = corners.mean(0)
@@ -239,6 +260,8 @@ class Segment:
         self.v = z["views"]
         self.names = [str(n) for n in z["names"]]
         self.samples = float(z["samples"])
+        # Who won, when the duel was recorded until a player died.
+        self.winner = int(z["winner"]) if "winner" in z.files else -1
         pf = [str(n) for n in z["player_fields"]]
         gf = [str(n) for n in z["global_fields"]]
         self.np = len(pf)
@@ -252,6 +275,7 @@ class Segment:
         step = np.where(self.jump, 0.0, step)
         self.dist = np.cumsum(step, 1)
         self.speed = step
+        self.real = "real_health" in self.gi and self.g("real_health") > 0
 
     def col(self, p, name):
         return self.v[:, p * self.np + self.pi[name]]
@@ -281,17 +305,27 @@ class Segment:
             # Shown blocking when the server has the player blocking, which is what others see.
             "block": "blocking" in self.pi and self.col(p, "blocking")[t1] > 0,
             "pearl": "held" in self.pi and self.col(p, "held")[t1] == 1,
+            # A slot of potions in hand: the potion, or nothing once it has
+            # been thrown.
+            "potion": "potions" in self.pi and self.col(p, "held")[t1] >= 2 and not self.threw(p, t1),
+            "empty": "potions" in self.pi and self.col(p, "held")[t1] >= 2 and self.threw(p, t1),
         }
 
-    def pearls(self, t, a):
-        """Positions of the pearls in flight between ticks t and t+1."""
+    def threw(self, p, t, ticks=10):
+        """Whether player p threw a potion in the `ticks` ticks up to t."""
+        c = self.col(p, "potions")
+        return c[max(t - ticks, 0)] > c[t]
+
+    def pearls(self, t, a, what="pearl"):
+        """Positions of the pearls (or potions) in flight between ticks t
+        and t+1."""
         out = []
-        if "pearl_on" not in self.pi:
+        if what + "_on" not in self.pi:
             return out
         t1 = min(t + 1, self.T - 1)
         for p in (0, 1):
-            at = lambda k: np.array([float(self.col(p, n)[k]) for n in ("pearl_x", "pearl_y", "pearl_z")])
-            on0, on1 = self.col(p, "pearl_on")[t] > 0, self.col(p, "pearl_on")[t1] > 0
+            at = lambda k: np.array([float(self.col(p, n)[k]) for n in (what + "_x", what + "_y", what + "_z")])
+            on0, on1 = self.col(p, what + "_on")[t] > 0, self.col(p, what + "_on")[t1] > 0
             if on0 and on1 and np.linalg.norm(at(t1) - at(t)) < 2.5:
                 out.append(at(t) * (1 - a) + at(t1) * a)
             elif on0 and a < 0.5:
@@ -311,6 +345,43 @@ class Segment:
                     if 0 <= age < ticks:
                         out.append((np.array([float(self.col(p, n)[k]) for n in ("x", "y", "z")]), 1 - age / ticks))
         return out
+
+
+    def splashes(self, t, a, ticks=14):
+        """Places a potion broke within the last `ticks` ticks, with how
+        fresh each is (1 just now, 0 gone)."""
+        out = []
+        if "potion_on" not in self.pi:
+            return out
+        for p in (0, 1):
+            on = self.col(p, "potion_on")
+            for k in range(max(1, t - ticks + 1), min(t + 1, self.T - 1) + 1):
+                if on[k - 1] > 0 and on[k] == 0:
+                    age = (t + a) - (k - 0.5)
+                    if 0 <= age < ticks:
+                        out.append((np.array([float(self.col(p, n)[k - 1]) for n in ("potion_x", "potion_y", "potion_z")]), 1 - age / ticks))
+        return out
+
+    def healed(self, p, t, ticks=24):
+        """Health a potion gave player p within the last `ticks` ticks (the
+        game's own regeneration gives one point at a time, a potion more
+        than that)."""
+        c = self.col(p, "health")
+        best = 0.0
+        for k in range(max(1, t - ticks + 1), t + 1):
+            if c[k] - c[k - 1] > 1.01:
+                best = float(c[k] - c[k - 1])
+        return best
+
+
+def hearts(d, x, y, health, right=False, size=20):
+    """Ten hearts for twenty points of health, drawn as squares."""
+    for i in range(10):
+        bx = x - (10 - i) * (size + 3) if right else x + i * (size + 3)
+        d.rectangle([bx, y, bx + size, y + size], fill=HEART_EMPTY + (235,), outline=(0, 0, 0, 200))
+        fill = min(max(health - 2 * i, 0.0), 2.0) / 2.0
+        if fill > 0:
+            d.rectangle([bx + 1, y + 1, bx + 1 + (size - 2) * (1.0 if fill > 0.75 else 0.5), y + size - 1], fill=HEART + (255,))
 
 
 def text(d, xy, s, f, fill, anchor="la"):
@@ -345,12 +416,26 @@ def hud(img, seg, t, fonts, inset_box):
         blocks = "blocked" in seg.pi
         low = 158 + (30 if blocks else 0)
         box_w = 330 if not edge else 520
-        d.rectangle([x - 14 if p == 0 else x - box_w, 16, x + 330 if p == 0 else x + 14, low + (40 if edge else 10)],
-                    fill=(0, 0, 0, 96))
+        if seg.real:
+            box_w = max(box_w, 400)
+        d.rectangle([x - 14 if p == 0 else x - box_w, 16, x + box_w if p == 0 else x + 14,
+                     low + (40 if edge else 10) + (62 if seg.real else 0)], fill=(0, 0, 0, 96))
+        if seg.real:
+            # Health as the server has it, the potions left, and for a
+            # moment what a potion has just given.
+            hp = float(seg.col(p, "health")[tick])
+            y = low + (40 if edge else 10)
+            hearts(d, x, y, hp, right=p == 1)
+            got = seg.healed(p, tick)
+            side = x + 240 if p == 0 else x - 240
+            text(d, (side, y - 2), f"{hp / 2:.1f}" + (f"  +{got / 2:.1f}" if got else ""), small,
+                 (130, 255, 150) if got else (255, 255, 255), anchor)
+            text(d, (x, y + 28), f"Pociones: {int(seg.col(p, 'potions')[tick])}", small, (255, 170, 190), anchor)
         if blocks:
             # Damage dealt in hearts (two points each) and hits taken on a block.
-            text(d, (x, 158), f"Daño: {seg.col(p, 'damage')[tick] / 2:.0f} corazones   Bloqueó: {int(seg.col(p, 'blocked')[tick])}",
-                 small, (225, 225, 225), anchor)
+            # With real health the hearts below say what the hits cost.
+            dealt = "" if seg.real else f"Daño: {seg.col(p, 'damage')[tick] / 2:.0f} corazones   "
+            text(d, (x, 158), f"{dealt}Bloqueó: {int(seg.col(p, 'blocked')[tick])}", small, (225, 225, 225), anchor)
         if edge:
             text(d, (x, low), "Ventaja: " + ", ".join(edge), small, (255, 214, 120), anchor)
         text(d, (x, 22), seg.names[p], mid, TEAM[p]["ui"], anchor)
@@ -376,6 +461,8 @@ def hud(img, seg, t, fonts, inset_box):
     if "pearls" in seg.pi and seg.col(0, "pearls")[0] > 0:
         # Lit for a third of a second after a throw, which itself takes one tick.
         wide.append(("PERLA", seg.col(0, "pearls")[max(tick - 7, 0)] > seg.col(0, "pearls")[tick]))
+    if seg.real:
+        wide.append(("POCIÓN", seg.threw(0, tick, 7)))
     for i, (label, on) in enumerate(wide):
         bx, by = x0 + i * 112, y0 + 2 * (sz + 6)
         d.rectangle([bx, by, bx + 106, by + 40], fill=(255, 255, 255, 215) if on else (0, 0, 0, 110))
@@ -388,8 +475,12 @@ def hud(img, seg, t, fonts, inset_box):
             kb += f", hit delay {seg.g('hit_delay'):.0f}"
     if "pearl_cd_s" in seg.gi and seg.col(0, "pearls")[0] + seg.col(1, "pearls")[0] > 0:
         kb += f", perlas cada {seg.g('pearl_cd_s'):.0f} s"
-    text(d, (w // 2, h - 40), f"{int(secs) // 60:02d}:{int(secs) % 60:02d}   Simulador de 1.8.9, Speed II, vida infinita{kb}",
-         small, (255, 255, 255), "ma")
+    life = "Simulador de 1.8.9, Speed II, vida infinita"
+    if seg.real:
+        life = f"1.8.9, Speed II, armadura de diamante, {seg.g('hit_health') / 2:.1f} corazones por golpe"
+    text(d, (w // 2, h - 40), f"{int(secs) // 60:02d}:{int(secs) % 60:02d}   {life}{kb}", small, (255, 255, 255), "ma")
+    if seg.winner >= 0 and tick >= seg.T - 1:
+        text(d, (w // 2, h // 2 - 60), f"GANA {seg.names[seg.winner].upper()}", big, TEAM[seg.winner]["ui"], "ma")
     x1, y1, x2, y2 = inset_box
     d.rectangle([x1 - 3, y1 - 3, x2 + 3, y2 + 3], outline=(255, 255, 255, 230), width=3)
     text(d, (x1 + 8, y1 + 6), f"Lo que ve la {seg.names[0]}", small, (255, 255, 255))
@@ -433,7 +524,8 @@ def frames(seg, size, fps, ss, only=None):
             continue
         img = Image.new("RGB", (w * ss, h * ss))
         flying, marks = seg.pearls(t, a), seg.marks(t, a)
-        draw_scene(img, Camera(cpos, focus, 52, w * ss, h * ss), pl, half, floor_y, pearls=flying, marks=marks)
+        thrown = {"potions": seg.pearls(t, a, "potion"), "splashes": seg.splashes(t, a)}
+        draw_scene(img, Camera(cpos, focus, 52, w * ss, h * ss), pl, half, floor_y, pearls=flying, marks=marks, **thrown)
         if ss > 1:
             img = img.resize((w, h), Image.BOX)
         # What the first player sees.
@@ -441,12 +533,16 @@ def frames(seg, size, fps, ss, only=None):
         seen = [pl[0], dict(pl[1], pos=seg.player(1, t, a, seen_by=0)["pos"])]
         inset = Image.new("RGB", (iw * ss, ih * ss))
         draw_scene(inset, Camera(eye, eye + look(pl[0]["yaw"], pl[0]["pitch"]), 70, iw * ss, ih * ss), seen, half, floor_y, skip=0,
-                   pearls=flying, marks=marks)
+                   pearls=flying, marks=marks, **thrown)
         if ss > 1:
             inset = inset.resize((iw, ih), Image.BOX)
         img.paste(inset, ibox[:2])
         hud(img, seg, t, fonts, ibox)
         yield img
+    if only is None and seg.winner >= 0:
+        # Hold the last picture, which names the winner.
+        for _ in range(int(1.5 * fps)):
+            yield img
 
 
 def title(size, lines, fps, seconds=1.6):
@@ -485,7 +581,8 @@ def main():
         server_kb = "kb_kind" in seg.gi and seg.g("kb_kind") > 0
         lines = [f"{seg.names[0]} contra {seg.names[1]}",
                  f"Entrenada con {seg.samples/1e6:.0f} millones de pasos en el simulador de 1.8.9",
-                 "Speed II, vida infinita, knockback de " + ("servidor" if server_kb else "vanilla")]
+                 "Speed II, " + ("vida real con armadura y pociones" if seg.real else "vida infinita")
+                 + ", knockback de " + ("servidor" if server_kb else "vanilla")]
         for img in title(size, lines, args.fps):
             ff.stdin.write(img.tobytes())
         for img in frames(seg, size, args.fps, args.ss):

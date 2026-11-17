@@ -4,7 +4,7 @@
 use crate::aabb::{V3, EYE_HEIGHT};
 use crate::client::{Client, ClientCfg, Input};
 use crate::mth::{self, Rng};
-use crate::net::SLOT_SWORD;
+use crate::net::{Item, Kind, SLOT_SWORD};
 use crate::world::World;
 
 #[derive(Clone, Copy, Debug)]
@@ -25,9 +25,12 @@ pub struct BotParams {
     /// Chance to block for a moment when the opponent starts a swing
     /// within reach.
     pub block_react: f64,
-    /// How readily it throws a pearl to get at the opponent: next to it on
-    /// either side, just in front of it, behind it or straight at it. 1 is
-    /// about once per cooldown when there is room for it.
+    /// How readily it throws a pearl to get at the opponent: always next to
+    /// it or behind it by the way the opponent faces, where it has to turn
+    /// the furthest to hit back. 1 is about once per cooldown when there is
+    /// room for it. With the same readiness it throws one as soon as it
+    /// sees the opponent heal itself or run off hurt, to knock it away from
+    /// its own potion.
     pub pearl_attack: f64,
     /// How readily it throws a pearl after three hits taken in a row: to
     /// the side or the back of the opponent most of the time if it also
@@ -39,6 +42,12 @@ pub struct BotParams {
     /// pearl: the turn, the click, the way to the server and the age of
     /// what it sees of the opponent.
     pub pearl_lead: f64,
+    /// How readily it throws a potion at its own feet once it is hurt
+    /// enough. 0 is never. From level 3 on it turns its back and runs
+    /// while it does, if the opponent is near; level 4 also waits for a
+    /// moment in which the opponent is not on top of it, unless it is
+    /// nearly dead.
+    pub potion: f64,
 }
 
 impl BotParams {
@@ -58,6 +67,7 @@ impl BotParams {
                 pearl_escape: 0.0,
                 pearl_cd: 0,
                 pearl_lead: 3.0,
+                potion: 0.0,
             },
             2 => BotParams {
                 level,
@@ -73,6 +83,7 @@ impl BotParams {
                 pearl_escape: 0.0,
                 pearl_cd: 0,
                 pearl_lead: 3.0,
+                potion: 0.4,
             },
             3 => BotParams {
                 level,
@@ -88,6 +99,7 @@ impl BotParams {
                 pearl_escape: 0.4,
                 pearl_cd: 0,
                 pearl_lead: 3.0,
+                potion: 0.7,
             },
             _ => BotParams {
                 level: 4,
@@ -103,6 +115,7 @@ impl BotParams {
                 pearl_escape: 0.8,
                 pearl_cd: 0,
                 pearl_lead: 3.0,
+                potion: 1.0,
             },
         }
     }
@@ -125,7 +138,8 @@ pub struct BotState {
     pub pearl_stage: u8,
     /// The spot the throw under way, or the last one, is meant to reach,
     /// and why it was thrown: 1 to attack, 2 to get out of a combo by
-    /// landing next to the opponent, 3 to get away (0: nothing thrown yet).
+    /// landing next to the opponent, 3 to get away, 4 to get at an
+    /// opponent that is healing itself (0: nothing thrown yet).
     pub pearl_to: V3,
     pub pearl_kind: u8,
     /// Ticks until the next pearl may be thrown.
@@ -138,6 +152,15 @@ pub struct BotState {
     /// How the opponent has been moving per tick lately, as seen, with the
     /// jitter of single ticks smoothed out.
     pub seen_vel: [f64; 2],
+    /// 0: no potion under way. 1: turning to throw it. 2: throw on this
+    /// tick. 3: take the sword again.
+    pub potion_stage: u8,
+    /// Ticks until it may throw the next potion.
+    potion_wait: i32,
+    /// The health at or below which it heals itself in this duel (0: not
+    /// drawn yet), and whether the throw under way is made running away.
+    potion_at: f32,
+    potion_away: bool,
 }
 
 fn gauss(rng: &mut Rng) -> f64 {
@@ -197,6 +220,44 @@ pub fn pearl_pitch(dist: f64, drop: f64) -> f64 {
     best.1
 }
 
+/// How far ahead of its thrower a potion thrown with this pitch (degrees,
+/// down is positive) is when it breaks on a floor `drop` blocks below the
+/// eyes, and after how many ticks. As in the game, the potion is thrown
+/// twenty degrees above the view, and its reach is measured from where it
+/// was at the start of the tick in which it reached the floor.
+pub fn potion_reach(pitch: f64, drop: f64) -> (f64, i32) {
+    let (vx, vy) = (pitch.to_radians().cos(), -(pitch - 20.0).to_radians().sin());
+    let len = vx.hypot(vy).max(1e-9);
+    let (mut vx, mut vy) = (vx / len * 0.5, vy / len * 0.5);
+    let (mut x, mut y) = (0.0f64, -0.1f64);
+    for t in 0..200 {
+        if y + vy <= -drop {
+            return (x, t);
+        }
+        x += vx;
+        y += vy;
+        vx *= 0.99;
+        vy = vy * 0.99 - 0.05;
+    }
+    (x, 200)
+}
+
+/// The pitch at which a potion breaks nearest to where a player running at
+/// `speed` blocks per tick along its view will be by then.
+pub fn potion_pitch(speed: f64, drop: f64) -> f64 {
+    let mut best = (f64::MAX, 90.0);
+    let mut pitch = 90.0;
+    while pitch >= 0.0 {
+        let (x, t) = potion_reach(pitch, drop);
+        let err = (x - speed * t as f64).abs();
+        if err < best.0 - 0.01 {
+            best = (err, pitch);
+        }
+        pitch -= 2.0;
+    }
+    best.1
+}
+
 /// A spot for the bot to throw a pearl at and the kind of throw it is (see
 /// `BotState::pearl_kind`), or `None`.
 fn pearl_target(c: &Client, world: &World, p: &BotParams, st: &BotState, hdist: f64, rng: &mut Rng) -> Option<(V3, u8)> {
@@ -228,42 +289,32 @@ fn pearl_target(c: &Client, world: &World, p: &BotParams, st: &BotState, hdist: 
         }
         return None;
     }
+    let mut kind = if counter { 2 } else { 1 };
     if !counter {
-        // Towards the opponent: often from far away, now and then in a
-        // fight, and not in the half second after a hit on the opponent,
-        // while it is being thrown about.
-        let chance = if hdist > 7.0 {
-            0.05
-        } else if hdist > 3.5 {
-            0.015
+        // The opponent has a potion in hand or in the air, or is hurt and
+        // running off: a pearl now puts the bot on it while it heals, and
+        // the hit that follows knocks it away from where its potion breaks.
+        let potting = c.rp.item == Item::Potion || c.thrown.iter().any(|e| e.kind == Kind::Potion && !e.mine);
+        let away = st.seen_vel[0] * dir[0] + st.seen_vel[1] * dir[1];
+        let fleeing = c.rp.health <= 9.0 && hdist > 3.5 && away > 0.1;
+        if hdist > 2.8 && ((potting && rng.chance(0.6 * p.pearl_attack)) || (fleeing && rng.chance(0.1 * p.pearl_attack))) {
+            kind = 4;
         } else {
-            0.0
-        };
-        if c.rp.ticks_since_hurt <= 10 || !rng.chance(chance * p.pearl_attack) {
-            return None;
+            // Towards the opponent: often from far away, now and then in a
+            // fight, and not in the half second after a hit on the opponent,
+            // while it is being thrown about.
+            let chance = if hdist > 7.0 {
+                0.05
+            } else if hdist > 3.5 {
+                0.015
+            } else {
+                0.0
+            };
+            if c.rp.ticks_since_hurt <= 10 || !rng.chance(chance * p.pearl_attack) {
+                return None;
+            }
         }
     }
-    let side = [-dir[1], dir[0]];
-    // Out of a combo it goes to the side or the back of the opponent, where
-    // the opponent has to turn the furthest.
-    let r = if counter { rng.range(0.1, 0.85) } else { rng.f64() };
-    let off = if r < 0.4 || (counter && r < 0.5) {
-        // Next to it, left or right.
-        let w = rng.range(1.6, 2.6) * if rng.chance(0.5) { 1.0 } else { -1.0 };
-        let along = rng.range(-0.6, 0.6);
-        [side[0] * w + dir[0] * along, side[1] * w + dir[1] * along]
-    } else if r < 0.7 && !counter {
-        // Just in front of it.
-        let a = rng.range(1.8, 2.8);
-        [-dir[0] * a, -dir[1] * a]
-    } else if r < 0.85 {
-        // Behind it.
-        let a = rng.range(1.8, 2.8);
-        [dir[0] * a, dir[1] * a]
-    } else {
-        // Straight at it: the pearl stops at the player.
-        [0.0, 0.0]
-    };
     // Where the opponent will be when the pearl gets there: after the
     // flight and the ticks of `pearl_lead`. A player on foot
     // loses about half its speed every tick and gains what its keys add,
@@ -272,24 +323,60 @@ fn pearl_target(c: &Client, world: &World, p: &BotParams, st: &BotState, hdist: 
     let n = (hdist / 1.4).min(20.0) + p.pearl_lead;
     let run = crate::living::Attr { sprint: true, ..c.lp.l.attr }.value() * 2.1;
     let yaw = (c.rp.yaw as f64).to_radians();
+    let face = [-yaw.sin(), yaw.cos()];
+    let flank = [-face[1], face[0]];
     let v = st.seen_vel;
-    let goal = [v[0] + (-yaw.sin() * run - v[0]) * 0.7, v[1] + (yaw.cos() * run - v[1]) * 0.7];
+    let goal = [v[0] + (face[0] * run - v[0]) * 0.7, v[1] + (face[1] * run - v[1]) * 0.7];
     let keep = 0.55f64;
     let fade = keep * (1.0 - keep.powf(n)) / (1.0 - keep);
     let moved = [goal[0] * n + (v[0] - goal[0]) * fade, goal[1] * n + (v[1] - goal[1]) * fade];
-    let q = [them[0] + moved[0] + off[0], them[1], them[2] + moved[1] + off[1]];
-    let mut q = [q[0].clamp(-lim, lim), q[1], q[2].clamp(-lim, lim)];
-    let far = (q[0] - me[0]).hypot(q[2] - me[2]);
-    if far < 3.0 {
-        if !counter {
-            return None;
-        }
-        // The opponent is coming this way: the same direction, further, so
-        // that the pearl ends up past it.
-        let d = if far > 0.3 { [(q[0] - me[0]) / far, (q[2] - me[2]) / far] } else { dir };
-        q = [(me[0] + d[0] * 3.5).clamp(-lim, lim), q[1], (me[2] + d[1] * 3.5).clamp(-lim, lim)];
+    let then = [them[0] + moved[0], them[2] + moved[1]];
+    // An opponent that will be on top of the bot by then walks into any
+    // pearl thrown past it.
+    if !counter && (then[0] - me[0]).hypot(then[1] - me[2]) < 3.5 {
+        return None;
     }
-    Some((q, if counter { 2 } else { 1 }))
+    // How near the straight line from here to `q` passes a point: a pearl
+    // that touches the opponent on its way stops there, in front of it.
+    let clear = |q: &V3, at: [f64; 2]| {
+        let (ax, az) = (q[0] - me[0], q[2] - me[2]);
+        let t = (((at[0] - me[0]) * ax + (at[1] - me[2]) * az) / (ax * ax + az * az).max(1e-9)).clamp(0.0, 1.0);
+        (me[0] + ax * t - at[0]).hypot(me[2] + az * t - at[1])
+    };
+    // Next to the opponent or behind it, by the way it faces: never in
+    // front, where it only has to keep looking.
+    for _ in 0..16 {
+        // On the side the opponent is moving away from, if it is moving
+        // sideways at all: it will not walk into the pearl.
+        let drift = v[0] * flank[0] + v[1] * flank[1];
+        let sign = if drift.abs() > 0.05 { -drift.signum() } else if rng.chance(0.5) { 1.0 } else { -1.0 };
+        // From close by there is no way around it to its back.
+        let off = if hdist < 6.0 || rng.chance(0.5) {
+            let (w, along) = (rng.range(1.4, 2.2) * sign, rng.range(-0.8, 0.0));
+            [flank[0] * w + face[0] * along, flank[1] * w + face[1] * along]
+        } else {
+            let (a, w) = (rng.range(1.2, 2.0), rng.range(1.0, 1.9) * sign);
+            [-face[0] * a + flank[0] * w, -face[1] * a + flank[1] * w]
+        };
+        let q = [(then[0] + off[0]).clamp(-lim, lim), them[1], (then[1] + off[1]).clamp(-lim, lim)];
+        if (q[0] - me[0]).hypot(q[2] - me[2]) < 3.0 {
+            continue;
+        }
+        // The opponent keeps moving while the bot turns and the pearl
+        // flies: stay clear of all of the way it is expected to take.
+        let mid = [(them[0] + then[0]) * 0.5, (them[2] + then[1]) * 0.5];
+        if clear(&q, then) < 1.15 || clear(&q, mid) < 1.15 || clear(&q, [them[0], them[2]]) < 1.15 {
+            continue;
+        }
+        // Still behind or beside it once the walls have moved the spot.
+        let rel = [q[0] - then[0], q[2] - then[1]];
+        let ahead = rel[0] * face[0] + rel[1] * face[1];
+        if ahead > 0.5 || rel[0].hypot(rel[1]) < 1.2 {
+            continue;
+        }
+        return Some((q, kind));
+    }
+    None
 }
 
 pub fn act(c: &Client, world: &World, cfg: &ClientCfg, p: &BotParams, st: &mut BotState, rng: &mut Rng) -> Input {
@@ -412,6 +499,7 @@ pub fn act(c: &Client, world: &World, cfg: &ClientCfg, p: &BotParams, st: &mut B
                 && lp.pearls > 0
                 && st.pearl_wait == 0
                 && lp.held == SLOT_SWORD
+                && st.potion_stage == 0
                 && st.block_left == 0;
             if ready {
                 if let Some((q, kind)) = pearl_target(c, world, p, st, hdist, rng) {
@@ -453,6 +541,70 @@ pub fn act(c: &Client, world: &World, cfg: &ClientCfg, p: &BotParams, st: &mut B
             inp.slot_key = 1;
             inp.use_item = false;
             st.pearl_stage = 0;
+        }
+    }
+
+    // Potions. Once hurt enough it looks at the ground a little ahead of
+    // where it is going, throws on the next tick and takes the sword again
+    // on the one after, like a pearl.
+    if st.potion_wait > 0 {
+        st.potion_wait -= 1;
+    }
+    if st.potion_at == 0.0 && p.potion > 0.0 && lp.potions != 0 {
+        st.potion_at = rng.range(7.0, 12.0) as f32;
+    }
+    match st.potion_stage {
+        0 => {
+            let ready = p.potion > 0.0
+                && lp.potions != 0
+                && lp.health <= st.potion_at
+                && st.potion_wait == 0
+                && st.pearl_stage == 0
+                && lp.held == SLOT_SWORD
+                && st.block_left == 0;
+            let good_moment = p.level < 4 || hdist > 3.5 || rp.ticks_since_hurt <= 8 || lp.health <= 6.0;
+            if ready && good_moment && rng.chance(0.35 * p.potion) {
+                st.potion_stage = 1;
+                st.potion_away = p.level >= 3 && hdist < 6.0;
+            }
+        }
+        1 => {
+            let b = &lp.l.body;
+            let speed = if st.potion_away { 0.33 } else { b.motion[0].hypot(b.motion[2]) / 0.546 };
+            let want_pitch = potion_pitch(speed.min(0.6), b.pos[1] + EYE_HEIGHT - world.floor_y);
+            let lim = p.max_turn.max(45.0);
+            let dpitch = want_pitch - lp.l.pitch as f64;
+            let dyaw = if st.potion_away { mth::wrap_deg(yaw_to + 180.0 - lp.l.yaw as f64) } else { 0.0 };
+            inp.dx = (dyaw.clamp(-lim, lim) / deg_per_count).round() as i32;
+            inp.dy = (dpitch.clamp(-lim, lim) / deg_per_count).round() as i32;
+            inp.attack = false;
+            inp.use_item = false;
+            if st.potion_away {
+                inp.forward = 1;
+                inp.strafe = 0;
+                inp.sprint_key = true;
+            }
+            if dyaw.abs() <= lim && dpitch.abs() <= lim {
+                st.potion_stage = 2;
+            }
+        }
+        2 => {
+            inp.slot_key = lp.potions.trailing_zeros() as u8 + 1;
+            inp.use_item = true;
+            inp.attack = false;
+            inp.dx = 0;
+            inp.dy = 0;
+            if st.potion_away {
+                inp.forward = 1;
+                inp.strafe = 0;
+            }
+            st.potion_stage = 3;
+            st.potion_wait = 16 + (rng.next_u64() % 12) as i32;
+        }
+        _ => {
+            inp.slot_key = 1;
+            inp.use_item = false;
+            st.potion_stage = 0;
         }
     }
     inp

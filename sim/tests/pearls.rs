@@ -8,7 +8,7 @@ use pvpsim::mth::Rng;
 use pvpsim::net::SLOT_SWORD;
 
 /// Stand still, mouse at rest, no button down.
-const IDLE: [i32; ACT_HEADS] = [0, 0, 0, 0, 0, 13, 10, 0, 0];
+const IDLE: [i32; ACT_HEADS] = [0, 0, 0, 0, 0, 13, 10, 0, 0, 0];
 
 fn params() -> Params {
     let mut p = Params::default();
@@ -179,7 +179,7 @@ fn a_pearl_thrown_straight_up_does_not_put_its_thrower_into_the_floor() {
 /// the opponent and away from it. Returns for every pearl that landed how
 /// far from the other player it put its thrower and how far the thrower
 /// was moved.
-fn bot_pearls(bots: [(u8, f64, f64); 2], duels: u64) -> Vec<(f64, f64)> {
+fn bot_pearls(bots: [(u8, f64, f64); 2], duels: u64) -> Vec<(f64, f64, f64)> {
     let mut p = params();
     p.start_dist_min = 2.0;
     p.start_dist_max = 14.0;
@@ -207,7 +207,20 @@ fn bot_pearls(bots: [(u8, f64, f64); 2], duels: u64) -> Vec<(f64, f64)> {
                 let other = m.s.p[1 - l.thrower].l.body.pos;
                 let near = (l.pos[0] - other[0]).hypot(l.pos[2] - other[2]);
                 let moved = (l.pos[0] - before[l.thrower][0]).hypot(l.pos[2] - before[l.thrower][2]);
-                found.push((near, moved));
+                // How far in front of the other player it came down, by
+                // the way that player faces (negative: behind it).
+                let yaw = (m.s.p[1 - l.thrower].l.yaw as f64).to_radians();
+                let ahead = (l.pos[0] - other[0]) * -yaw.sin() + (l.pos[2] - other[2]) * yaw.cos();
+                if std::env::var("PEARL_DEBUG").is_ok() && near < 4.5 {
+                    let to = st[l.thrower].pearl_to;
+                    let miss = (l.pos[0] - to[0]).hypot(l.pos[2] - to[2]);
+                    let side = (l.pos[0] - other[0]) * yaw.cos() + (l.pos[2] - other[2]) * yaw.sin();
+                    let from = before[l.thrower];
+                    let was = (from[0] - other[0]).hypot(from[2] - other[2]);
+                    let from_ahead = (from[0] - other[0]) * -yaw.sin() + (from[2] - other[2]) * yaw.cos();
+                    println!("DBG ahead {:5.2} side {:5.2} miss {:4.2} thrower-was {:5.2} thrower-was-ahead {:5.2} kind {}", ahead, side, miss, was, from_ahead, st[l.thrower].pearl_kind);
+                }
+                found.push((near, moved, ahead));
             }
             m.s.hits.clear();
             before = [m.s.p[0].l.body.pos, m.s.p[1].l.body.pos];
@@ -228,10 +241,17 @@ fn bots_throw_their_pearls_next_to_the_opponent() {
     let near = l.iter().filter(|x| x.0 < 4.5).count() as f64;
     let mean = l.iter().map(|x| x.0).sum::<f64>() / n;
     println!("{} pearls, {:.0} % within 4.5 blocks of the opponent, mean {:.2}", n, 100.0 * near / n, mean);
-    // More than two a duel, and nine in ten come down in fighting distance.
+    let close: Vec<_> = l.iter().filter(|x| x.0 < 4.5).collect();
+    let front = close.iter().filter(|x| x.2 > 1.0).count() as f64 / close.len() as f64;
+    let back = close.iter().filter(|x| x.2 < -1.0).count() as f64 / close.len() as f64;
+    println!("of those, {:.0} % more than a block in front of it and {:.0} % more than a block behind", 100.0 * front, 100.0 * back);
+    // More than two a duel, and most come down in fighting distance:
+    // beside the opponent or behind it by the way it faces. The few in
+    // front are pearls the opponent walked into.
     assert!(n > 60.0, "{n} pearls");
-    assert!(near / n > 0.9, "{near} of {n}");
+    assert!(near / n > 0.85, "{near} of {n}");
     assert!(mean > 1.0 && mean < 3.5, "mean {mean}");
+    assert!(front < 0.2 && back > 0.4, "in front {front}, behind {back}");
 }
 
 #[test]

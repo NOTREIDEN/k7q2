@@ -11,8 +11,19 @@ USE_BIAS = [0.0, -3.5]
 # And of the pearl throw: asked for on about one tick in a hundred, which
 # with the wait between pearls is a throw every quarter of a minute or so.
 PEARL_BIAS = [0.0, -4.5]
+# And of the potion throw: about as often, which uses up seven potions
+# within a duel, so that some are thrown while hurt and pay off.
+POTION_BIAS = [0.0, -4.5]
 # Controls that do not start evenly, by their position among the controls.
-START_BIAS = {7: USE_BIAS, 8: PEARL_BIAS}
+START_BIAS = {7: USE_BIAS, 8: PEARL_BIAS, 9: POTION_BIAS}
+# Where a choice added to a control that already exists starts: rare, so
+# that the policy plays as before until it finds a use for it.
+NEW_CHOICE_BIAS = -5.0
+# When the potion control is added, the pearl control starts over. With
+# infinite health the agent had learnt never to throw a pearl; with health
+# to lose, and an opponent that can be knocked away from its own potion, a
+# pearl is worth something else, and it has to try them again to find out.
+RESTART = {9: (8,)}
 
 
 def _init(layer, gain):
@@ -110,20 +121,26 @@ class Policy(nn.Module):
 
 
 def fit_state(sd, policy):
-    """Stored weights made to fit a policy that has since gained inputs or
-    controls. New inputs get zero weight and a new control depends on
-    nothing yet and has its starting preference, so the policy plays as
-    before until it learns to use them. Returns the weights and whether
-    anything was added."""
+    """Stored weights made to fit a policy that has since gained inputs,
+    controls or choices of a control. New inputs get zero weight, a new
+    control depends on nothing yet and has its starting preference, and a
+    new choice of an old control starts rare, so the policy plays as before
+    until it learns to use them. A control listed in `RESTART` for a
+    control that is being added starts over as well. Returns the weights
+    and whether anything was added."""
     out, grown = {}, False
+    again = {h for new, hs in RESTART.items() if f"heads.{new}.bias" not in sd for h in hs}
     for k, ref in policy.state_dict().items():
-        if k not in sd:
-            part = k.split(".")
-            start = START_BIAS.get(int(part[1])) if part[0] == "heads" and part[2] == "bias" else None
+        part = k.split(".")
+        head = int(part[1]) if part[0] == "heads" else None
+        if k not in sd or head in again:
+            start = START_BIAS.get(head) if head is not None and part[2] == "bias" else None
             out[k] = torch.tensor(start, dtype=ref.dtype) if start is not None else torch.zeros_like(ref)
             grown = True
         elif sd[k].shape != ref.shape:
             w = torch.zeros_like(ref)
+            if head is not None and part[2] == "bias":
+                w.fill_(NEW_CHOICE_BIAS)
             old = sd[k].float()
             w[tuple(slice(0, n) for n in old.shape)] = old
             out[k] = w
@@ -144,7 +161,7 @@ def load_policy(path, dims=None):
     obs, priv, acts = sd["enc.0.weight"].shape[1], ck["priv_dim"], list(ck["act_dims"])
     if dims is not None:
         obs, priv = max(obs, dims[0]), max(priv, dims[1])
-        acts = acts + list(dims[2][len(acts):])
+        acts = [max(a, d) for a, d in zip(acts, dims[2])] + list(dims[2][len(acts):])
     policy = Policy(obs, priv, acts, hidden)
     sd, grown = fit_state(sd, policy)
     policy.load_state_dict(sd)

@@ -1,10 +1,11 @@
 //! Let two scripted bots fight and print how each did.
 //!
-//!     cargo run --release --example botduel -- A B [--duels N] [--seconds S] [--ping LO HI] [--trace] [--ticks]
+//!     cargo run --release --example botduel -- A B [--duels N] [--seconds S] [--ping LO HI] [--health] [--trace] [--ticks]
 //!
 //! A and B are a level (`4`) optionally followed by settings, for example
 //! `4:jr=0:strafe=0:noise=1.5:click=0.6:pearl=0:escape=0`. `--trace` prints
-//! every hit and `--ticks` every client tick as well.
+//! every hit and `--ticks` every client tick as well. `--health` gives the
+//! bots real health, armour and potions; a duel then ends when one dies.
 use pvpsim::bot::{self, BotParams, BotState};
 use pvpsim::env::{new_match, Mode, Params};
 use pvpsim::mth::Rng;
@@ -24,6 +25,7 @@ fn spec(s: &str) -> BotParams {
             "click" => p.click_prob = f,
             "pearl" => p.pearl_attack = f,
             "escape" => p.pearl_escape = f,
+            "potion" => p.potion = f,
             _ => panic!("unknown setting {k}"),
         }
     }
@@ -54,6 +56,11 @@ fn main() {
                 params.ping_max_ms = args[i + 2].parse().unwrap();
                 i += 2;
             }
+            "--health" => {
+                params.infinite_health = false;
+                params.start_hurt = 0.0;
+                params.potions = [7.0, 7.0];
+            }
             "--trace" => trace = true,
             "--ticks" => {
                 trace = true;
@@ -76,6 +83,14 @@ fn main() {
     // Pearls that landed, and how far from the opponent they put their thrower.
     let mut pearls = [0u64; 2];
     let mut pearl_dist = [0.0f64; 2];
+    // With real health: deaths, potions that broke, the health they gave
+    // their thrower and the other player, and how long the duels lasted.
+    let mut deaths = [0u64; 2];
+    let mut potions = [0u64; 2];
+    let mut heal = [[0.0f64; 2]; 2];
+    let mut offered = [0.0f64; 2];
+    let mut left = [0u64; 2];
+    let mut lasted = 0u64;
     for d in 0..duels {
         let mut rng = Rng::new(0x5EED_0000 + d);
         let (mut m, ping, _) = new_match(&params, &mut rng, Mode::SelfPlay);
@@ -129,6 +144,21 @@ fn main() {
                 pearls[l.thrower] += 1;
                 pearl_dist[l.thrower] += (l.pos[0] - o[0]).hypot(l.pos[2] - o[2]);
             }
+            for s in m.s.splashes.drain(..) {
+                potions[s.thrower] += 1;
+                heal[s.thrower][0] += s.healed[s.thrower] as f64;
+                heal[s.thrower][1] += s.healed[1 - s.thrower] as f64;
+                offered[s.thrower] += s.offered[s.thrower] as f64;
+                if trace {
+                    println!("tick {:5}  potion of {}  offered {:?}  healed {:?}  after {} ticks", m.server_ticks, s.thrower, s.offered, s.healed, s.ticks);
+                }
+            }
+            if !m.s.p[0].alive() || !m.s.p[1].alive() {
+                for k in 0..2 {
+                    deaths[k] += !m.s.p[k].alive() as u64;
+                }
+                break;
+            }
             for h in m.s.hits.drain(..) {
                 if trace {
                     let seen = |k: usize| {
@@ -162,7 +192,9 @@ fn main() {
         }
         for k in 0..2 {
             best[k] += top[k];
+            left[k] += m.s.p[k].potions.count_ones() as u64;
         }
+        lasted += done as u64;
     }
     let mins = duels as f64 * seconds / 60.0;
     println!("bot                             hits/min  sprint-hit  attacks/s  best-combo  pearls/min  blocks-from-opponent");
@@ -177,5 +209,22 @@ fn main() {
             pearls[k] as f64 / mins,
             pearl_dist[k] / pearls[k].max(1) as f64
         );
+    }
+    if !params.infinite_health {
+        println!("duels lasted {:.1} s on average", lasted as f64 / duels as f64 / 20.0);
+        println!("bot                             deaths  potions/duel  health-each  given-away  offered-each  left-at-end");
+        for k in 0..2 {
+            let n = potions[k].max(1) as f64;
+            println!(
+                "{:30}  {:6}  {:12.1}  {:11.1}  {:10.1}  {:12.1}  {:11.1}",
+                names[k],
+                deaths[k],
+                potions[k] as f64 / duels as f64,
+                heal[k][0] / n,
+                heal[k][1] / n,
+                offered[k] / n,
+                left[k] as f64 / duels as f64
+            );
+        }
     }
 }

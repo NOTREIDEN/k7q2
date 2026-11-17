@@ -1,4 +1,5 @@
-"""Train the stage-1 agent: sword duels with infinite health and Speed II.
+"""Train the agent: sword duels with Speed II, with infinite health or
+with armour, real health and healing potions.
 
     python train.py --minutes 30 --out runs/stage1
 
@@ -240,6 +241,28 @@ def main():
                         opp_pearls_per_min=st["pearls1"] / mins0,
                         pearl_first_hit=st["pearl_won0"] / max(st["pearl_won0"] + st["pearl_lost0"], 1.0),
                         opp_pearl_answered=st["pearl_lost1"] / max(st["pearl_won1"] + st["pearl_lost1"], 1.0),
+                        # With real health: the share of the duels that ended with a death
+                        # which player 0 won, deaths of either side per minute, potions per
+                        # minute, and per potion the health it gave its thrower (eight at
+                        # best) and the other player.
+                        win_frac=st["deaths1"] / max(st["deaths0"] + st["deaths1"], 1.0),
+                        deaths_per_min=(st["deaths0"] + st["deaths1"]) / mins0,
+                        potions_per_min=st["splashes0"] / mins0,
+                        opp_potions_per_min=st["splashes1"] / mins0,
+                        potion_heal=st["heal_self0"] / max(st["splashes0"], 1.0),
+                        potion_reach=st["pot_offer0"] / max(st["splashes0"], 1.0),
+                        potion_gift=st["heal_gift0"] / max(st["splashes0"], 1.0),
+                        opp_potion_heal=st["heal_self1"] / max(st["splashes1"], 1.0),
+                        opp_potion_gift=st["heal_gift1"] / max(st["splashes1"], 1.0),
+                        # How a potion is thrown: the share that offered all eight
+                        # points, the share thrown right after another one, the health
+                        # the thrower had, the ticks its crosshair left the opponent for
+                        # one, and the hits it took in the second after.
+                        potion_perfect=st["pot_perfect0"] / max(st["splashes0"], 1.0),
+                        potion_double=st["pot_double0"] / max(st["potions0"], 1.0),
+                        potion_at_health=st["pot_health0"] / max(st["potions0"], 1.0),
+                        potion_away_ticks=st["pot_away0"] / max(st["potions0"], 1.0),
+                        potion_hits_taken=st["pot_hit0"] / max(st["potions0"], 1.0),
                     )
             window.clear()
         log.write(json.dumps(row) + "\n")
@@ -255,8 +278,15 @@ def main():
                   f"dmg {b.get('damage_per_min', 0):4.0f}/{b.get('damage_taken_per_min', 0):4.0f} "
                   f"pearl {b.get('pearls_per_min', 0):.1f}/{b.get('opp_pearls_per_min', 0):.1f} "
                   f"first {b.get('pearl_first_hit', 0):.2f}/{b.get('opp_pearl_answered', 0):.2f} "
+                  f"win {b.get('win_frac', 0):.2f} deaths {b.get('deaths_per_min', 0):.1f} "
+                  f"pot {b.get('potions_per_min', 0):.1f}/{b.get('opp_potions_per_min', 0):.1f} "
+                  f"heal {b.get('potion_heal', 0):.1f}/{b.get('opp_potion_heal', 0):.1f} "
+                  f"reach {b.get('potion_reach', 0):.1f} gift {b.get('potion_gift', 0):.1f}/{b.get('opp_potion_gift', 0):.1f} "
+                  f"full {b.get('potion_perfect', 0):.2f} x2 {b.get('potion_double', 0):.2f} at {b.get('potion_at_health', 0):.1f} "
+                  f"away {b.get('potion_away_ticks', 0):.1f} hit {b.get('potion_hits_taken', 0):.2f} "
                   f"| self: hit/min {s.get('hits_per_min', 0):5.1f} combo {s.get('max_combo', 0):.1f} "
-                  f"aim {s.get('aim_err_deg', 0):5.1f}", flush=True)
+                  f"aim {s.get('aim_err_deg', 0):5.1f} pot {s.get('potions_per_min', 0):.1f} "
+                  f"heal {s.get('potion_heal', 0):.1f}", flush=True)
             for name, whats in sync_log.items():
                 print(f"sync between {name}: {len(whats)} rounds, last: {whats[-1]}; together "
                       f"{local.total_samples(total_samples)/1e6:.1f}M samples", flush=True)

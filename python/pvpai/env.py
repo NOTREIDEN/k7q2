@@ -25,6 +25,9 @@ PARAM = {
     "w_damage": 57, "opp_autoblock": 58, "sword_wear": 59, "bot_block": 60,
     "pearls": 61, "pearl_prob": 62, "pearl_cd_min_s": 63, "pearl_cd_max_s": 64, "bot_pearl": 65,
     "bot_pearl_lead": 66,
+    "health_prob": 67, "prot_min": 68, "prot_max": 69, "sharp_min": 70, "sharp_max": 71, "feather": 72,
+    "potions_min": 73, "potions_max": 74, "start_hurt": 75, "start_health_min": 76, "start_health_max": 77,
+    "w_win": 78, "w_heal": 79, "w_waste": 80, "bot_potion": 81, "hunger": 82,
 }
 
 STAT_NAMES = [
@@ -34,6 +37,10 @@ STAT_NAMES = [
     "use_ticks0", "use_ticks1", "blocked0", "blocked1", "damage0", "damage1", "crits0", "crits1",
     "pearls0", "pearls1", "landings0", "landings1", "pearl_won0", "pearl_won1", "pearl_lost0", "pearl_lost1",
     "blocks0", "blocks1", "kb0", "kb1", "tap_hits0", "tap_hits1",
+    "deaths0", "deaths1", "potions0", "potions1", "splashes0", "splashes1",
+    "heal_self0", "heal_self1", "heal_gift0", "heal_gift1", "pot_offer0", "pot_offer1",
+    "pot_perfect0", "pot_perfect1", "pot_double0", "pot_double1", "pot_health0", "pot_health1",
+    "pot_away0", "pot_away1", "pot_hit0", "pot_hit1",
 ]
 
 # Per-player fields of VecEnv.view(), then the fields that follow both players.
@@ -42,11 +49,13 @@ VIEW_PLAYER = [
     "forward", "strafe", "jump", "sprint_key", "attack", "hits", "combo", "sprint_hits",
     "seen_x", "seen_y", "seen_z", "using", "blocking", "blocked", "damage",
     "held", "pearls", "pearl_on", "pearl_x", "pearl_y", "pearl_z",
+    "health", "potions", "potion_on", "potion_x", "potion_y", "potion_z",
 ]
 VIEW_GLOBAL = ["ticks_left", "ep_len", "arena_half", "floor_y", "ping0", "ping1", "cps0", "cps1",
                "reach1", "kb_taken1", "backtrack1_ms",
                "kb_kind", "kb_h", "kb_v", "kb_friction", "hit_delay", "autoblock1", "sword_wear",
-               "pearl_cd_s", "bot_pearl_kind", "bot_pearl_x", "bot_pearl_z"]
+               "pearl_cd_s", "bot_pearl_kind", "bot_pearl_x", "bot_pearl_z",
+               "real_health", "hit_health"]
 
 SELF_PLAY = 0
 BOT = 1

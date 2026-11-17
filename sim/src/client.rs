@@ -379,6 +379,8 @@ pub struct LocalPlayer {
     pub throw_eye: V3,
     pub throws_pending: u8,
     pub potions_pending: u8,
+    /// Potions of the other player this client has seen appear.
+    pub potions_seen: u8,
 }
 
 impl LocalPlayer {
@@ -421,6 +423,7 @@ impl LocalPlayer {
             throw_eye: pos,
             throws_pending: 0,
             potions_pending: 0,
+            potions_seen: 0,
         }
     }
 
@@ -851,6 +854,8 @@ impl Client {
                     let mine = *pending > 0 && crate::aabb::dist_sq(pos, lp.throw_eye) < 1.0;
                     if mine {
                         *pending -= 1;
+                    } else if kind == Kind::Potion {
+                        lp.potions_seen = lp.potions_seen.saturating_add(1);
                     }
                     self.thrown.push(ClientThrown { id, kind, pos, motion: [0.0; 3], server_pos: p, age: 0, mine });
                 }

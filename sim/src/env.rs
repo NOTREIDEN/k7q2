@@ -7,36 +7,43 @@
 //! out of phase and each must see what reached it before its own tick. Each
 //! call returns the observation of the agent that acts next, together with
 //! the reward that agent earned since its previous action.
-use crate::aabb::{dist, Aabb, V3};
+use crate::aabb::{dist, dist_sq, Aabb, V3};
 use crate::bot::{self, BotParams, BotState};
 use crate::client::{pearl_landing, pearl_preview, ClientCfg, Edge, Input, TickOut, MAX_BACKTRACK};
 use crate::mth::{self, Rng};
-use crate::net::{Item, Kind, SLOT_PEARL, SLOT_SWORD};
-use crate::server::{KbPlugin, KbProfile, ServerCfg, PEARL_DAMAGE};
+use crate::net::{potion_mask, Item, Kind, SLOT_PEARL, SLOT_SWORD};
+use crate::server::{feather_points, prot_points, splash_heal, throw_heading, KbPlugin, KbProfile, ServerCfg, MAX_HEALTH, PEARL_DAMAGE, POTION_HEAL};
 use crate::sim::{Match, NetCfg, Spawn, TICK_US};
-use crate::world::World;
+use crate::world::{RayHit, World};
 
-pub const ACT_HEADS: usize = 9;
+pub const ACT_HEADS: usize = 10;
 /// forward, strafe, jump, sprint key, attack, yaw bin, pitch bin, right
-/// mouse button (block with the sword), throw a pearl.
+/// mouse button (block with the sword), throw a pearl, throw a potion.
 ///
-/// The last one stands for three key presses a player makes in a row: the
-/// number key of the pearls with a right click, then the number key of the
-/// sword on the next tick (see `Env::pearl_keys`). It does nothing while
-/// the server's cooldown runs or when no pearl is left.
-pub const ACT_DIMS: [i32; ACT_HEADS] = [3, 3, 2, 2, 2, 27, 21, 2, 2];
+/// Each of the last two stands for three key presses a player makes in a
+/// row: the number key of the pearls or of a potion with a right click,
+/// then the number key of the sword on the next tick (see
+/// `Env::pearl_keys` and `Env::potion_keys`). The pearl does nothing while
+/// the server's cooldown runs or when no pearl is left, the potion when no
+/// potion is left.
+pub const ACT_DIMS: [i32; ACT_HEADS] = [3, 3, 2, 2, 2, 27, 29, 2, 2, 2];
 /// Mouse counts per tick. One count is 0.15 degrees at sensitivity 0.5.
 pub const YAW_BINS: [i32; 27] = [
     -377, -233, -144, -89, -55, -34, -21, -13, -8, -5, -3, -2, -1, 0, 1, 2, 3, 5, 8, 13, 21, 34, 55, 89, 144, 233, 377,
 ];
-pub const PITCH_BINS: [i32; 21] = [-89, -55, -34, -21, -13, -8, -5, -3, -2, -1, 0, 1, 2, 3, 5, 8, 13, 21, 34, 55, 89];
+/// The eight large ones at the end came later, for looking at the ground
+/// and back up within one tick: 600 counts are a quarter turn at the
+/// sensitivity the agent plays with.
+pub const PITCH_BINS: [i32; 29] = [
+    -89, -55, -34, -21, -13, -8, -5, -3, -2, -1, 0, 1, 2, 3, 5, 8, 13, 21, 34, 55, 89, -377, -233, -144, 144, 233, 377, -600, 600,
+];
 
-pub const OBS_DIM: usize = 96;
-pub const PRIV_DIM: usize = 54;
-pub const STATS_DIM: usize = 38;
+pub const OBS_DIM: usize = 128;
+pub const PRIV_DIM: usize = 60;
+pub const STATS_DIM: usize = 60;
 /// Floats per player and in total written by `Env::write_view`.
-pub const VIEW_PLAYER: usize = 30;
-pub const VIEW_DIM: usize = 2 * VIEW_PLAYER + 22;
+pub const VIEW_PLAYER: usize = 36;
+pub const VIEW_DIM: usize = 2 * VIEW_PLAYER + 24;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Mode {
@@ -166,6 +173,36 @@ pub struct Params {
     /// Ticks the bots aim ahead of their opponent on top of the flight of
     /// the pearl.
     pub bot_pearl_lead: f64,
+    /// Share of the duels fought with real health when `infinite_health`
+    /// is set: diamond armour, hits that cost health, and a duel that ends
+    /// when a player dies. Without `infinite_health` it is every duel.
+    pub health_prob: f64,
+    /// Level of Protection on each piece of armour and of Sharpness on the
+    /// sword in such a duel, drawn per duel and the same for both players.
+    pub prot: [f64; 2],
+    pub sharp: [f64; 2],
+    /// Level of Feather Falling on the boots.
+    pub feather: f64,
+    /// Splash potions of Instant Health II a player starts such a duel
+    /// with, drawn per player (0 to 7).
+    pub potions: [f64; 2],
+    /// Chance that a player starts such a duel hurt, and the health it
+    /// then has, drawn per player.
+    pub start_hurt: f64,
+    pub start_health: [f64; 2],
+    /// What the player left standing gets when the other dies, and what the
+    /// other loses.
+    pub w_win: f32,
+    /// Reward for health got back from a potion, per the health a plain hit
+    /// costs, and the same amount taken from the other player.
+    pub w_heal: f32,
+    /// Cost of the part of an own potion that gave its thrower nothing, in
+    /// the same unit: thrown with little health missing, or too far away.
+    pub w_waste: f32,
+    /// Scales how readily scripted bots heal themselves. 0 turns it off.
+    pub bot_potion: f64,
+    /// Running, jumping and fighting use up food.
+    pub hunger: bool,
 }
 
 impl Default for Params {
@@ -228,6 +265,18 @@ impl Default for Params {
             pearl_cd_s: [10.0, 16.0],
             bot_pearl: 1.0,
             bot_pearl_lead: 3.0,
+            health_prob: 0.0,
+            prot: [1.0, 3.0],
+            sharp: [1.0, 3.0],
+            feather: 4.0,
+            potions: [0.0, 7.0],
+            start_hurt: 0.5,
+            start_health: [5.0, 18.0],
+            w_win: 10.0,
+            w_heal: 1.0,
+            w_waste: 0.5,
+            bot_potion: 1.0,
+            hunger: false,
         }
     }
 }
@@ -304,6 +353,22 @@ impl Params {
             64 => self.pearl_cd_s[1] = v,
             65 => self.bot_pearl = v,
             66 => self.bot_pearl_lead = v,
+            67 => self.health_prob = v,
+            68 => self.prot[0] = v,
+            69 => self.prot[1] = v,
+            70 => self.sharp[0] = v,
+            71 => self.sharp[1] = v,
+            72 => self.feather = v,
+            73 => self.potions[0] = v,
+            74 => self.potions[1] = v,
+            75 => self.start_hurt = v,
+            76 => self.start_health[0] = v,
+            77 => self.start_health[1] = v,
+            78 => self.w_win = v as f32,
+            79 => self.w_heal = v as f32,
+            80 => self.w_waste = v as f32,
+            81 => self.bot_potion = v,
+            82 => self.hunger = v != 0.0,
             _ => return false,
         }
         true
@@ -320,7 +385,7 @@ pub fn decode_action(a: &[i32]) -> Input {
         attack: a[4] != 0,
         extra_clicks: 0,
         dx: YAW_BINS[pick(a[5], 27)],
-        dy: PITCH_BINS[pick(a[6], 21)],
+        dy: PITCH_BINS[pick(a[6], 29)],
         use_item: a.len() > 7 && a[7] != 0,
         slot_key: 0,
     }
@@ -351,6 +416,69 @@ fn aim_error(eye: V3, yaw: f32, pitch: f32, bb: &Aabb) -> (f64, f64, f64) {
         return (0.0, 0.0, h);
     }
     (mth::wrap_deg(yaw_to - yaw as f64), pitch_to - pitch as f64, h)
+}
+
+/// How far a player moves per tick if it goes on as it does now, from the
+/// motion its last tick left it with.
+#[inline]
+fn pace(motion: V3, on_ground: bool) -> [f64; 2] {
+    let f = if on_ground { 0.546 } else { 0.91 };
+    [motion[0] / f, motion[2] / f]
+}
+
+/// What a potion at `pos` moving by `m` per tick and `age` ticks old will
+/// do if both players keep moving along the ground as they do now: where it
+/// breaks (its position at the start of that tick, from which its reach is
+/// measured), after how many ticks, and the health it offers each player.
+/// `feet` and `vel` are the two players, `thrower` the index of the one who
+/// threw it, whom it passes through for its first ticks.
+fn potion_outcome(world: &World, mut pos: V3, mut m: V3, mut age: i32, thrower: usize, feet: [V3; 2], vel: [[f64; 2]; 2]) -> (V3, i32, [f32; 2]) {
+    let g = Kind::Potion.gravity() as f64;
+    for t in 0..60 {
+        age += 1;
+        let next = [pos[0] + m[0], pos[1] + m[1], pos[2] + m[2]];
+        let mut end = next;
+        let mut broke = false;
+        if !world.clear_path(pos, next) {
+            if let RayHit::Block(h) = world.ray_trace_blocks(pos, next, false) {
+                end = h;
+                broke = true;
+            }
+        }
+        let at = |j: usize| [feet[j][0] + vel[j][0] * t as f64, feet[j][1], feet[j][2] + vel[j][1] * t as f64];
+        let mut direct = None;
+        let mut best = 0.0;
+        for j in 0..2 {
+            if j == thrower && age < 5 {
+                continue;
+            }
+            let f = at(j);
+            let bb = Aabb::new([f[0] - 0.6, f[1] - 0.3, f[2] - 0.6], [f[0] + 0.6, f[1] + 2.1, f[2] + 0.6]);
+            if let Some(h) = bb.calculate_intercept(pos, end) {
+                let d = dist_sq(pos, h);
+                if direct.is_none() || d < best {
+                    direct = Some(j);
+                    best = d;
+                }
+            }
+        }
+        if broke || direct.is_some() {
+            let mut offered = [0.0f32; 2];
+            for j in 0..2 {
+                let f = at(j);
+                if f[1] + 1.8 >= pos[1] - 2.0 && f[1] <= pos[1] + 2.25 {
+                    offered[j] = splash_heal(pos, f, direct == Some(j));
+                }
+            }
+            return (pos, t, offered);
+        }
+        pos = next;
+        for v in m.iter_mut() {
+            *v *= 0.99f32 as f64;
+        }
+        m[1] -= g;
+    }
+    (pos, 60, [0.0; 2])
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -387,6 +515,27 @@ pub struct Stats {
     /// Hits dealt with sprint within six ticks of the end of a block: the
     /// block used as a sprint reset.
     pub tap_hits: [f64; 2],
+    /// Times this player died.
+    pub deaths: [f64; 2],
+    /// Potions thrown, and potions that broke.
+    pub potions: [f64; 2],
+    pub splashes: [f64; 2],
+    /// Health this player's potions gave back to itself and to the other
+    /// player, and the health they offered it (eight each at best).
+    pub heal_self: [f64; 2],
+    pub heal_gift: [f64; 2],
+    pub pot_offer: [f64; 2],
+    /// How well a potion is thrown. Potions that offered their thrower all
+    /// eight points; potions thrown within three ticks of the one before;
+    /// the thrower's health at the throw, summed; the ticks its crosshair
+    /// was more than twelve degrees off the other player around a throw
+    /// (up to ten before it and forty after), summed; and the hits it took
+    /// in the second after a throw.
+    pub pot_perfect: [f64; 2],
+    pub pot_double: [f64; 2],
+    pub pot_health: [f64; 2],
+    pub pot_away: [f64; 2],
+    pub pot_hit: [f64; 2],
 }
 
 impl Stats {
@@ -413,6 +562,17 @@ impl Stats {
             self.blocks[a] += o.blocks[a];
             self.kb[a] += o.kb[a];
             self.tap_hits[a] += o.tap_hits[a];
+            self.deaths[a] += o.deaths[a];
+            self.potions[a] += o.potions[a];
+            self.splashes[a] += o.splashes[a];
+            self.heal_self[a] += o.heal_self[a];
+            self.heal_gift[a] += o.heal_gift[a];
+            self.pot_offer[a] += o.pot_offer[a];
+            self.pot_perfect[a] += o.pot_perfect[a];
+            self.pot_double[a] += o.pot_double[a];
+            self.pot_health[a] += o.pot_health[a];
+            self.pot_away[a] += o.pot_away[a];
+            self.pot_hit[a] += o.pot_hit[a];
         }
     }
     pub fn write(&self, out: &mut [f64]) {
@@ -455,6 +615,28 @@ impl Stats {
             self.kb[1],
             self.tap_hits[0],
             self.tap_hits[1],
+            self.deaths[0],
+            self.deaths[1],
+            self.potions[0],
+            self.potions[1],
+            self.splashes[0],
+            self.splashes[1],
+            self.heal_self[0],
+            self.heal_self[1],
+            self.heal_gift[0],
+            self.heal_gift[1],
+            self.pot_offer[0],
+            self.pot_offer[1],
+            self.pot_perfect[0],
+            self.pot_perfect[1],
+            self.pot_double[0],
+            self.pot_double[1],
+            self.pot_health[0],
+            self.pot_health[1],
+            self.pot_away[0],
+            self.pot_away[1],
+            self.pot_hit[0],
+            self.pot_hit[1],
         ];
         for (o, x) in out.iter_mut().zip(v.iter()) {
             *o = *x;
@@ -469,7 +651,7 @@ pub struct Env {
     pub rng: Rng,
     pub pending: usize,
     pub bot: BotParams,
-    bot_state: BotState,
+    pub bot_state: BotState,
     rew_acc: [f32; 2],
     /// Shaping potential after each agent's last tick.
     phi: [f32; 2],
@@ -501,6 +683,18 @@ pub struct Env {
     landed: Option<(usize, i32)>,
     /// Own ticks since each player last had its sword up; 0 while it is.
     since_block: [i32; 2],
+    /// Where each player is in the key presses of a potion throw, as
+    /// `pearl_stage`, and what it asked for on its last tick.
+    potion_stage: [u8; 2],
+    asked_potion: [bool; 2],
+    /// Ticks since each player's last potion throw, whether its crosshair
+    /// has been back on the other player since, and for how many ticks in
+    /// a row it has been off it.
+    pot_since: [i32; 2],
+    pot_back: [bool; 2],
+    off_run: [i32; 2],
+    /// A player has died: the duel ends when both have made their tick.
+    over: bool,
 }
 
 pub fn new_match(p: &Params, rng: &mut Rng, mode: Mode) -> (Match, [f64; 2], BotParams) {
@@ -587,11 +781,22 @@ pub fn new_match(p: &Params, rng: &mut Rng, mode: Mode) -> (Match, [f64; 2], Bot
     let mut ccfg = ClientCfg::with_sensitivity(p.sensitivity);
     ccfg.mouse_delay_fix = p.mouse_delay_fix;
     ccfg.kb_ench = p.kb_ench;
+    // Real health: a diamond set with Protection, a sword with Sharpness.
+    let real = !p.infinite_health || (p.health_prob > 0.0 && rng.chance(p.health_prob));
+    let level = |r: [f64; 2], rng: &mut Rng| -> i32 {
+        let (lo, hi) = (r[0].round() as i64, (r[1].round() as i64).max(r[0].round() as i64));
+        (lo + (rng.next_u64() % (hi - lo + 1) as u64) as i64) as i32
+    };
+    let (prot, sharp) = if real { (level(p.prot, rng), level(p.sharp, rng)) } else { (0, 0) };
     let scfg = ServerCfg {
         damage: p.damage,
-        ench_damage: 0.0,
+        ench_damage: sharp as f32 * 1.25,
         kb_ench: p.kb_ench,
-        infinite_health: p.infinite_health,
+        infinite_health: !real,
+        armor: if real { 20 } else { 0 },
+        prot: 4 * prot_points(prot),
+        feather: if real { feather_points(p.feather.round() as i32) } else { 0 },
+        hunger: p.hunger,
         fall_damage: p.fall_damage,
         max_no_damage,
         sword_wear: if p.sword_wear >= 0.0 { p.sword_wear as f32 } else { [1.0f32, 0.25, 0.25, 0.0][(rng.next_u64() % 4) as usize] },
@@ -606,6 +811,20 @@ pub fn new_match(p: &Params, rng: &mut Rng, mode: Mode) -> (Match, [f64; 2], Bot
     for i in 0..2 {
         m.s.p[i].pearls = pearls;
         m.c[i].lp.pearls = pearls;
+        if real {
+            let n = level(p.potions, rng).clamp(0, 7) as u8;
+            m.s.p[i].potions = potion_mask(n);
+            m.c[i].lp.potions = potion_mask(n);
+            if rng.chance(p.start_hurt) {
+                // Both sides start out knowing it.
+                let h = (rng.range(p.start_health[0], p.start_health[1].max(p.start_health[0])) * 2.0).round() as f32 / 2.0;
+                let h = h.clamp(1.0, MAX_HEALTH);
+                m.s.p[i].health = h;
+                m.s.p[i].last_health = h;
+                m.c[i].lp.health = h;
+                m.c[1 - i].rp.health = h;
+            }
+        }
     }
     if rng.chance(p.opp_edge_prob) {
         let ms = rng.range(p.opp_backtrack_ms[0], p.opp_backtrack_ms[1].max(p.opp_backtrack_ms[0]));
@@ -635,6 +854,7 @@ pub fn new_match(p: &Params, rng: &mut Rng, mode: Mode) -> (Match, [f64; 2], Bot
     bot.pearl_escape *= p.bot_pearl;
     bot.pearl_cd = m.s.cfg.pearl_cooldown;
     bot.pearl_lead = p.bot_pearl_lead;
+    bot.potion *= p.bot_potion;
     (m, ping, bot)
 }
 
@@ -671,6 +891,12 @@ impl Env {
             asked_pearl: [false; 2],
             landed: None,
             since_block: [1000; 2],
+            potion_stage: [0; 2],
+            asked_potion: [false; 2],
+            pot_since: [1000; 2],
+            pot_back: [true; 2],
+            off_run: [0; 2],
+            over: false,
         };
         e.begin();
         e
@@ -691,6 +917,12 @@ impl Env {
         self.asked_pearl = [false; 2];
         self.landed = None;
         self.since_block = [1000; 2];
+        self.potion_stage = [0; 2];
+        self.asked_potion = [false; 2];
+        self.pot_since = [1000; 2];
+        self.pot_back = [true; 2];
+        self.off_run = [0; 2];
+        self.over = false;
         let own = self.rng.range(p.cps_min, p.cps_max.max(p.cps_min));
         let (lo, hi) = if p.opp_cps_min < 0.0 { (p.cps_min, p.cps_max) } else { (p.opp_cps_min, p.opp_cps_max) };
         let other = self.rng.range(lo, hi.max(lo));
@@ -718,18 +950,64 @@ impl Env {
     /// Pearls that landed: the thrower pays for the damage it took the way
     /// it pays for a hit taken, and the next hit is watched.
     fn collect_landings(&mut self) {
+        let real = !self.m.s.cfg.infinite_health;
+        let hh = self.m.s.cfg.hit_health().max(0.1);
         for k in 0..self.m.s.landings.len() {
             let l = self.m.s.landings[k];
             let p = &self.params;
-            self.rew_acc[l.thrower] -= p.w_taken * p.w_damage * (PEARL_DAMAGE / p.damage.max(0.5));
+            // With real health it is what the landing took, counted in
+            // plain hits.
+            let cost = if real { l.dealt / hh } else { PEARL_DAMAGE / p.damage.max(0.5) };
+            self.rew_acc[l.thrower] -= p.w_taken * p.w_damage * cost;
             self.ep.landings[l.thrower] += 1.0;
             self.landed = Some((l.thrower, 40));
         }
         self.m.s.landings.clear();
     }
 
+    /// Potions that broke: health got back is worth what the same health
+    /// lost to hits costs, to the player healed and against the other one,
+    /// and the thrower pays for the part of its potion it got nothing from.
+    fn collect_splashes(&mut self) {
+        let hh = self.m.s.cfg.hit_health().max(0.1);
+        for k in 0..self.m.s.splashes.len() {
+            let s = self.m.s.splashes[k];
+            let p = &self.params;
+            for j in 0..2 {
+                let v = p.w_heal * s.healed[j] / hh;
+                self.rew_acc[j] += v;
+                self.rew_acc[1 - j] -= v;
+            }
+            let t = s.thrower;
+            self.rew_acc[t] -= p.w_waste * (POTION_HEAL - s.healed[t]).max(0.0) / hh;
+            self.ep.splashes[t] += 1.0;
+            self.ep.heal_self[t] += s.healed[t] as f64;
+            self.ep.heal_gift[t] += s.healed[1 - t] as f64;
+            self.ep.pot_offer[t] += s.offered[t] as f64;
+            if s.offered[t] >= POTION_HEAL {
+                self.ep.pot_perfect[t] += 1.0;
+            }
+        }
+        self.m.s.splashes.clear();
+    }
+
     fn collect_hits(&mut self) {
         self.collect_landings();
+        self.collect_splashes();
+        if !self.over {
+            let dead = [!self.m.s.p[0].alive(), !self.m.s.p[1].alive()];
+            if dead[0] || dead[1] {
+                self.over = true;
+                for a in 0..2 {
+                    if dead[a] {
+                        self.rew_acc[a] -= self.params.w_win;
+                        self.ep.deaths[a] += 1.0;
+                    } else {
+                        self.rew_acc[a] += self.params.w_win;
+                    }
+                }
+            }
+        }
         if self.m.s.hits.is_empty() {
             return;
         }
@@ -744,10 +1022,15 @@ impl Env {
         let (wh, wt) = (self.params.w_hit, self.params.w_taken);
         for k in 0..self.m.s.hits.len() {
             let h = self.m.s.hits[k];
-            let worth = 1.0 + self.params.w_damage * (h.damage / self.params.damage.max(0.5) - 1.0);
+            // Relative to a plain hit with this sword.
+            let plain = (self.params.damage + self.m.s.cfg.ench_damage).max(0.5);
+            let worth = 1.0 + self.params.w_damage * (h.damage / plain - 1.0);
             self.rew_acc[h.attacker] += wh * worth;
             self.rew_acc[h.victim] -= wt * worth;
             self.ep.hits[h.attacker] += 1.0;
+            if self.pot_since[h.victim] <= 20 {
+                self.ep.pot_hit[h.victim] += 1.0;
+            }
             self.ep.damage[h.attacker] += h.damage as f64;
             if h.blocked {
                 self.ep.blocked[h.victim] += 1.0;
@@ -834,7 +1117,46 @@ impl Env {
     /// Can player `id` throw a pearl now, as far as it can tell itself?
     fn pearl_ready(&self, id: usize) -> bool {
         let lp = &self.m.c[id].lp;
-        lp.pearls > 0 && self.pearl_wait[id] <= 0 && self.pearl_stage[id] == 0 && lp.held == SLOT_SWORD
+        lp.pearls > 0 && self.pearl_wait[id] <= 0 && self.pearl_stage[id] == 0 && self.potion_stage[id] == 0 && lp.held == SLOT_SWORD
+    }
+
+    /// Can player `id` throw a potion now?
+    fn potion_ready(&self, id: usize) -> bool {
+        let lp = &self.m.c[id].lp;
+        lp.potions != 0 && self.potion_stage[id] == 0 && self.pearl_stage[id] == 0 && lp.held == SLOT_SWORD
+    }
+
+    /// The key presses of a potion throw, as `pearl_keys`: the number key
+    /// of the first slot that holds a potion and a right click, which
+    /// throws along the view the server already has, then the number key of
+    /// the sword. It comes before the pearl when both are asked for.
+    fn potion_keys(&mut self, id: usize, want: bool, inp: &mut Input) {
+        self.asked_potion[id] = want;
+        match self.potion_stage[id] {
+            0 => {
+                if want && self.potion_ready(id) {
+                    inp.slot_key = self.m.c[id].lp.potions.trailing_zeros() as u8 + 1;
+                    inp.attack = false;
+                    if self.prev_inp[id].use_item {
+                        inp.use_item = false;
+                        self.potion_stage[id] = 1;
+                    } else {
+                        inp.use_item = true;
+                        self.potion_stage[id] = 2;
+                    }
+                }
+            }
+            1 => {
+                inp.use_item = true;
+                inp.attack = false;
+                self.potion_stage[id] = 2;
+            }
+            _ => {
+                inp.slot_key = SLOT_SWORD + 1;
+                inp.use_item = false;
+                self.potion_stage[id] = 0;
+            }
+        }
     }
 
     /// The key presses of a pearl throw, laid over what player `id` asked
@@ -924,6 +1246,32 @@ impl Env {
         } else if self.since_block[id] < 1000 {
             self.since_block[id] += 1;
         }
+        let off = ang > 12.0;
+        if out.threw_potion {
+            self.ep.potions[id] += 1.0;
+            if self.pot_since[id] <= 3 {
+                self.ep.pot_double[id] += 1.0;
+            }
+            self.ep.pot_health[id] += self.m.c[id].lp.health as f64;
+            // The ticks spent looking away to aim it, unless they were
+            // already counted after the potion before.
+            if self.pot_back[id] {
+                self.ep.pot_away[id] += self.off_run[id].min(10) as f64;
+            }
+            self.pot_since[id] = 0;
+            self.pot_back[id] = false;
+        }
+        if !self.pot_back[id] {
+            if off && self.pot_since[id] < 40 {
+                self.ep.pot_away[id] += 1.0;
+            } else {
+                self.pot_back[id] = true;
+            }
+        }
+        self.off_run[id] = if off { self.off_run[id] + 1 } else { 0 };
+        if self.pot_since[id] < 1000 {
+            self.pot_since[id] += 1;
+        }
         if out.threw {
             self.ep.pearls[id] += 1.0;
             // The server starts its wait when the throw reaches it, a
@@ -933,7 +1281,9 @@ impl Env {
         self.prev_inp[id] = *inp;
     }
 
-    fn finish_episode(&mut self) {
+    /// `how` is what the trainer is told: 1 the duel is over (a player
+    /// died), 2 the clock cut it short.
+    fn finish_episode(&mut self, how: u8) {
         for a in 0..2 {
             self.ep.max_combo_sum[a] = self.max_combo[a] as f64;
             let mut o = [0.0f32; OBS_DIM];
@@ -944,7 +1294,7 @@ impl Env {
             self.stash_priv[a] = pv;
             self.stash_rew[a] = self.rew_acc[a];
             self.ep.reward_sum[a] += self.rew_acc[a] as f64;
-            self.done_flag[a] = 2;
+            self.done_flag[a] = how;
         }
         self.ep.episodes = 1.0;
         let ep = self.ep;
@@ -961,6 +1311,7 @@ impl Env {
     pub fn step(&mut self, action: &[i32]) -> usize {
         let id = self.pending;
         let mut inp = decode_action(action);
+        self.potion_keys(id, action.len() > 9 && action[9] != 0, &mut inp);
         self.pearl_keys(id, action.len() > 8 && action[8] != 0, &mut inp);
         self.limit_clicks(id, &mut inp);
         let out = self.m.client_tick(id, &inp);
@@ -987,8 +1338,10 @@ impl Env {
                 self.landed = if left > 1 { Some((who, left - 1)) } else { None };
             }
             self.ticks_left -= 1;
-            if self.ticks_left <= 0 {
-                self.finish_episode();
+            if self.over {
+                self.finish_episode(1);
+            } else if self.ticks_left <= 0 {
+                self.finish_episode(2);
             }
         }
         self.pending
@@ -1061,6 +1414,15 @@ impl Env {
             for a in 0..3 {
                 o[b + 27 + a] = e.map(|e| e.pos[a] as f32).unwrap_or(0.0);
             }
+            // Health and potions as the server has them, and this player's
+            // newest potion in flight.
+            o[b + 30] = self.m.s.p[id].health;
+            o[b + 31] = self.m.s.p[id].potions.count_ones() as f32;
+            let e = self.m.s.thrown.iter().rev().find(|e| e.thrower == id && e.kind == Kind::Potion);
+            o[b + 32] = e.is_some() as u8 as f32;
+            for a in 0..3 {
+                o[b + 33 + a] = e.map(|e| e.pos[a] as f32).unwrap_or(0.0);
+            }
         }
         let g = 2 * VIEW_PLAYER;
         o[g] = self.ticks_left as f32;
@@ -1100,6 +1462,9 @@ impl Env {
         o[g + 19] = self.bot_state.pearl_kind as f32;
         o[g + 20] = self.bot_state.pearl_to[0] as f32;
         o[g + 21] = self.bot_state.pearl_to[2] as f32;
+        // Real health or not, and the health a plain hit costs.
+        o[g + 22] = !s.cfg.infinite_health as u8 as f32;
+        o[g + 23] = s.cfg.hit_health();
     }
 
     /// What agent `id` can know from its own client.
@@ -1222,7 +1587,7 @@ impl Env {
         // The newest pearl of its own in flight: where it will put this
         // player (relative to where it stands now), in how many ticks, and
         // how far from the opponent that is.
-        for v in o[77..96].iter_mut() {
+        for v in o[77..OBS_DIM].iter_mut() {
             *v = 0.0;
         }
         if let Some(e) = c.thrown.iter().rev().find(|e| e.mine && e.kind == Kind::Pearl) {
@@ -1264,6 +1629,76 @@ impl Env {
             o[93] = (ticks.min(60)) as f32 / 30.0;
             o[94] = clip((lf - rf) / 8.0, 4.0);
             o[95] = clip((lr - rr) / 8.0, 4.0);
+        }
+        // Health: whether hits cost any in this duel, this player's and the
+        // opponent's as this client knows them, and the health a plain hit
+        // costs with this armour and these swords.
+        let real = !self.m.s.cfg.infinite_health;
+        let hh = self.m.s.cfg.hit_health();
+        o[96] = real as u8 as f32;
+        o[97] = lp.health / MAX_HEALTH;
+        o[98] = rp.health / MAX_HEALTH;
+        o[99] = (lp.health - rp.health) / MAX_HEALTH;
+        o[100] = if real { hh / 4.0 } else { 0.0 };
+        o[101] = ((MAX_HEALTH - lp.health) / POTION_HEAL).min(2.5);
+        // Potions: how many are left, whether one can be thrown now, where
+        // the throw's key presses are, what was asked last tick, whether
+        // the opponent has one in hand and how many of its potions this
+        // client has seen.
+        o[102] = lp.potions.count_ones() as f32 / 7.0;
+        o[103] = self.potion_ready(id) as u8 as f32;
+        o[104] = self.potion_stage[id] as f32 / 2.0;
+        o[105] = self.asked_potion[id] as u8 as f32;
+        o[106] = (rp.item == Item::Potion) as u8 as f32;
+        o[107] = (lp.potions_seen.min(14)) as f32 / 7.0;
+        // Where each player goes if it keeps moving as it does now.
+        let feet = [b.pos, rp.pos];
+        let seen = if vel[0].hypot(vel[2]) < 1.5 { [vel[0], vel[2]] } else { [0.0; 2] };
+        let vel = [pace(b.motion, b.on_ground), seen];
+        let world = &self.m.world;
+        // Its own newest potion in flight: where it will break (relative to
+        // where this player stands now), in how many ticks, and the health
+        // it will then give this player and the opponent.
+        if let Some(e) = c.thrown.iter().rev().find(|e| e.mine && e.kind == Kind::Potion) {
+            let (at, ticks, heal) = potion_outcome(world, e.pos, e.motion, e.age + 2, 0, feet, vel);
+            let (lf, lr) = local(yaw, at[0] - b.pos[0], at[2] - b.pos[2]);
+            o[108] = 1.0;
+            o[109] = clip(lf / 4.0, 4.0);
+            o[110] = clip(lr / 4.0, 4.0);
+            o[111] = clip((at[1] - b.pos[1]) / 3.0, 2.0);
+            o[112] = (ticks.min(40)) as f32 / 20.0;
+            o[113] = heal[0] / POTION_HEAL;
+            o[114] = heal[1] / POTION_HEAL;
+        }
+        // The opponent's newest potion in flight, the same way.
+        if let Some(e) = c.thrown.iter().rev().find(|e| !e.mine && e.kind == Kind::Potion) {
+            let (at, ticks, heal) = potion_outcome(world, e.pos, e.motion, e.age + 2, 1, feet, vel);
+            let (lf, lr) = local(yaw, at[0] - b.pos[0], at[2] - b.pos[2]);
+            o[115] = 1.0;
+            o[116] = clip(lf / 4.0, 4.0);
+            o[117] = clip(lr / 4.0, 4.0);
+            o[118] = clip((at[1] - b.pos[1]) / 3.0, 2.0);
+            o[119] = (ticks.min(40)) as f32 / 20.0;
+            o[120] = heal[0] / POTION_HEAL;
+            o[121] = heal[1] / POTION_HEAL;
+        }
+        // A potion thrown on this tick flies along the view the server has:
+        // how far from here it would break, in how many ticks, and the
+        // health it would give this player if it keeps moving as it does,
+        // if it stops, and the opponent.
+        if lp.potions != 0 {
+            let (from, dir) = throw_heading(Kind::Potion, b.pos, lp.l.yaw, lp.l.pitch);
+            let v = Kind::Potion.speed() as f64;
+            let m = [dir[0] * v, dir[1] * v, dir[2] * v];
+            let (at, ticks, heal) = potion_outcome(world, from, m, 0, 0, feet, vel);
+            let still = potion_outcome(world, from, m, 0, 0, feet, [[0.0; 2], vel[1]]).2;
+            let (lf, lr) = local(yaw, at[0] - b.pos[0], at[2] - b.pos[2]);
+            o[122] = clip(lf / 4.0, 4.0);
+            o[123] = clip(lr / 4.0, 4.0);
+            o[124] = (ticks.min(40)) as f32 / 20.0;
+            o[125] = heal[0] / POTION_HEAL;
+            o[126] = still[0] / POTION_HEAL;
+            o[127] = heal[1] / POTION_HEAL;
         }
     }
 
@@ -1347,6 +1782,13 @@ impl Env {
         o[51] = (s.p[1 - id].held == SLOT_PEARL) as u8 as f32;
         o[52] = s.thrown.iter().any(|e| e.thrower != id && e.kind == Kind::Pearl) as u8 as f32;
         o[53] = s.cfg.pearl_cooldown as f32 / 320.0;
+        // Health and potions as the server has them.
+        o[54] = s.p[id].health / MAX_HEALTH;
+        o[55] = s.p[1 - id].health / MAX_HEALTH;
+        o[56] = s.p[id].potions.count_ones() as f32 / 7.0;
+        o[57] = s.p[1 - id].potions.count_ones() as f32 / 7.0;
+        o[58] = s.thrown.iter().any(|e| e.thrower != id && e.kind == Kind::Potion) as u8 as f32;
+        o[59] = if s.cfg.infinite_health { 0.0 } else { s.cfg.hit_health() / 4.0 };
     }
 }
 

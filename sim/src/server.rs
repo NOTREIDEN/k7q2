@@ -112,6 +112,16 @@ pub struct ServerCfg {
     pub pearl_cooldown: i32,
 }
 
+impl ServerCfg {
+    /// The health a plain hit with the sword costs a player in this kit, on
+    /// average over what Protection draws.
+    pub fn hit_health(&self) -> f32 {
+        let m = self.prot.clamp(0, 25);
+        let k = (((m + 1) >> 1) as f32 + (m >> 1) as f32 * 0.5).min(20.0);
+        (self.damage + self.ench_damage) * (25 - self.armor) as f32 / 25.0 * (25.0 - k) / 25.0
+    }
+}
+
 impl Default for ServerCfg {
     fn default() -> Self {
         // Diamond sword in 1.8: 1 (hand) + 7.
@@ -224,6 +234,8 @@ pub struct Landing {
     pub on_player: bool,
     /// Ticks it flew.
     pub ticks: i32,
+    /// Health the landing cost the thrower.
+    pub dealt: f32,
 }
 
 /// A potion that broke.
@@ -871,8 +883,10 @@ impl Server {
                 let (yaw, pitch) = (self.p[thrower].l.yaw, self.p[thrower].l.pitch);
                 self.set_player_location(thrower, to, yaw, pitch, out);
                 self.p[thrower].l.body.fall_distance = 0.0;
+                let before = self.p[thrower].health;
                 self.attack_entity_from(thrower, PEARL_DAMAGE, Source::Fall, rng, out);
-                self.landings.push(Landing { thrower, pos: to, on_player: hit_player.is_some(), ticks: ticks_in_air });
+                let dealt = before - self.p[thrower].health;
+                self.landings.push(Landing { thrower, pos: to, on_player: hit_player.is_some(), ticks: ticks_in_air, dealt });
             }
             self.thrown[k].dead = true;
         }
