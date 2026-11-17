@@ -85,7 +85,7 @@ public final class Session {
         d.arenaHalf = arena[2];
         d.floorY = Scout.floor(mc);
         d.realHealth = true;
-        d.hitHealth = Scout.hitHealth(mc.thePlayer, other);
+        d.hitHealth = Scout.hitHealth(mc.thePlayer, other, Layout.of(mc.thePlayer.inventory));
         d.pearlCooldown = (int) Math.floor(s.pearlCooldownS * 20.0 + 0.5);
         d.drinkWindowS = DRINK_WINDOW_S;
         double ping = s.ping >= 0.0 ? s.ping : Scout.ping(mc, mc.thePlayer);
@@ -101,6 +101,13 @@ public final class Session {
                 return policy.act(obs, draws);
             }
         });
+        bot.block(s.block);
+        // The agent starts a duel with its sword in hand. If the player holds
+        // something else, the sword is taken up as the wheel of the mouse would.
+        int swordAt = bot.layout().real[Inv.SLOT_SWORD];
+        if (bot.layout().sword && mc.thePlayer.inventory.currentItem != swordAt) {
+            mc.thePlayer.inventory.currentItem = swordAt;
+        }
         duel = d;
         me = mc.thePlayer;
         world = mc.theWorld;
@@ -113,10 +120,26 @@ public final class Session {
         String line = String.format(Locale.ROOT,
             "PvP AI prendido contra %s. Arena de %.0f x %.0f con centro en %.1f, %.1f y piso en %.1f. Golpe de %.1f de vida. Ping %.0f%s y %.0f ms. %.1f clics por segundo.",
             other.getName(), 2.0 * d.arenaHalf, 2.0 * d.arenaHalf, d.centerX, d.centerZ, d.floorY, d.hitHealth, ping, guessed ? " (supuesto)" : "", otherPing, cps);
-        if (Reader.item(me.inventory.mainInventory[Inv.SLOT_SWORD]) != Inv.SWORD) {
-            line += " Ojo: la espada tiene que estar en el primer lugar de la barra, las perlas en el segundo y la comida en el ultimo.";
+        line += " " + kit(bot.layout());
+        if (!s.block) {
+            line += " Sin bloquear con la espada.";
         }
         return line;
+    }
+
+    /** What the agent found in the hotbar and the inventory, for the player to check. */
+    private String kit(Layout l) {
+        if (!l.sword) {
+            return "Ojo: no hay espada en la barra.";
+        }
+        int[] bar = new int[8], rows = new int[8];
+        for (int i = 0; i < 36; i++) {
+            (i < 9 ? bar : rows)[Reader.item(me.inventory.mainInventory[i])]++;
+        }
+        int pearl = l.shown(me.inventory, Inv.SLOT_PEARL, Inv.PEARL), food = l.shown(me.inventory, Inv.SLOT_FOOD, Inv.FOOD);
+        return String.format(Locale.ROOT, "Barra: espada en %d, %s, %s, %d pociones de vida y %d de Speed. Inventario: %d de vida y %d de Speed.",
+            l.real[Inv.SLOT_SWORD] + 1, pearl > 0 ? "perlas en " + pearl : "sin perlas", food > 0 ? "comida en " + food : "sin comida",
+            bar[Inv.POTION], bar[Inv.DRINK], rows[Inv.POTION], rows[Inv.DRINK]);
     }
 
     /** Take the agent off the keys. */

@@ -46,6 +46,8 @@ public final class View {
     public int held;
     /** Pearls in slot 1, steaks in slot 8, and one bit per slot that holds a splash potion, a potion to drink, an empty bottle. */
     public int pearls, steak, potions, drinks, bottles;
+    /** One bit per slot of the hotbar taken by something a duel has no use for. The duels of training have no such thing. */
+    public int others;
     /** Potions of the other player seen so far, and own potions thrown that the server has not shown yet. */
     public int potionsSeen, potionsPending;
     public int food;

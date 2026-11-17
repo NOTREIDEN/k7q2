@@ -3,6 +3,8 @@ package pvpai.core;
 /** The hotbar and the inventory of a duel, and a shift click between them. */
 public final class Inv {
     public static final int SWORD = 0, PEARL = 1, POTION = 2, DRINK = 3, BOTTLE = 4, FOOD = 5, EMPTY = 6;
+    /** Something a duel has no use for: its slot is taken, and that is all an agent goes by. */
+    public static final int OTHER = 7;
     public static final int KIND_PEARL = 0, KIND_POTION = 1;
     /** Hotbar slot of the sword, of the pearls and of the steak. */
     public static final int SLOT_SWORD = 0, SLOT_PEARL = 1, SLOT_FOOD = 8;
@@ -17,6 +19,8 @@ public final class Inv {
     /** The part of the hotbar that changes during a duel. */
     public static final class Bar {
         public int pearls, potions, drinks, bottles, steak;
+        /** One bit per slot taken by something else, which stays where it is. */
+        public int others;
 
         public Bar(int pearls, int potions, int drinks, int bottles, int steak) {
             this.pearls = pearls;
@@ -27,7 +31,9 @@ public final class Inv {
         }
 
         public static Bar of(View v) {
-            return new Bar(v.pearls, v.potions, v.drinks, v.bottles, v.steak);
+            Bar b = new Bar(v.pearls, v.potions, v.drinks, v.bottles, v.steak);
+            b.others = v.others;
+            return b;
         }
 
         /** The item in a slot other than the sword's. */
@@ -43,6 +49,9 @@ public final class Inv {
             }
             if ((bottles >> slot & 1) != 0) {
                 return BOTTLE;
+            }
+            if ((others >> slot & 1) != 0) {
+                return OTHER;
             }
             if (slot == SLOT_PEARL && pearls > 0) {
                 return PEARL;

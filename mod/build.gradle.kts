@@ -77,3 +77,21 @@ tasks.register<JavaExec>("selftest") {
         workingDir.mkdirs()
     }
 }
+
+// gradle servertest -Pserver=HOST:PORT: the same client joins a test server and the mod
+// fights whoever is on it (see ServerTest).
+tasks.register<JavaExec>("servertest") {
+    val run = net.fabricmc.loom.configuration.ide.RunConfig.runConfig(project, loom.runConfigs.getByName("client"))
+    dependsOn("downloadAssets")
+    javaLauncher.set(javaToolchains.launcherFor { languageVersion.set(JavaLanguageVersion.of(8)) })
+    classpath = run.sourceSet.runtimeClasspath
+    mainClass.set(run.mainClass)
+    jvmArgs(run.vmArgs)
+    jvmArgs("-Dpvpai.servertest=" + (project.findProperty("server") ?: "127.0.0.1:25565"), "-Dpvpai.seconds=" + (project.findProperty("seconds") ?: "90"))
+    args(run.programArgs)
+    workingDir = file(run.runDir)
+    environment(run.envVariables)
+    doFirst {
+        workingDir.mkdirs()
+    }
+}

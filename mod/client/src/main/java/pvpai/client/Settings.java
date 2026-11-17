@@ -23,6 +23,8 @@ public final class Settings {
     /** The arena, if it is not to be measured: its centre and half its side. */
     public boolean arenaSet;
     public double arenaX, arenaZ, arenaHalf;
+    /** Whether the agent may block with its sword. */
+    public boolean block = true;
 
     /** The file a player finds the first time, in the player's language. */
     public static final String FIRST = ""
@@ -40,7 +42,10 @@ public final class Settings {
         + "\n"
         + "# La arena. Con auto se mide con los bloques de alrededor al prender.\n"
         + "# Para darla a mano:  arena=X Z MITAD  (el centro de la arena y la mitad de su lado), por ejemplo  arena=0 0 24\n"
-        + "arena=auto\n";
+        + "arena=auto\n"
+        + "\n"
+        + "# Bloquear con la espada (clic derecho). Con no, pelea sin bloquear nunca.\n"
+        + "bloqueo=si\n";
 
     /** Read from what a file holds; what cannot be read keeps its default. */
     public static Settings parse(Properties p) {
@@ -61,6 +66,11 @@ public final class Settings {
         v = numbers(p.getProperty("perla_espera"), " ");
         if (v != null && v.length == 1 && v[0] >= 0.0) {
             s.pearlCooldownS = v[0];
+        }
+        String block = p.getProperty("bloqueo");
+        if (block != null) {
+            block = block.trim().toLowerCase(java.util.Locale.ROOT);
+            s.block = !(block.equals("no") || block.equals("0") || block.equals("false") || block.equals("off"));
         }
         v = numbers(p.getProperty("arena"), " ");
         if (v != null && v.length == 3 && v[2] >= 1.0) {

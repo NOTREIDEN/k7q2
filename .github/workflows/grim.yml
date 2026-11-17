@@ -1,0 +1,105 @@
+name: grim
+
+# Lets the mod fight on a 1.8.8 Paper server that runs the Grim anticheat and
+# the knockback plugin, and prints what Grim's console says about its player.
+on:
+  workflow_dispatch:
+    inputs:
+      seconds:
+        description: Seconds the mod is at the keys
+        default: "120"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: grim
+  cancel-in-progress: true
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - name: Fetch the newest weights and the plugin
+        run: |
+          git fetch -q --depth 1 origin weights
+          git show FETCH_HEAD:latest.pt > latest.pt
+          git show FETCH_HEAD:status.txt | head -n 3
+          mkdir -p e2e-server/plugins
+          git fetch -q --depth 1 origin plugin
+          git show FETCH_HEAD:kbtest-1.8.8.jar > e2e-server/plugins/kbtest.jar
+      - uses: actions/cache@v4
+        with:
+          path: sim/target
+          key: sim-${{ hashFiles('sim/Cargo.toml', 'sim/Cargo.lock', 'sim/src/**', 'sim/tests/**') }}
+      - name: Build the simulator
+        run: cd sim && cargo build --release
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Write the policy as the file the mod reads
+        run: |
+          pip install --index-url https://download.pytorch.org/whl/cpu torch
+          pip install numpy
+          mkdir -p mod/forge/src/main/resources/pvpai
+          cd python
+          python export_policy.py ../latest.pt ../mod/forge/src/main/resources/pvpai/policy.bin
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: "8.8"
+      - name: Build the mod
+        run: cd mod && gradle build --stacktrace
+      - uses: actions/cache@v4
+        with:
+          path: e2e-server/server.jar
+          key: server-1.8.8
+      - name: The server and Grim
+        run: |
+          cd e2e-server
+          agent="kbtest-ci/1.0"
+          if [ ! -s server.jar ]; then
+            url=$(curl -fsSL -A "$agent" https://fill.papermc.io/v3/projects/paper/versions/1.8.8/builds | jq -r 'first(.[] | .downloads."server:default".url) // empty' || true)
+            if [ -n "$url" ]; then curl -fsSL -A "$agent" -o server.jar "$url" || rm -f server.jar; fi
+          fi
+          if [ ! -s server.jar ]; then
+            curl -fsSL -A "$agent" -o server.jar https://api.papermc.io/v2/projects/paper/versions/1.8.8/builds/445/downloads/paper-1.8.8-445.jar
+          fi
+          curl -fsSL -A "$agent" https://api.modrinth.com/v2/project/grimac/version > grim.json
+          jq -r '.[] | select(.loaders | any(. == "paper" or . == "spigot" or . == "bukkit")) | "\(.version_number) \(.version_type) \(.date_published) \(.files[0].filename)"' grim.json | head -n 5
+          url=$(jq -r 'first(.[] | select(.loaders | any(. == "paper" or . == "spigot" or . == "bukkit")) | (.files | (map(select(.primary))[0] // .[0]) | .url)) // empty' grim.json)
+          curl -fsSL -A "$agent" -o plugins/grim.jar "$url"
+          ls -l server.jar plugins
+      - name: What the client needs to run without a screen
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y -q xvfb x11-xserver-utils libgl1-mesa-dri libglx-mesa0 libxrandr2 libxcursor1 libxxf86vm1 libxi6 libxtst6 libxrender1
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      # Running the server takes the game's licence terms (eula.txt), as any test server does.
+      - name: The mod against a second player on that server
+        env:
+          SECONDS_AT_KEYS: ${{ inputs.seconds }}
+        run: |
+          cd mod/e2e
+          npm install --no-audit --no-fund
+          node grim.js ../../e2e-server .. "$SECONDS_AT_KEYS" > grim.log 2>&1 || true
+          grep -v '^\[server\]' grim.log | tail -n 500
+          grep -q 'the test ran as meant' grim.log
+      - name: The end of the client's log
+        if: always()
+        run: grep -v -e '^\s*at ' -e '^\s*\.\.\. [0-9]* more' mod/runclient.log | tail -n 80 || true
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: grim
+          path: |
+            mod/e2e/grim.log
+            mod/runclient.log
+            e2e-server/plugins/*/*.yml

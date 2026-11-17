@@ -13,11 +13,13 @@ import pvpai.core.Keys;
  */
 final class Hands {
     private final Minecraft mc;
+    private final Layout layout;
     /** The right button as the last tick left it. */
     private boolean useDown;
 
-    Hands(Minecraft mc) {
+    Hands(Minecraft mc, Layout layout) {
         this.mc = mc;
+        this.layout = layout;
     }
 
     /** What a mouse count turns the view by, for the sensitivity that is set. */
@@ -51,6 +53,10 @@ final class Hands {
                 slot = k.inv - Inv.SHUT;
                 shut = true;
             }
+            if (slot >= Inv.WINDOW_BAR) {
+                // A slot of the hotbar: the player's own for the agent's.
+                slot = Inv.WINDOW_BAR + layout.real[slot - Inv.WINDOW_BAR];
+            }
             if (slot != 0) {
                 // What the screen does for a shift click.
                 mc.playerController.windowClick(mc.thePlayer.openContainer.windowId, slot, 0, 1, mc.thePlayer);
@@ -68,7 +74,7 @@ final class Hands {
         key(gs.keyBindSprint, k.sprintKey);
         // A number key: the game takes it before the clicks of the same tick.
         if (k.slotKey > 0) {
-            KeyBinding.onTick(gs.keyBindsHotbar[k.slotKey - 1].getKeyCode());
+            KeyBinding.onTick(gs.keyBindsHotbar[layout.real[k.slotKey - 1]].getKeyCode());
         }
         // A left click is a press let go at once: the button is never left down.
         if (k.attack) {

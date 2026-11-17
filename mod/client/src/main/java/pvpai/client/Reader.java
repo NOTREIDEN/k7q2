@@ -1,6 +1,7 @@
 package pvpai.client;
 
 import java.lang.reflect.Field;
+import java.util.List;
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.entity.EntityOtherPlayerMP;
 import net.minecraft.client.entity.EntityPlayerSP;
@@ -47,8 +48,50 @@ final class Reader {
     private Reader() {
     }
 
-    /** What a stack is to an agent, an item of {@link Inv}. */
+    /**
+     * What a stack of the player's own is to an agent, an item of
+     * {@link Inv}. Of the potions, the ones an agent knows what to do
+     * with: a splash potion that heals is thrown and one of Speed is
+     * drunk. Any other potion, a golden apple and whatever else a duel of
+     * training does not have only takes up its slot.
+     */
     static int item(ItemStack s) {
+        if (s == null || s.stackSize <= 0) {
+            return Inv.EMPTY;
+        }
+        Item it = s.getItem();
+        if (it instanceof ItemSword) {
+            return Inv.SWORD;
+        }
+        if (it == Items.ender_pearl) {
+            return Inv.PEARL;
+        }
+        if (it == Items.potionitem) {
+            boolean splash = ItemPotion.isSplash(s.getMetadata());
+            List<PotionEffect> effects = Items.potionitem.getEffects(s);
+            if (effects != null) {
+                for (PotionEffect e : effects) {
+                    if (splash && e.getPotionID() == Potion.heal.id) {
+                        return Inv.POTION;
+                    }
+                    if (!splash && e.getPotionID() == Potion.moveSpeed.id) {
+                        return Inv.DRINK;
+                    }
+                }
+            }
+            return Inv.OTHER;
+        }
+        if (it == Items.glass_bottle) {
+            return Inv.BOTTLE;
+        }
+        if (it instanceof ItemFood && it != Items.golden_apple) {
+            return Inv.FOOD;
+        }
+        return Inv.OTHER;
+    }
+
+    /** What the other player is seen to hold: thrown, drunk or eaten, whatever it does. */
+    static int shown(ItemStack s) {
         if (s == null || s.stackSize <= 0) {
             return Inv.EMPTY;
         }
@@ -121,9 +164,9 @@ final class Reader {
     /**
      * The view of this moment. clickDelay is the click delay as the last
      * tick left it: by the time a mod is called in a tick the game has
-     * already counted it down.
+     * already counted it down. The hotbar is told in the agent's slots.
      */
-    static View read(Minecraft mc, EntityOtherPlayerMP o, int clickDelay) {
+    static View read(Minecraft mc, EntityOtherPlayerMP o, int clickDelay, Layout layout) {
         EntityPlayerSP p = mc.thePlayer;
         View v = new View();
         v.pos[0] = p.posX;
@@ -145,10 +188,11 @@ final class Reader {
         v.usingItem = p.isUsingItem();
         v.rightClickDelay = clickDelay;
         v.flagUsing = p.isEating();
-        v.held = p.inventory.currentItem;
-        for (int i = 0; i < 9; i++) {
-            ItemStack s = p.inventory.mainInventory[i];
+        v.held = layout.agent[p.inventory.currentItem];
+        for (int r = 0; r < 9; r++) {
+            ItemStack s = p.inventory.mainInventory[r];
             int kind = item(s);
+            int i = layout.agent[r];
             if (kind == Inv.POTION) {
                 v.potions |= 1 << i;
             } else if (kind == Inv.DRINK) {
@@ -159,6 +203,9 @@ final class Reader {
                 v.pearls = s.stackSize;
             } else if (kind == Inv.FOOD && i == Inv.SLOT_FOOD) {
                 v.steak = s.stackSize;
+            } else if (kind != Inv.EMPTY && i != Inv.SLOT_SWORD) {
+                // More pearls, more food, another sword or something else.
+                v.others |= 1 << i;
             }
         }
         v.food = p.getFoodStats().getFoodLevel();
@@ -196,7 +243,7 @@ final class Reader {
         v.oYaw = o.rotationYaw;
         v.oPitch = o.rotationPitch;
         v.oUsing = o.isEating();
-        v.oItem = item(o.getHeldItem());
+        v.oItem = shown(o.getHeldItem());
         v.oHealth = o.getHealth();
         v.oFx = o.getDataWatcher().getWatchableObjectInt(7) != 0;
 

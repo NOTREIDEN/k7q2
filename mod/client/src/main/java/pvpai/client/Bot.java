@@ -40,7 +40,12 @@ public final class Bot implements Wire.Tap {
     private final Agent agent;
     private final Book book;
     private final Hands hands;
+    private final Layout layout;
     private final Blocks blocks;
+    /** Whether the agent may hold the right button with its sword in hand. */
+    private boolean block = true;
+    /** What the keys of the tick that runs turned the view by, in degrees. */
+    private float turnedYaw, turnedPitch;
     private final Random rng = new Random();
     private final float[] obs = new float[Agent.OBS_DIM];
 
@@ -67,7 +72,8 @@ public final class Bot implements Wire.Tap {
         double[] feet = Reader.pos(mc.thePlayer);
         this.agent = chooser == null ? null : new Agent(pingOwn, pingOther, cps, Hands.mouseFactor(mc.gameSettings), feet);
         this.book = new Book(feet);
-        this.hands = new Hands(mc);
+        this.layout = Layout.of(mc.thePlayer.inventory);
+        this.hands = new Hands(mc, layout);
         this.blocks = Reader.blocks(mc);
         int d = Reader.clickDelay(mc);
         this.clickDelay = d > 0 ? d + 1 : 0;
@@ -75,6 +81,15 @@ public final class Bot implements Wire.Tap {
 
     public EntityOtherPlayerMP other() {
         return other;
+    }
+
+    Layout layout() {
+        return layout;
+    }
+
+    /** Whether the agent may block with its sword: a player may want to see it fight without. */
+    public void block(boolean allowed) {
+        block = allowed;
     }
 
     /** Whether both players are still there. */
@@ -172,7 +187,7 @@ public final class Bot implements Wire.Tap {
      */
     public Keys look(Keys handed) {
         EntityPlayerSP me = mc.thePlayer;
-        view = Reader.read(mc, other, clickDelay);
+        view = Reader.read(mc, other, clickDelay, layout);
         book.fill(view);
         eyeBefore = view.eye();
         saidBefore = Reader.said(me);
@@ -184,6 +199,9 @@ public final class Bot implements Wire.Tap {
             agent.beforeTick(view, blocks);
             agent.observe(view, blocks, duel, obs);
             action = chooser.choose(obs);
+            if (!block && action.length > 7) {
+                action[7] = 0;
+            }
             k = agent.keys(view, duel, action, rng);
         }
         pressed = k.copy();
@@ -192,7 +210,11 @@ public final class Bot implements Wire.Tap {
 
     /** Press the keys {@link #look} settled. */
     public void press() {
+        EntityPlayerSP me = mc.thePlayer;
+        float yaw = me.rotationYaw, pitch = me.rotationPitch;
         hands.press(pressed);
+        turnedYaw = me.rotationYaw - yaw;
+        turnedPitch = me.rotationPitch - pitch;
     }
 
     /** At the end of the tick: what it did goes to the counts. */
@@ -203,24 +225,35 @@ public final class Bot implements Wire.Tap {
         boolean swung = !screen && pressed.attack && !view.usingItem;
         boolean attacked = swung && me.getLastAttackerTime() == ticksBefore;
         int pearls = 0, potions = 0;
-        for (int i = 0; i < 9; i++) {
-            int kind = Reader.item(me.inventory.mainInventory[i]);
+        for (int r = 0; r < 9; r++) {
+            int kind = Reader.item(me.inventory.mainInventory[r]);
+            int i = layout.agent[r];
             if (kind == Inv.POTION) {
                 potions |= 1 << i;
             } else if (kind == Inv.PEARL && i == Inv.SLOT_PEARL) {
-                pearls = me.inventory.mainInventory[i].stackSize;
+                pearls = me.inventory.mainInventory[r].stackSize;
             }
         }
         boolean threwPearl = !screen && pearls < view.pearls;
         boolean threwPotion = !screen && (view.potions & ~potions) != 0;
         book.ticked(swung, attacked, threwPearl, threwPotion, eyeBefore, saidBefore, saidYawBefore, saidPitchBefore);
         if (agent != null) {
-            boolean consuming = me.isUsingItem() && me.inventory.currentItem != Inv.SLOT_SWORD;
-            int holds = Reader.item(other.getHeldItem());
+            boolean consuming = me.isUsingItem() && layout.agent[me.inventory.currentItem] != Inv.SLOT_SWORD;
+            int holds = Reader.shown(other.getHeldItem());
             boolean otherConsuming = other.isEating() && (holds == Inv.DRINK || holds == Inv.FOOD);
             agent.ticked(pressed, duel, Reader.pos(me), consuming, otherConsuming, threwPearl, threwPotion);
         }
         clickDelay = Reader.clickDelay(mc);
+        // The game draws the view between where it was a tick ago and where
+        // it is. The mouse of a hand turns it a little on every frame; the
+        // agent's turns it once a tick, before the game reads it, which on
+        // a screen is twenty jumps a second. So the turn of this tick is
+        // left to be drawn over the frames until the next one: what the
+        // game goes by, the view itself, is where the keys put it.
+        if (turnedYaw != 0.0F || turnedPitch != 0.0F) {
+            me.prevRotationYaw = me.rotationYaw - turnedYaw;
+            me.prevRotationPitch = me.rotationPitch - turnedPitch;
+        }
     }
 
     /** Lets every key go, when the agent leaves the keys. */

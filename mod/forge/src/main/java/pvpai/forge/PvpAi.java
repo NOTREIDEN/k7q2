@@ -37,6 +37,7 @@ public final class PvpAi {
     private Session session;
     private boolean keyWasDown;
     private final SelfTest selfTest = Boolean.getBoolean("pvpai.selftest") ? new SelfTest(this) : null;
+    private final ServerTest serverTest = System.getProperty("pvpai.servertest") != null ? new ServerTest(this, System.getProperty("pvpai.servertest")) : null;
 
     @Mod.EventHandler
     public void preInit(FMLPreInitializationEvent e) {
@@ -114,6 +115,9 @@ public final class PvpAi {
             if (e.phase == TickEvent.Phase.START) {
                 if (selfTest != null) {
                     selfTest.step(mc);
+                }
+                if (serverTest != null) {
+                    serverTest.step(mc);
                 }
                 if (pressed(mc)) {
                     flip(mc);

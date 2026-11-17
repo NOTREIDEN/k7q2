@@ -89,10 +89,10 @@ final class Scout {
      * one's own while the other holds something else, against the armour
      * this one wears.
      */
-    static float hitHealth(EntityPlayerSP me, EntityOtherPlayerMP other) {
+    static float hitHealth(EntityPlayerSP me, EntityOtherPlayerMP other, Layout layout) {
         ItemStack sword = other.getHeldItem();
-        if (Reader.item(sword) != Inv.SWORD) {
-            sword = me.inventory.mainInventory[Inv.SLOT_SWORD];
+        if (Reader.shown(sword) != Inv.SWORD) {
+            sword = me.inventory.mainInventory[layout.real[Inv.SLOT_SWORD]];
         }
         float damage = 1.0F;
         if (sword != null) {

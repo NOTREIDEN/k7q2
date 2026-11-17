@@ -87,6 +87,10 @@ public final class Rig {
     static final String KB = System.getProperty("duel.kb", "servidor");
     static final int ROUNDS = Integer.getInteger("duel.rounds", 3), SECONDS = Integer.getInteger("duel.seconds", 90);
     static final int SPEED = Integer.getInteger("duel.speed", 1), HOST_SPEED = Integer.getInteger("duel.hostspeed", 1);
+    /** The joiner's kit: "" as the agents are trained, "otro" the same things in other slots, as a player may keep them. */
+    static final String LAYOUT = System.getProperty("duel.layout", "");
+    /** Seconds the Speed II of the kit lasts and the food a round starts with. */
+    static final int SPEED_SECONDS = Integer.getInteger("duel.speedsecs", 60), FOOD = Integer.getInteger("duel.food", 20);
     /** Half the side of the arena and the height of its floor, as in training. */
     static final int HALF = 24, FLOOR = 4;
     /** Server ticks between two pearls of a player. */
@@ -492,7 +496,7 @@ public final class Rig {
                         double x = cx + s * d * Math.cos(ang), z = cz + s * d * Math.sin(ang);
                         double tx = cx - s * d * Math.cos(ang), tz = cz - s * d * Math.sin(ang);
                         float yaw = (float) Math.toDegrees(Math.atan2(-(tx - x), tz - z));
-                        kit(p[i], i == 0 ? SPEED : HOST_SPEED);
+                        kit(p[i], i == 0 ? SPEED : HOST_SPEED, i == 0 && LAYOUT.equals("otro"));
                         p[i].playerNetServerHandler.setPlayerLocation(x, FLOOR, z, yaw, 0.0F);
                     }
                     phase = 1;
@@ -507,6 +511,10 @@ public final class Rig {
                     phaseAt = stick;
                 }
             } else if (phase == 2) {
+                // As long as it lives: a death empties the inventory.
+                for (int i = 0; i < 2; i++) {
+                    if (p[i].isEntityAlive()) lastLeft[i] = left(p[i]);
+                }
                 String end = null;
                 if (!alive) {
                     int won = p[0].isEntityAlive() ? 0 : 1;
@@ -522,6 +530,9 @@ public final class Rig {
                 if (end != null) {
                     tell(server, "Fin de la ronda " + round + ": " + end);
                     say("round " + round + ": " + end + " after " + since / 20 + " s; hits changed " + replaced);
+                    for (int i = 0; i < 2; i++) {
+                        say("  " + p[i].getName() + " is left with " + lastLeft[i]);
+                    }
                     Scoreboard sb = server.worldServerForDimension(0).getScoreboard();
                     ScoreObjective o = sb.getObjective("duelo");
                     for (int i = 0; i < 2; i++) {
@@ -548,15 +559,33 @@ public final class Rig {
         }
     }
 
+    static final String[] lastLeft = new String[2];
+
+    /** What a player has at the end of a round, to tell what it ate, drank and brought down. */
+    static String left(EntityPlayerMP p) {
+        int[] bar = new int[4], rows = new int[4];
+        for (int i = 0; i < 36; i++) {
+            ItemStack s = p.inventory.mainInventory[i];
+            if (s == null) continue;
+            int[] at = i < 9 ? bar : rows;
+            if (s.getItem() == Items.potionitem) at[s.getMetadata() == HEAL_II ? 0 : s.getMetadata() == SPEED_II ? 1 : 3] += 1;
+            else if (s.getItem() == Items.cooked_beef) at[2] += s.stackSize;
+            else if (s.getItem() == Items.ender_pearl) at[3] += s.stackSize * 100;
+        }
+        PotionEffect sp = p.getActivePotionEffect(Potion.moveSpeed);
+        return String.format(Locale.ROOT, "food %d, Speed for %d s, hotbar: %d healing, %d of Speed, %d steaks, %d pearls; inventory: %d healing, %d of Speed",
+            p.getFoodStats().getFoodLevel(), sp == null ? 0 : sp.getDuration() / 20, bar[0], bar[1], bar[2], bar[3] / 100, rows[0], rows[1]);
+    }
+
     static void unbreakable(ItemStack s) {
         if (s.getTagCompound() == null) s.setTagCompound(new NBTTagCompound());
         s.getTagCompound().setBoolean("Unbreakable", true);
     }
 
     /** The kit the agents are trained with: sword first, pearls second, potions, steak last. */
-    static void kit(EntityPlayerMP p, int speed) {
+    static void kit(EntityPlayerMP p, int speed, boolean other) {
         p.clearActivePotions();
-        if (speed >= 0) p.addPotionEffect(new PotionEffect(Potion.moveSpeed.id, speed == 1 ? 20 * 60 : 10000000, speed));
+        if (speed >= 0) p.addPotionEffect(new PotionEffect(Potion.moveSpeed.id, speed == 1 ? 20 * SPEED_SECONDS : 10000000, speed));
         p.extinguish();
         for (int i = 0; i < 36; i++) p.inventory.mainInventory[i] = null;
         ItemStack sword = new ItemStack(Items.diamond_sword);
@@ -578,9 +607,24 @@ public final class Rig {
         for (int i = 9; i < 21; i++) p.inventory.mainInventory[i] = new ItemStack(Items.potionitem, 1, HEAL_II);
         p.inventory.mainInventory[21] = new ItemStack(Items.potionitem, 1, SPEED_II);
         p.inventory.currentItem = 0;
+        if (other) {
+            // The sword third, the pearls last, the steak before them, golden apples and a
+            // potion the agent has no use for in the way, and the Speed in the inventory.
+            ItemStack[] m = p.inventory.mainInventory;
+            ItemStack pearls = m[1], steak = m[8], drink = m[7];
+            m[0] = new ItemStack(Items.potionitem, 1, HEAL_II);
+            m[1] = new ItemStack(Items.potionitem, 1, HEAL_II);
+            m[2] = sword;
+            m[5] = new ItemStack(Items.golden_apple, 8);
+            m[7] = steak;
+            m[8] = pearls;
+            m[22] = drink;
+            m[23] = new ItemStack(Items.potionitem, 1, 8227);
+            p.inventory.currentItem = 2;
+        }
         p.setHealth(p.getMaxHealth());
-        p.getFoodStats().setFoodLevel(20);
-        set(p.getFoodStats(), FoodStats.class, "foodSaturationLevel", Float.valueOf(5.0F));
+        p.getFoodStats().setFoodLevel(FOOD);
+        set(p.getFoodStats(), FoodStats.class, "foodSaturationLevel", Float.valueOf(FOOD >= 20 ? 5.0F : 0.0F));
         set(p.getFoodStats(), FoodStats.class, "foodExhaustionLevel", Float.valueOf(0.0F));
         p.maxHurtResistantTime = profile.hitDelay;
         p.hurtResistantTime = 0;
