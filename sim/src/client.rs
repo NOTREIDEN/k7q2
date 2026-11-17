@@ -133,7 +133,25 @@ pub struct ClientThrown {
     /// Bookkeeping for observations: it appeared where this client had
     /// just thrown one from, so it is taken to be its own.
     pub mine: bool,
+    /// Bookkeeping for observations: the ticks the server's had flown when
+    /// it moved as this copy does now, and how far behind it this copy is.
+    /// The server says where it was thrown from and how fast, and at the
+    /// end of that tick how it moves by then, but not where it is by then:
+    /// the copy has the motion of a tick later and stays the first step
+    /// of the flight behind. Every ten ticks the server sends how far it
+    /// has moved, counted from where it was after that first step, which
+    /// the copy adds to where it began: still a step behind (`first`, in
+    /// the 32nds of a block positions come in). Those are rounded down:
+    /// what that cuts off is in `behind` too, exactly for a throw of this
+    /// client's own, whose place it knows, and as half a 32nd for the
+    /// rest.
+    pub air: i32,
+    pub behind: V3,
+    pub first: V3,
 }
+
+/// Half of the step positions are sent in.
+const HALF_STEP: f64 = 1.0 / 64.0;
 
 impl ClientThrown {
     /// `Entity.setPositionAndRotation2`: put it there, and on top of any
@@ -162,18 +180,29 @@ impl ClientThrown {
         }
         let sp = self.server_pos;
         self.set_position2(world, [sp[0] as f64 / 32.0, sp[1] as f64 / 32.0, sp[2] as f64 / 32.0]);
+        for a in 0..3 {
+            self.behind[a] = sp[a] as f64 / 32.0 + self.first[a] + HALF_STEP - self.pos[a];
+        }
     }
 
     /// `NetHandlerPlayClient.handleEntityTeleport`.
     fn teleport(&mut self, world: &World, sp: [i32; 3]) {
         self.server_pos = sp;
         let d = [sp[0] as f64 / 32.0, sp[1] as f64 / 32.0, sp[2] as f64 / 32.0];
+        self.first = [0.0; 3];
+        self.behind = [HALF_STEP; 3];
         if (self.pos[0] - d[0]).abs() < 0.03125 && (self.pos[1] - d[1]).abs() < 0.015625 && (self.pos[2] - d[2]).abs() < 0.03125 {
             let p = self.pos;
             self.set_position2(world, p);
         } else {
             self.set_position2(world, d);
         }
+    }
+
+    /// Where the server had it when it moved as this copy does now.
+    #[inline]
+    pub fn server_side(&self) -> V3 {
+        [self.pos[0] + self.behind[0], self.pos[1] + self.behind[1], self.pos[2] + self.behind[2]]
     }
 
     /// `EntityThrowable.onUpdate` as far as it matters on a client. Returns
@@ -190,6 +219,7 @@ impl ClientThrown {
         }
         self.motion[1] -= f3;
         self.age += 1;
+        self.air += 1;
         alive
     }
 }
@@ -419,6 +449,9 @@ pub struct LocalPlayer {
     /// shown up yet.
     pub ticks_since_throw: i32,
     pub throw_eye: V3,
+    /// Bookkeeping for observations: where the server has what this
+    /// client threw last come from, which it sends back less exactly.
+    pub throw_from: V3,
     pub throws_pending: u8,
     pub potions_pending: u8,
     /// Potions of the other player this client has seen appear.
@@ -474,6 +507,7 @@ impl LocalPlayer {
             ticks_since_moved: 1000,
             ticks_since_throw: 1000,
             throw_eye: pos,
+            throw_from: pos,
             throws_pending: 0,
             potions_pending: 0,
             potions_seen: 0,
@@ -703,9 +737,10 @@ pub fn thrown_flight(world: &World, kind: Kind, mut pos: V3, mut m: V3) -> (V3, 
     (pos, 100)
 }
 
-/// `thrown_flight` for a pearl or potion this client sees.
+/// `thrown_flight` for a pearl or potion this client sees, from where the
+/// server has it.
 pub fn pearl_landing(world: &World, e: &ClientThrown) -> (V3, i32) {
-    thrown_flight(world, e.kind, e.pos, e.motion)
+    thrown_flight(world, e.kind, e.server_side(), e.motion)
 }
 
 /// `thrown_flight` for what a player standing at `feet` with this view
@@ -1034,13 +1069,32 @@ impl Client {
                     } else if kind == Kind::Potion {
                         lp.potions_seen = lp.potions_seen.saturating_add(1);
                     }
-                    self.thrown.push(ClientThrown { id, kind, pos, motion: [0.0; 3], server_pos: p, age: 0, mine });
+                    let mut behind = [HALF_STEP; 3];
+                    if mine {
+                        let cut = [lp.throw_from[0] - pos[0], lp.throw_from[1] - pos[1], lp.throw_from[2] - pos[2]];
+                        if cut.iter().all(|c| (0.0..=2.0 * HALF_STEP).contains(c)) {
+                            behind = cut;
+                        }
+                    }
+                    self.thrown.push(ClientThrown { id, kind, pos, motion: [0.0; 3], server_pos: p, age: 0, mine, air: 0, behind, first: [0.0; 3] });
                 }
                 ThrownEv::Meta => {}
                 ev => {
                     if let Some(e) = self.thrown.iter_mut().find(|e| e.id == id) {
                         match ev {
-                            ThrownEv::Velocity(v) => e.motion = [v[0] as f64 / 8000.0, v[1] as f64 / 8000.0, v[2] as f64 / 8000.0],
+                            ThrownEv::Velocity(v) => {
+                                if e.age == 0 && e.air == 0 && e.motion != [0.0; 3] {
+                                    // Told twice before it moved here: the
+                                    // server's has made the step in between.
+                                    e.air = 1;
+                                    for a in 0..3 {
+                                        let (from, was) = (e.pos[a] + e.behind[a], e.server_pos[a] as f64 / 32.0);
+                                        e.first[a] = ((from + e.motion[a]) * 32.0).floor() / 32.0 - was;
+                                        e.behind[a] += e.motion[a];
+                                    }
+                                }
+                                e.motion = [v[0] as f64 / 8000.0, v[1] as f64 / 8000.0, v[2] as f64 / 8000.0];
+                            }
                             ThrownEv::RelMove { d, .. } | ThrownEv::LookMove { d, .. } => e.rel_move(world, d),
                             ThrownEv::Look { .. } => e.rel_move(world, [0, 0, 0]),
                             ThrownEv::Teleport { p, .. } => e.teleport(world, p),
@@ -1206,6 +1260,7 @@ impl Client {
         if t.threw || t.threw_potion {
             lp.ticks_since_throw = 0;
             lp.throw_eye = lp.eye();
+            lp.throw_from = crate::server::throw_heading(Kind::Potion, lp.last_reported, lp.last_yaw, lp.last_pitch).0;
             if t.threw {
                 lp.throws_pending = lp.throws_pending.saturating_add(1);
             }

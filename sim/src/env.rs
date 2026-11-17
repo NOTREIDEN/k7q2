@@ -9,7 +9,7 @@
 //! the reward that agent earned since its previous action.
 use crate::aabb::{dist, dist_sq, Aabb, V3};
 use crate::bot::{self, BotParams, BotState};
-use crate::client::{pearl_landing, pearl_preview, ClientCfg, Edge, Input, TickOut, INV_SHUT, MAX_BACKTRACK};
+use crate::client::{pearl_landing, pearl_preview, ClientCfg, ClientThrown, Edge, Input, TickOut, INV_SHUT, MAX_BACKTRACK};
 use crate::mth::{self, Rng};
 use crate::net::{potion_mask, refill_click, shift_click, Item, Kind, Rows, SLOT_FOOD, SLOT_PEARL, SLOT_SWORD, USE_TICKS, WINDOW_BAR};
 use crate::server::{
@@ -55,6 +55,8 @@ pub const MISS_POINTS: f32 = 2.0;
 /// How many ticks of looking away `w_pot_time` counts before a potion is
 /// thrown, and as many after it.
 pub const POT_TIME_TICKS: i32 = 10;
+/// Own ticks a player's position is remembered for.
+const TRAIL: usize = 16;
 pub const PRIV_DIM: usize = 71;
 pub const STATS_DIM: usize = 86;
 /// Floats per player and in total written by `Env::write_view`.
@@ -592,12 +594,12 @@ fn pace(motion: V3, on_ground: bool) -> [f64; 2] {
 }
 
 /// What a potion at `pos` moving by `m` per tick and `age` ticks old will
-/// do if both players keep moving along the ground as they do now: where it
-/// breaks (its position at the start of that tick, from which its reach is
-/// measured), after how many ticks, and the health it offers each player.
-/// `feet` and `vel` are the two players, `thrower` the index of the one who
-/// threw it, whom it passes through for its first ticks.
-fn potion_outcome(world: &World, mut pos: V3, mut m: V3, mut age: i32, thrower: usize, feet: [V3; 2], vel: [[f64; 2]; 2]) -> (V3, i32, [f32; 2]) {
+/// do: where it breaks (its position at the start of that tick, from which
+/// its reach is measured), after how many ticks, and the health it offers
+/// each player. `feet(j, t)` is where player `j` stands on the server on
+/// the potion's tick `t` from now, `thrower` the index of the one who threw
+/// it, whom it passes through for its first ticks.
+fn potion_outcome(world: &World, mut pos: V3, mut m: V3, mut age: i32, thrower: usize, feet: impl Fn(usize, i32) -> V3) -> (V3, i32, [f32; 2]) {
     let g = Kind::Potion.gravity() as f64;
     for t in 0..60 {
         age += 1;
@@ -610,7 +612,7 @@ fn potion_outcome(world: &World, mut pos: V3, mut m: V3, mut age: i32, thrower: 
                 broke = true;
             }
         }
-        let at = |j: usize| [feet[j][0] + vel[j][0] * t as f64, feet[j][1], feet[j][2] + vel[j][1] * t as f64];
+        let at = |j: usize| feet(j, t);
         let mut direct = None;
         let mut best = 0.0;
         for j in 0..2 {
@@ -921,6 +923,19 @@ pub struct Env {
     pot_since: [i32; 2],
     pot_back: [bool; 2],
     off_run: [i32; 2],
+    /// Where each player stood after each of its last ticks, newest first,
+    /// and the ticks from a click of its own to the first it sees of what
+    /// the server made of it, counted on its last potion and guessed from
+    /// its ping before that. The server has a player where it stood that
+    /// long ago, which is where a potion in flight will find it.
+    trail: [[V3; TRAIL]; 2],
+    lag: [i32; 2],
+    /// For each player, the opponent's potion and its own that it sees in
+    /// flight and that break on their next tick: which one, where, and the
+    /// health it gives this player and the other.
+    fate: [[Option<(u32, V3, [f32; 2])>; 2]; 2],
+    /// The same for pearls: which one and where it lands.
+    pearl_fate: [[Option<(u32, V3)>; 2]; 2],
     /// The drink (1) or the meal (2) each player has its right button down
     /// for, and what it asked of the rest of the hotbar on its last tick.
     consume: [u8; 2],
@@ -1277,6 +1292,10 @@ impl Env {
             lesson,
             pot_back: [true; 2],
             off_run: [0; 2],
+            trail: [[[0.0; 3]; TRAIL]; 2],
+            lag: [1; 2],
+            fate: [[None; 2]; 2],
+            pearl_fate: [[None; 2]; 2],
             over: false,
         };
         e.begin();
@@ -1309,6 +1328,12 @@ impl Env {
         self.was_open = [false; 2];
         self.pot_back = [true; 2];
         self.off_run = [0; 2];
+        for a in 0..2 {
+            self.trail[a] = [self.m.c[a].lp.l.body.pos; TRAIL];
+            self.lag[a] = (self.ping_ms[a] / 50.0).floor() as i32 + 1;
+        }
+        self.fate = [[None; 2]; 2];
+        self.pearl_fate = [[None; 2]; 2];
         self.over = false;
         let own = self.rng.range(p.cps_min, p.cps_max.max(p.cps_min));
         let (lo, hi) = if p.opp_cps_min < 0.0 { (p.cps_min, p.cps_max) } else { (p.opp_cps_min, p.opp_cps_max) };
@@ -1868,6 +1893,8 @@ impl Env {
         if off {
             self.ep.off[id] += 1.0;
         }
+        self.trail[id].copy_within(0..TRAIL - 1, 1);
+        self.trail[id][0] = self.m.c[id].lp.l.body.pos;
         if self.pot_since[id] < 1000 {
             self.pot_since[id] += 1;
         }
@@ -1984,6 +2011,7 @@ impl Env {
                 self.finish_episode(2);
             }
         }
+        self.note_fates(self.pending);
         self.pending
     }
 
@@ -2138,6 +2166,96 @@ impl Env {
         o[g + 23] = s.cfg.hit_health();
     }
 
+    /// Where the two players are on the server while a potion flies there,
+    /// as client `id` can tell: the first of the two is that client's
+    /// player and the second its opponent, on the potion's tick `t` from
+    /// now. Of the opponent the client has what the server last sent, and
+    /// takes it to go on as it does, `on` ticks further on the potion's
+    /// next tick. Of itself it knows more than the server: its moves take
+    /// `lag` ticks to get there and for what the server makes of them to
+    /// come back, so what it sees of a potion happened around where it
+    /// stood that long ago. `back` is how many ticks ago it stood where
+    /// the server has it on the potion's next tick; from now on it keeps
+    /// moving as it does, or stops if not `moving`.
+    fn potion_feet(&self, id: usize, back: i32, on: i32, moving: bool) -> impl Fn(usize, i32) -> V3 + '_ {
+        let c = &self.m.c[id];
+        let (b, rp) = (&c.lp.l.body, &c.rp);
+        let seen = [rp.pos[0] - rp.prev_pos[0], rp.pos[2] - rp.prev_pos[2]];
+        let seen = if seen[0].hypot(seen[1]) < 1.5 { seen } else { [0.0; 2] };
+        let own = pace(b.motion, b.on_ground);
+        let there = if rp.increments > 0 { rp.target } else { rp.pos };
+        let (here, trail) = (b.pos, &self.trail[id]);
+        move |j: usize, t: i32| {
+            if j == 1 {
+                let n = (on + t) as f64;
+                return [there[0] + seen[0] * n, there[1], there[2] + seen[1] * n];
+            }
+            let k = back - t;
+            if k >= 0 {
+                trail[(k as usize).min(TRAIL - 1)]
+            } else if moving {
+                [here[0] - own[0] * k as f64, here[1], here[2] - own[1] * k as f64]
+            } else {
+                here
+            }
+        }
+    }
+
+    /// `potion_outcome` for a potion client `id` sees in flight, with that
+    /// client's player first. The copy has made `age` ticks of its own and
+    /// moves as the server's did after `air`: the server made that tick
+    /// `age - 1` ticks after the one this client first saw the potion in,
+    /// so on the tick after it the player was where it stood
+    /// `lag + age - 1 - air` ticks ago, and the opponent is
+    /// `air - age + 1` ticks on from what was last seen of it. The copy
+    /// flies on through whatever the server's broke on until the server
+    /// says it is gone, so what was foreseen for the tick before it broke
+    /// is kept (`fate`).
+    fn potion_seen(&self, id: usize, e: &ClientThrown) -> (V3, i32, [f32; 2]) {
+        if let Some((known, at, heal)) = self.fate[id][e.mine as usize] {
+            if known == e.id {
+                return (at, 0, heal);
+            }
+        }
+        let thrower = if e.mine { 0 } else { 1 };
+        let feet = self.potion_feet(id, self.lag[id] + e.age - 1 - e.air, e.air - e.age + 1, true);
+        potion_outcome(&self.m.world, e.server_side(), e.motion, e.air, thrower, feet)
+    }
+
+    /// `pearl_landing` for a pearl client `id` sees in flight, kept from
+    /// the tick before it lands as for a potion.
+    fn pearl_seen(&self, id: usize, e: &ClientThrown) -> (V3, i32) {
+        match self.pearl_fate[id][e.mine as usize] {
+            Some((known, at)) if known == e.id => (at, 0),
+            _ => pearl_landing(&self.m.world, e),
+        }
+    }
+
+    /// Called when the packets of client `id` are in and its tick is to
+    /// come, which is when it is told what it sees. Its own potion, seen
+    /// for the first time: the ticks since it threw it are how far behind
+    /// the server's answers are. And what it foresees for the potions and
+    /// pearls that break on their next tick is kept.
+    fn note_fates(&mut self, id: usize) {
+        let c = &self.m.c[id];
+        if c.lp.potions_pending == 0 && self.pot_since[id] < TRAIL as i32 && c.thrown.iter().any(|e| e.mine && e.kind == Kind::Potion && e.age == 0) {
+            self.lag[id] = self.pot_since[id].max(1);
+        }
+        for mine in [false, true] {
+            let newest = |kind: Kind| self.m.c[id].thrown.iter().rev().find(|e| e.mine == mine && e.kind == kind);
+            let fate = newest(Kind::Potion).and_then(|e| {
+                let (at, ticks, heal) = self.potion_seen(id, e);
+                (ticks == 0).then_some((e.id, at, heal))
+            });
+            let pearl = newest(Kind::Pearl).and_then(|e| {
+                let (at, ticks) = self.pearl_seen(id, e);
+                (ticks == 0).then_some((e.id, at))
+            });
+            self.fate[id][mine as usize] = fate;
+            self.pearl_fate[id][mine as usize] = pearl;
+        }
+    }
+
     /// What agent `id` can know from its own client.
     pub fn write_obs(&self, id: usize, o: &mut [f32]) {
         let p = &self.params;
@@ -2262,7 +2380,7 @@ impl Env {
             *v = 0.0;
         }
         if let Some(e) = c.thrown.iter().rev().find(|e| e.mine && e.kind == Kind::Pearl) {
-            let (land, ticks) = pearl_landing(&self.m.world, e);
+            let (land, ticks) = self.pearl_seen(id, e);
             let (lf, lr) = local(yaw, land[0] - b.pos[0], land[2] - b.pos[2]);
             o[77] = 1.0;
             o[78] = clip(lf / 8.0, 4.0);
@@ -2275,7 +2393,7 @@ impl Env {
         // the opponent, in how many ticks, and how far the view has to
         // turn to face that spot.
         if let Some(e) = c.thrown.iter().rev().find(|e| !e.mine && e.kind == Kind::Pearl) {
-            let (land, ticks) = pearl_landing(&self.m.world, e);
+            let (land, ticks) = self.pearl_seen(id, e);
             let (pf, pr) = local(yaw, e.pos[0] - b.pos[0], e.pos[2] - b.pos[2]);
             let (lf, lr) = local(yaw, land[0] - b.pos[0], land[2] - b.pos[2]);
             o[83] = 1.0;
@@ -2322,16 +2440,12 @@ impl Env {
         o[105] = self.asked_potion[id] as u8 as f32;
         o[106] = (rp.item == Item::Potion) as u8 as f32;
         o[107] = (lp.potions_seen.min(14)) as f32 / 7.0;
-        // Where each player goes if it keeps moving as it does now.
-        let feet = [b.pos, rp.pos];
-        let seen = if vel[0].hypot(vel[2]) < 1.5 { [vel[0], vel[2]] } else { [0.0; 2] };
-        let vel = [pace(b.motion, b.on_ground), seen];
         let world = &self.m.world;
         // Its own newest potion in flight: where it will break (relative to
         // where this player stands now), in how many ticks, and the health
         // it will then give this player and the opponent.
         if let Some(e) = c.thrown.iter().rev().find(|e| e.mine && e.kind == Kind::Potion) {
-            let (at, ticks, heal) = potion_outcome(world, e.pos, e.motion, e.age + 2, 0, feet, vel);
+            let (at, ticks, heal) = self.potion_seen(id, e);
             let (lf, lr) = local(yaw, at[0] - b.pos[0], at[2] - b.pos[2]);
             o[108] = 1.0;
             o[109] = clip(lf / 4.0, 4.0);
@@ -2343,7 +2457,7 @@ impl Env {
         }
         // The opponent's newest potion in flight, the same way.
         if let Some(e) = c.thrown.iter().rev().find(|e| !e.mine && e.kind == Kind::Potion) {
-            let (at, ticks, heal) = potion_outcome(world, e.pos, e.motion, e.age + 2, 1, feet, vel);
+            let (at, ticks, heal) = self.potion_seen(id, e);
             let (lf, lr) = local(yaw, at[0] - b.pos[0], at[2] - b.pos[2]);
             o[115] = 1.0;
             o[116] = clip(lf / 4.0, 4.0);
@@ -2361,8 +2475,13 @@ impl Env {
             let (from, dir) = throw_heading(Kind::Potion, b.pos, lp.l.yaw, lp.l.pitch);
             let v = Kind::Potion.speed() as f64;
             let m = [dir[0] * v, dir[1] * v, dir[2] * v];
-            let (at, ticks, heal) = potion_outcome(world, from, m, 0, 0, feet, vel);
-            let still = potion_outcome(world, from, m, 0, 0, feet, [[0.0; 2], vel[1]]).2;
+            // The server takes the throw from where this player stands
+            // now and has it a step further on the potion's first tick;
+            // the opponent is by then as much further as the throw takes
+            // to get there and what was last seen of it took to get here.
+            let lag = self.lag[id];
+            let (at, ticks, heal) = potion_outcome(world, from, m, 0, 0, self.potion_feet(id, -1, lag + 1, true));
+            let still = potion_outcome(world, from, m, 0, 0, self.potion_feet(id, -1, lag + 1, false)).2;
             let (lf, lr) = local(yaw, at[0] - b.pos[0], at[2] - b.pos[2]);
             o[122] = clip(lf / 4.0, 4.0);
             o[123] = clip(lr / 4.0, 4.0);
