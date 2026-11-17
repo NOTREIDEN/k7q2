@@ -291,13 +291,15 @@ fn pearl_target(c: &Client, world: &World, p: &BotParams, st: &BotState, hdist: 
     }
     let mut kind = if counter { 2 } else { 1 };
     if !counter {
-        // The opponent has a potion in hand or in the air, or is hurt and
-        // running off: a pearl now puts the bot on it while it heals, and
-        // the hit that follows knocks it away from where its potion breaks.
+        // The opponent has a potion in hand or in the air, or is hurt
+        // enough to heal itself any moment: a pearl now puts the bot on it
+        // while it does, and the hit that follows knocks it away from
+        // where its potion breaks. A potion is in the air for a quarter of
+        // a second, too short to answer, so the bot does not wait to see
+        // one.
         let potting = c.rp.item == Item::Potion || c.thrown.iter().any(|e| e.kind == Kind::Potion && !e.mine);
-        let away = st.seen_vel[0] * dir[0] + st.seen_vel[1] * dir[1];
-        let fleeing = c.rp.health <= 9.0 && hdist > 3.5 && away > 0.1;
-        if hdist > 2.8 && ((potting && rng.chance(0.6 * p.pearl_attack)) || (fleeing && rng.chance(0.1 * p.pearl_attack))) {
+        let low = c.rp.health <= 10.0;
+        if hdist > 2.8 && ((potting && rng.chance(0.6 * p.pearl_attack)) || (low && rng.chance(0.25 * p.pearl_attack))) {
             kind = 4;
         } else {
             // Towards the opponent: often from far away, now and then in a
