@@ -293,9 +293,10 @@ public final class Rig {
             // A number key: the game takes it before the clicks of the same tick.
             if (in[8] > 0) KeyBinding.onTick(gs.keyBindsHotbar[in[8] - 1].getKeyCode());
             if (in[4] != 0) KeyBinding.onTick(gs.keyBindAttack.getKeyCode());
-            // The right button: a press when it goes down, then held.
+            // The right button: a press when it goes down, then held. 2 is
+            // the button let go and pressed again since the last tick.
             boolean use = in[7] != 0;
-            if (use && !useDown) KeyBinding.onTick(gs.keyBindUseItem.getKeyCode());
+            if (use && (!useDown || in[7] == 2)) KeyBinding.onTick(gs.keyBindUseItem.getKeyCode());
             key(gs.keyBindUseItem, use);
             useDown = use;
             if (in[5] != 0 || in[6] != 0) {

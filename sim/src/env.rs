@@ -397,6 +397,7 @@ pub fn decode_action(a: &[i32]) -> Input {
         dx: YAW_BINS[pick(a[5], 27)],
         dy: PITCH_BINS[pick(a[6], 29)],
         use_item: a.len() > 7 && a[7] != 0,
+        use_again: false,
         slot_key: 0,
     }
 }
@@ -1131,16 +1132,26 @@ impl Env {
         lp.pearls > 0 && self.pearl_wait[id] <= 0 && self.pearl_stage[id] == 0 && self.potion_stage[id] == 0 && lp.held == SLOT_SWORD
     }
 
-    /// Can player `id` throw a potion now?
+    /// Can player `id` throw a potion now? With the sword in hand, or on
+    /// the tick after another potion.
     fn potion_ready(&self, id: usize) -> bool {
         let lp = &self.m.c[id].lp;
-        lp.potions != 0 && self.potion_stage[id] == 0 && self.pearl_stage[id] == 0 && lp.held == SLOT_SWORD
+        lp.potions != 0
+            && self.pearl_stage[id] == 0
+            && match self.potion_stage[id] {
+                0 => lp.held == SLOT_SWORD,
+                2 => true,
+                _ => false,
+            }
     }
 
     /// The key presses of a potion throw, as `pearl_keys`: the number key
     /// of the first slot that holds a potion and a right click, which
     /// throws along the view the server already has, then the number key of
-    /// the sword. It comes before the pearl when both are asked for.
+    /// the sword. Asked for again on the tick after a throw, it takes the
+    /// next potion in hand and clicks again at once, the button let go and
+    /// pressed between the two ticks, and the sword comes back after the
+    /// last one. It comes before the pearl when both are asked for.
     fn potion_keys(&mut self, id: usize, want: bool, inp: &mut Input) {
         self.asked_potion[id] = want;
         match self.potion_stage[id] {
@@ -1163,9 +1174,16 @@ impl Env {
                 self.potion_stage[id] = 2;
             }
             _ => {
-                inp.slot_key = SLOT_SWORD + 1;
-                inp.use_item = false;
-                self.potion_stage[id] = 0;
+                if want && self.potion_ready(id) {
+                    inp.slot_key = self.m.c[id].lp.potions.trailing_zeros() as u8 + 1;
+                    inp.attack = false;
+                    inp.use_item = true;
+                    inp.use_again = self.prev_inp[id].use_item;
+                } else {
+                    inp.slot_key = SLOT_SWORD + 1;
+                    inp.use_item = false;
+                    self.potion_stage[id] = 0;
+                }
             }
         }
     }

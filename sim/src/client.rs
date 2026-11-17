@@ -31,6 +31,9 @@ pub struct Input {
     /// is a press; with a sword in hand that starts a block, with pearls in
     /// hand it throws one.
     pub use_item: bool,
+    /// The right button was let go and pressed again since the previous
+    /// tick: a press on this tick although it was down on the last one.
+    pub use_again: bool,
     /// A number key pressed on this tick, 1 to 9 (0: none): the hotbar slot
     /// to take in hand. The sword is on 1 and the pearls on 2.
     pub slot_key: u8,
@@ -922,7 +925,7 @@ impl Client {
         // click into the air sets leftClickCounter, which swallows the
         // clicks that follow it in this tick.
         let clicks = if inp.attack { 1 + inp.extra_clicks } else { 0 };
-        let press = inp.use_item && !lp.use_key_down;
+        let press = inp.use_item && (!lp.use_key_down || inp.use_again);
         lp.use_key_down = inp.use_item;
         // A left click on a block starts breaking it, and until the end of
         // the tick a right click does nothing.

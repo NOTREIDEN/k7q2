@@ -519,6 +519,7 @@ fn replay_client(lines: &[Line], world: &World, speed: i8, sens: f32, o: &Option
                     dy: -n(7),
                     extra_clicks: 0,
                     use_item: w.len() > 8 && n(8) != 0,
+                    use_again: w.len() > 8 && n(8) == 2,
                     slot_key: if w.len() > 9 { n(9) as u8 } else { 0 },
                 };
                 let was_using = c.lp.using_item;

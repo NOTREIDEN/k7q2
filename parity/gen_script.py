@@ -132,7 +132,7 @@ def with_use(rng, seq, holds=False):
             i += 1
     return out
 
-def with_pearls(rng, seq, per_count, gap=(25, 80), blocking=False, solo=False, potions=0, pearls=True):
+def with_pearls(rng, seq, per_count, gap=(25, 80), blocking=False, solo=False, potions=0, pearls=True, again=False):
     """Add ender pearl throws to the inputs: the number key of the pearls, a right click and
     the number key of the sword. Thrown at once or after carrying the pearl for a while
     (clicks go on meanwhile), with the button kept down so that more follow, out of a sword
@@ -162,7 +162,7 @@ def with_pearls(rng, seq, per_count, gap=(25, 80), blocking=False, solo=False, p
 
     t = rng.randint(14, 40)
     while t < n - 45:
-        kind = rng.choices(["quick", "carry", "held", "block"], [5, 3, 2, 3 if blocking else 0])[0]
+        kind = rng.choices(["quick", "carry", "held", "block", "again"], [5, 3, 2, 3 if blocking else 0, 6 if again else 0])[0]
         aim = rng.choices(["as is", "up", "down", "side", "high"], [3, 3, 2, 2, 1] if not solo else [1, 3, 2, 3, 2])[0]
         key = 2
         if potions and (not pearls or rng.random() < 0.6):
@@ -186,6 +186,22 @@ def with_pearls(rng, seq, per_count, gap=(25, 80), blocking=False, solo=False, p
             out[throw][7] = 1
             out[throw + 1][7] = 0
             back = throw + rng.choice([0, 1, 2, 6])
+        elif kind == "again":
+            # Clicked again on the very next tick, once or twice: the button
+            # is let go and pressed between two ticks (2). With potions each
+            # click takes another slot in hand first, or stays on the one
+            # just emptied.
+            out[t - 1][7] = 0
+            out[t][8], out[t][7] = key, 1
+            more = rng.choice([1, 1, 2])
+            for k in range(1, more + 1):
+                out[t + k][7] = 2
+                if potions and full and rng.random() < 0.8:
+                    out[t + k][8] = full.pop()
+                    empty.append(out[t + k][8])
+            out[t + more + 1][7] = rng.choice([0, 0, 1])
+            out[t + more + 2][7] = 0
+            back = t + more + rng.choice([1, 1, 2, 3])
         elif kind == "held":
             # The button stays down: another pearl every fourth tick.
             out[t - 1][7] = 0
@@ -376,7 +392,8 @@ def main():
         blocking = opts.get("blocks", "0") != "0"
         seq = with_use(rng, seq) if blocking else seq
         gap = (8, 30) if opts.get("many", "0") != "0" else (25, 80)
-        seq = [(0,) * 9] * 12 + with_pearls(rng, seq, per_count, gap=gap, blocking=blocking, potions=n_pots, pearls=n_pearls > 0)
+        seq = [(0,) * 9] * 12 + with_pearls(rng, seq, per_count, gap=gap, blocking=blocking, potions=n_pots, pearls=n_pearls > 0,
+                                            again=opts.get("again", "0") != "0")
         fight_fake(rng, len(seq) + 60, lines, blocks=blocking, pearls=float(opts.get("fake", "0.02")) if n_pearls else 0.0,
                    potions=n_pots, potion_rate=float(opts.get("fakepot", "0.02")))
     elif name == "potsolo":

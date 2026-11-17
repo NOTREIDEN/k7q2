@@ -109,14 +109,16 @@ fn a_potion_takes_the_crosshair_off_the_opponent_for_one_tick() {
 }
 
 #[test]
-fn two_potions_one_after_the_other_take_three_ticks_of_looking_away() {
+fn two_potions_on_two_ticks_take_two_ticks_of_looking_away() {
     let mut e = Env::new(Mode::SelfPlay, params(), 1);
     run(&mut e, 5, |_, _| IDLE);
-    // Down; throw; the sword comes back while the view stays down; throw
-    // again and look up.
+    // Down; throw; throw the next one and look up; the sword. The second
+    // click comes on the tick after the first: the button is let go and
+    // pressed again between the two.
     run(&mut e, 1, |_, _| with(6, FLICK_DOWN));
     run(&mut e, 1, |_, _| with(9, 1));
-    run(&mut e, 1, |_, _| IDLE);
+    assert_eq!(e.m.c[0].lp.potions.count_ones(), 6);
+    assert_eq!(obs(&e)[103], 1.0, "the next one can be asked for at once");
     run(&mut e, 1, |_, _| {
         let mut a = with(9, 1);
         a[6] = FLICK_UP;
@@ -126,9 +128,25 @@ fn two_potions_one_after_the_other_take_three_ticks_of_looking_away() {
     run(&mut e, 1, |_, _| IDLE);
     assert_eq!(e.m.c[0].lp.held, SLOT_SWORD);
     run(&mut e, 30, |_, _| IDLE);
+    assert_eq!(e.m.s.potion_throws, [2, 0]);
     assert_eq!(e.m.s.p[0].health, 20.0, "six and twice seven");
     let ep = e.episode();
-    assert_eq!((ep.potions, ep.splashes, ep.pot_away, ep.pot_double, ep.pot_health), ([2.0, 0.0], [2.0, 0.0], [3.0, 0.0], [1.0, 0.0], [12.0, 0.0]));
+    assert_eq!((ep.potions, ep.splashes, ep.pot_away, ep.pot_double, ep.pot_health), ([2.0, 0.0], [2.0, 0.0], [2.0, 0.0], [1.0, 0.0], [12.0, 0.0]));
+}
+
+#[test]
+fn three_potions_in_a_row_and_no_more_than_asked() {
+    let mut e = Env::new(Mode::SelfPlay, params(), 1);
+    e.m.s.p[0].health = 1.0;
+    run(&mut e, 5, |_, _| IDLE);
+    run(&mut e, 1, |_, _| with(6, FLICK_DOWN));
+    run(&mut e, 3, |_, _| with(9, 1));
+    run(&mut e, 1, |_, _| IDLE);
+    assert_eq!(e.m.c[0].lp.held, SLOT_SWORD);
+    run(&mut e, 30, |_, _| IDLE);
+    assert_eq!(e.m.s.potion_throws, [3, 0]);
+    assert_eq!(e.m.c[0].lp.potions.count_ones(), 4);
+    assert_eq!(e.m.s.p[0].health, 20.0);
 }
 
 #[test]
