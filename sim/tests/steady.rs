@@ -173,8 +173,11 @@ fn the_lesson_in_which_nobody_is_moved() {
             let (a, b) = (e.m.s.p[0].l.body.pos, e.m.s.p[1].l.body.pos);
             let d = (a[0] - b[0]).hypot(a[2] - b[2]);
             assert!((2.0..=5.01).contains(&d), "{d}");
-            let me = &e.m.s.p[0];
-            assert!(!e.m.s.cfg.infinite_health && (4.0..=12.0).contains(&me.health) && me.potions.count_ones() >= 3);
+            // Both start hurt and with potions: a duel of who uses them better.
+            assert!(!e.m.s.cfg.infinite_health);
+            for me in &e.m.s.p {
+                assert!((4.0..=12.0).contains(&me.health) && me.potions.count_ones() >= 3, "{} {}", me.health, me.potions);
+            }
         }
     }
 }

@@ -1008,8 +1008,10 @@ pub fn new_duel(p: &Params, rng: &mut Rng, mode: Mode) -> (Match, [f64; 2], BotP
         m.c[i].lp.pearls = pearls;
         if real {
             let mut n = level(p.potions, rng).clamp(0, 7) as u8;
-            // The first player is the one a lesson is for.
-            let lesson = if i == 0 { lesson } else { 0 };
+            // The first player is the one a lesson is for; where nobody
+            // is moved by a hit, both start hurt and with potions, so that
+            // the one that uses them better is the one that is left.
+            let lesson = if i == 0 || lesson == 6 { lesson } else { 0 };
             let timed_i = timed && (p.speed_who == 0 || p.speed_who as usize == i + 1 || lesson == 1 || lesson == 4);
             if timed_i {
                 // Speed as after a potion drunk some time ago, and potions

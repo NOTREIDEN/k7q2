@@ -250,6 +250,13 @@ public final class Rig {
                 session.stop();
                 say("the policy leaves the keys: the round is over");
             }
+            if (viewTicks > 0) {
+                say(String.format(java.util.Locale.ROOT, "the crosshair took back %.0f degrees in %.1f s: %.1f a second",
+                    undone, viewTicks / 20.0, undone / (viewTicks / 20.0)));
+            }
+            undone = 0.0;
+            viewTicks = 0;
+            viewHas = false;
         }
         if (goAt >= 0 && cticks >= goAt && !on() && policy != null) {
             goAt = -1;
@@ -281,8 +288,40 @@ public final class Rig {
     }
 
     public static void clientPost(Minecraft mc) {
-        if (started && session != null) session.tickEnd();
+        if (started && session != null) {
+            session.tickEnd();
+            if (mc.thePlayer != null) view(mc.thePlayer.rotationYaw, mc.thePlayer.rotationPitch);
+        }
         started = false;
+    }
+
+    static float[] viewWas = new float[2], turnLast = new float[2];
+    static int[] turnAge = new int[2];
+    static double undone;
+    static int viewTicks;
+    static boolean viewHas;
+
+    /** How much of its turning the policy takes straight back, counted as training counts it. */
+    static void view(float yaw, float pitch) {
+        float[] v = {yaw, pitch};
+        if (viewHas) {
+            for (int k = 0; k < 2; k++) {
+                float d = v[k] - viewWas[k];
+                if (d == 0.0F) {
+                    turnAge[k] = Math.min(turnAge[k] + 1, 1000);
+                    continue;
+                }
+                if (turnLast[k] * d < 0.0F && turnAge[k] <= 2) undone += Math.min(Math.abs(turnLast[k]), Math.abs(d));
+                turnLast[k] = d;
+                turnAge[k] = 0;
+            }
+            viewTicks++;
+        } else {
+            turnLast[0] = turnLast[1] = 0.0F;
+            turnAge[0] = turnAge[1] = 1000;
+        }
+        viewWas = v;
+        viewHas = true;
     }
 
     public static void onClientSend(Packet p) {
