@@ -153,6 +153,31 @@ fn in_a_strict_duel_a_potion_that_is_not_perfect_gives_a_quarter() {
     assert_eq!(one_potion(1.0, true), (14.0, 8.0));
 }
 
+/// What player 0 is paid over a potion thrown at its feet while it stands
+/// with 6 health, with no reward for the healing itself.
+fn paid_for_a_potion(strict: f64, w_waste: f32) -> f32 {
+    let mut p = bare(0.0);
+    p.pot_strict_prob = strict;
+    p.w_heal = 0.0;
+    p.w_miss = 0.0;
+    p.w_waste = w_waste;
+    let mut e = Env::new(Mode::SelfPlay, p, 3);
+    let paid = run(&mut e, 2, |_| with(6, DOWN)) + run(&mut e, 1, |_| with(9, 1)) + run(&mut e, 45, |_| IDLE);
+    assert_eq!((e.episode().splashes[0], e.episode().pot_offer[0]), (1.0, 7.0));
+    paid
+}
+
+#[test]
+fn what_a_strict_duel_takes_is_not_charged_as_waste_again() {
+    // Seven of the eight points offered and all of them needed: one point
+    // of waste, in a strict duel as in any other.
+    let hh = Env::new(Mode::SelfPlay, bare(0.0), 3).m.s.cfg.hit_health();
+    let one = paid_for_a_potion(0.0, 1.0) - paid_for_a_potion(0.0, 0.0);
+    assert!((one + 1.0 / hh).abs() < 1e-4, "{one} {hh}");
+    let strict = paid_for_a_potion(1.0, 1.0) - paid_for_a_potion(1.0, 0.0);
+    assert!((strict - one).abs() < 1e-5, "{strict} {one}");
+}
+
 fn lesson(mode: Mode, lessons: u32, seed: u64) -> Env {
     let mut p = Params::default();
     p.lesson_prob = 1.0;

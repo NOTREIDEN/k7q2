@@ -261,6 +261,9 @@ pub struct Splash {
     /// Health it offered each player, and health each one got from it.
     pub offered: [f32; 2],
     pub healed: [f32; 2],
+    /// Health each one would have got from it in the game: the same, but
+    /// for a thrower in a strict duel.
+    pub would: [f32; 2],
 }
 
 /// Health a splash potion of Instant Health II gives at full strength.
@@ -1087,7 +1090,7 @@ impl Server {
             if hit_player.is_some() || hit_block {
                 let at = self.thrown[k].pos;
                 let area = bb.expand(4.0, 2.0, 4.0);
-                let mut sp = Splash { thrower, pos: at, on_player: hit_player, ticks: ticks_in_air, offered: [0.0; 2], healed: [0.0; 2] };
+                let mut sp = Splash { thrower, pos: at, on_player: hit_player, ticks: ticks_in_air, offered: [0.0; 2], healed: [0.0; 2], would: [0.0; 2] };
                 for j in 0..2 {
                     let q = &self.p[j];
                     if !filed_near(&area, q.chunk) || !q.l.body.bb.intersects(&area) {
@@ -1100,6 +1103,7 @@ impl Server {
                         self.p[j].heal(if strict { i * self.cfg.potion_strict } else { i });
                         sp.offered[j] = i;
                         sp.healed[j] = self.p[j].health - before;
+                        sp.would[j] = if strict { i.min((MAX_HEALTH - before).max(0.0)) } else { sp.healed[j] };
                     }
                 }
                 self.splashes.push(sp);

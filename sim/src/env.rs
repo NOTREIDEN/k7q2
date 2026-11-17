@@ -1261,7 +1261,9 @@ impl Env {
 
     /// Potions that broke: health got back is worth what the same health
     /// lost to hits costs, to the player healed and against the other one,
-    /// and the thrower pays for the part of its potion it got nothing from.
+    /// and the thrower pays for the part of its potion the game would have
+    /// given it nothing for (what a strict duel takes on top is lost
+    /// health already and is not charged again).
     fn collect_splashes(&mut self) {
         let hh = self.m.s.cfg.hit_health().max(0.1);
         for k in 0..self.m.s.splashes.len() {
@@ -1273,7 +1275,7 @@ impl Env {
                 self.rew_acc[1 - j] -= v;
             }
             let t = s.thrower;
-            self.rew_acc[t] -= p.w_waste * (POTION_HEAL - s.healed[t]).max(0.0) / hh;
+            self.rew_acc[t] -= p.w_waste * (POTION_HEAL - s.would[t]).max(0.0) / hh;
             self.rew_acc[t] -= p.w_miss * (POTION_HEAL - s.offered[t]).clamp(0.0, MISS_POINTS) / hh;
             self.ep.splashes[t] += 1.0;
             self.ep.heal_self[t] += s.healed[t] as f64;
