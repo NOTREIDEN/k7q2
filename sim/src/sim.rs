@@ -116,7 +116,7 @@ impl Match {
             while let Some(at) = self.s2c[id].peek_time().filter(|&a| a <= t) {
                 let p = self.s2c[id].pop_ready(t).unwrap();
                 self.out_c.clear();
-                self.c[id].handle(p, &mut self.out_c);
+                self.c[id].handle(&self.world, p, &mut self.out_c);
                 // A handler's own packets leave when the packet is handled,
                 // which is the frame it arrived in, not the next tick.
                 for k in 0..self.out_c.len() {
@@ -163,7 +163,7 @@ impl Match {
             let p = self.c2s[from].pop_ready(t).unwrap();
             self.s.handle(from, p, &self.world, &mut self.rng, &mut self.out_s);
         }
-        self.s.tick(&mut self.out_s);
+        self.s.tick(&self.world, &mut self.rng, &mut self.out_s);
         for k in 0..self.out_s.len() {
             let (dest, p) = self.out_s[k];
             let d = self.net.down_us[dest] + Self::jitter(&mut self.rng, self.net.jitter_us[dest]);

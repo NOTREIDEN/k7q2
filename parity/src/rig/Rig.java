@@ -25,6 +25,7 @@ import net.minecraft.entity.EntityLivingBase;
 import net.minecraft.entity.EntityTrackerEntry;
 import net.minecraft.entity.SharedMonsterAttributes;
 import net.minecraft.entity.ai.attributes.AttributeModifier;
+import net.minecraft.entity.item.EntityEnderPearl;
 import net.minecraft.entity.player.EntityPlayer;
 import net.minecraft.entity.player.EntityPlayerMP;
 import net.minecraft.init.Items;
@@ -38,8 +39,11 @@ import net.minecraft.network.play.client.C02PacketUseEntity;
 import net.minecraft.network.play.client.C03PacketPlayer;
 import net.minecraft.network.play.client.C07PacketPlayerDigging;
 import net.minecraft.network.play.client.C08PacketPlayerBlockPlacement;
+import net.minecraft.network.play.client.C09PacketHeldItemChange;
 import net.minecraft.network.play.client.C0APacketAnimation;
 import net.minecraft.network.play.client.C0BPacketEntityAction;
+import net.minecraft.network.play.server.S08PacketPlayerPosLook;
+import net.minecraft.network.play.server.S0EPacketSpawnObject;
 import net.minecraft.network.play.server.S1CPacketEntityMetadata;
 import net.minecraft.network.play.server.S20PacketEntityProperties;
 import net.minecraft.potion.Potion;
@@ -86,6 +90,9 @@ public final class Rig {
     static float sensitivity = 0.5F;
     static final List<int[]> blocks = new ArrayList<int[]>();
     static boolean unbreakable = false;
+    static int pearls = 0;
+    /** Where the server last put the scripted player; it answers on the next tick, as a client does. */
+    static double[] fakeTeleport = null;
     static boolean useDown = false;
 
     // State.
@@ -126,9 +133,9 @@ public final class Rig {
             if (line.isEmpty() || line.startsWith("#")) continue;
             String[] p = line.split("\\s+");
             if (p[0].equals("C")) {
-                // forward strafe jump sprint attack dx dy [use]
-                int[] in = new int[8];
-                for (int i = 0; i < 8 && 1 + i < p.length; i++) in[i] = Integer.parseInt(p[1 + i]);
+                // forward strafe jump sprint attack dx dy [use [hotbar key, 1 to 9]]
+                int[] in = new int[9];
+                for (int i = 0; i < 9 && 1 + i < p.length; i++) in[i] = Integer.parseInt(p[1 + i]);
                 inputs.add(in);
             } else if (p[0].equals("F")) {
                 int t = Integer.parseInt(p[1]);
@@ -151,13 +158,15 @@ public final class Rig {
                 penHi = Double.parseDouble(p[2]);
             } else if (p[0].equals("unbreakable")) {
                 unbreakable = !p[1].equals("0");
+            } else if (p[0].equals("pearls")) {
+                pearls = Integer.parseInt(p[1]);
             } else if (p[0].equals("block")) {
                 blocks.add(new int[] {Integer.parseInt(p[1]), Integer.parseInt(p[2]), Integer.parseInt(p[3])});
             }
         }
         r.close();
         log("HEADER ticks=" + inputs.size() + " speed=" + speedAmp + " sensitivity=" + hf(sensitivity)
-            + " fake=" + (fakeStart != null ? 1 : 0) + " blocks=" + blocks.size() + " fmt=2 wear=" + (unbreakable ? 0 : 1));
+            + " fake=" + (fakeStart != null ? 1 : 0) + " blocks=" + blocks.size() + " fmt=3 wear=" + (unbreakable ? 0 : 1) + " pearls=" + pearls);
         for (int[] b : blocks) log("BLOCK " + b[0] + " " + b[1] + " " + b[2]);
     }
 
@@ -247,6 +256,8 @@ public final class Rig {
             key(gs.keyBindRight, in[1] < 0);
             key(gs.keyBindJump, in[2] != 0);
             key(gs.keyBindSprint, in[3] != 0);
+            // A number key: the game takes it before the clicks of the same tick.
+            if (in[8] > 0) KeyBinding.onTick(gs.keyBindsHotbar[in[8] - 1].getKeyCode());
             if (in[4] != 0) KeyBinding.onTick(gs.keyBindAttack.getKeyCode());
             // The right button: a press when it goes down, then held.
             boolean use = in[7] != 0;
@@ -258,7 +269,7 @@ public final class Rig {
                 float f1 = f * f * f * 8.0F;
                 mc.thePlayer.setAngles((float) in[5] * f1, (float) in[6] * f1);
             }
-            log("CI " + ctick + " " + in[0] + " " + in[1] + " " + in[2] + " " + in[3] + " " + in[4] + " " + in[5] + " " + in[6] + " " + in[7]);
+            log("CI " + ctick + " " + in[0] + " " + in[1] + " " + in[2] + " " + in[3] + " " + in[4] + " " + in[5] + " " + in[6] + " " + in[7] + " " + in[8]);
             inClientTick = true;
             return;
         }
@@ -316,7 +327,28 @@ public final class Rig {
             + " use=" + (p.isUsingItem() ? 1 : 0) + " eat=" + (p.isEating() ? 1 : 0)
             + " rcd=" + get(Minecraft.getMinecraft(), Minecraft.class, "rightClickDelayTimer")
             + " lcc=" + get(Minecraft.getMinecraft(), Minecraft.class, "leftClickCounter")
-            + " sd=" + wear(p);
+            + " sd=" + wear(p) + " held=" + p.inventory.currentItem
+            + " cpi=" + get(Minecraft.getMinecraft().playerController, net.minecraft.client.multiplayer.PlayerControllerMP.class, "currentPlayerItem")
+            + " pc=" + count(p) + " pe=" + clientPearls(Minecraft.getMinecraft());
+    }
+
+    /** Pearls in the second hotbar slot. */
+    static int count(EntityPlayer p) {
+        ItemStack s = p.inventory.mainInventory[1];
+        return s == null ? 0 : s.stackSize;
+    }
+
+    /** The pearls in flight as this client has them. */
+    static String clientPearls(Minecraft mc) {
+        StringBuilder sb = new StringBuilder("[");
+        for (Object o : mc.theWorld.loadedEntityList) {
+            if (!(o instanceof EntityEnderPearl)) continue;
+            Entity e = (Entity) o;
+            sb.append(e.getEntityId()).append(':').append(hd(e.posX)).append(':').append(hd(e.posY)).append(':').append(hd(e.posZ))
+                .append(':').append(hd(e.motionX)).append(':').append(hd(e.motionY)).append(':').append(hd(e.motionZ))
+                .append(':').append(e.serverPosX).append(':').append(e.serverPosY).append(':').append(e.serverPosZ).append(';');
+        }
+        return sb.append(']').toString();
     }
 
     /** Damage value of the held item, -1 with empty hands. */
@@ -384,6 +416,7 @@ public final class Rig {
         "S1CPacketEntityMetadata", "S20PacketEntityProperties", "S0BPacketAnimation", "S08PacketPlayerPosLook",
         "S1DPacketEntityEffect", "S1EPacketRemoveEntityEffect", "S06PacketUpdateHealth", "S0CPacketSpawnPlayer",
         "S13PacketDestroyEntities", "S27PacketExplosion",
+        "S0EPacketSpawnObject", "S30PacketWindowItems", "S04PacketEntityEquipment",
     };
 
     static boolean wanted(Packet p) {
@@ -418,6 +451,15 @@ public final class Rig {
                     } else if (v instanceof BlockPos) {
                         BlockPos b = (BlockPos) v;
                         sb.append(b.getX()).append(',').append(b.getY()).append(',').append(b.getZ());
+                    }
+                    else if (v instanceof ItemStack[]) {
+                        // Only the hotbar matters here: slots 36 to 44 of the player's own window.
+                        ItemStack[] a = (ItemStack[]) v;
+                        for (int i = 36; i < a.length && i < 45; i++) {
+                            sb.append(i > 36 ? "," : "");
+                            if (a[i] == null) sb.append('-');
+                            else sb.append(net.minecraft.item.Item.getIdFromItem(a[i].getItem())).append('/').append(a[i].getItemDamage()).append('/').append(a[i].stackSize);
+                        }
                     }
                     else if (v instanceof int[]) {
                         int[] a = (int[]) v;
@@ -501,6 +543,7 @@ public final class Rig {
             sword.setTagCompound(tag);
         }
         p.inventory.mainInventory[0] = sword;
+        if (pearls > 0) p.inventory.mainInventory[1] = new ItemStack(Items.ender_pearl, pearls);
         p.inventory.currentItem = 0;
         p.setHealth(p.getMaxHealth());
     }
@@ -538,11 +581,34 @@ public final class Rig {
             + " fall=" + hf(p.fallDistance) + " hp=" + hf(p.getHealth()) + " food=" + p.getFoodStats().getFoodLevel()
             + " swing=" + (p.isSwingInProgress ? 1 : 0) + " swp=" + p.swingProgressInt
             + " use=" + (p.isUsingItem() ? 1 : 0) + " eat=" + (p.isEating() ? 1 : 0) + " blk=" + (p.isBlocking() ? 1 : 0)
-            + " sd=" + wear(p)
+            + " sd=" + wear(p) + " held=" + p.inventory.currentItem + " pc=" + count(p)
+            + " ad=" + hd(p.getEntityAttribute(SharedMonsterAttributes.attackDamage).getAttributeValue())
             + " rit=" + get(p, EntityPlayerMP.class, "respawnInvulnerabilityTicks")
             + net(p.playerNetServerHandler)
             + " ccx=" + p.chunkCoordX + " ccy=" + p.chunkCoordY + " ccz=" + p.chunkCoordZ + " atc=" + (p.addedToChunk ? 1 : 0)
             + tracker(p);
+    }
+
+    /** A pearl in flight on the server, with its entity tracker entry. */
+    static String pearl(EntityEnderPearl e) {
+        Entity th = e.getThrower();
+        String s = "id=" + e.getEntityId() + " th=" + (th == fake ? 1 : 0)
+            + " x=" + hd(e.posX) + " y=" + hd(e.posY) + " z=" + hd(e.posZ)
+            + " mx=" + hd(e.motionX) + " my=" + hd(e.motionY) + " mz=" + hd(e.motionZ)
+            + " yaw=" + hf(e.rotationYaw) + " pitch=" + hf(e.rotationPitch)
+            + " tia=" + get(e, net.minecraft.entity.projectile.EntityThrowable.class, "ticksInAir");
+        WorldServer w = (WorldServer) e.worldObj;
+        Object set = get(w.getEntityTracker(), net.minecraft.entity.EntityTracker.class, "trackedEntities");
+        for (Object o : (java.util.Set<?>) set) {
+            EntityTrackerEntry t = (EntityTrackerEntry) o;
+            if (t.trackedEntity != e) continue;
+            Class<?> c = EntityTrackerEntry.class;
+            s += " uc=" + t.updateCounter + " tsl=" + get(t, c, "ticksSinceLastForcedTeleport")
+                + " ex=" + t.encodedPosX + " ey=" + t.encodedPosY + " ez=" + t.encodedPosZ
+                + " eyaw=" + t.encodedRotationYaw + " epitch=" + t.encodedRotationPitch
+                + " tmx=" + hd(t.lastTrackedEntityMotionX) + " tmy=" + hd(t.lastTrackedEntityMotionY) + " tmz=" + hd(t.motionZ);
+        }
+        return s;
     }
 
     static String net(NetHandlerPlayServer h) {
@@ -558,7 +624,7 @@ public final class Rig {
             if (real == null || finished) return;
             WorldServer w = server.worldServerForDimension(0);
             for (Object o : new ArrayList<Object>(w.loadedEntityList)) {
-                if (!(o instanceof EntityPlayer)) ((Entity) o).setDead();
+                if (!(o instanceof EntityPlayer) && !(o instanceof EntityEnderPearl)) ((Entity) o).setDead();
             }
             if (!recording) {
                 // A client reports in every tick; do the same for the scripted player.
@@ -573,6 +639,14 @@ public final class Rig {
             }
             stick++;
             inServerTick = true;
+            if (fakeTeleport != null && fake != null) {
+                // What a client sends back when the server has moved it.
+                double[] t = fakeTeleport;
+                fakeTeleport = null;
+                Packet p = new C03PacketPlayer.C06PacketPlayerPosLook(t[0], t[1], t[2], (float) t[3], (float) t[4], false);
+                log("SP " + stick + " 1 " + dump(p));
+                fakeNet.processPlayer((C03PacketPlayer) p);
+            }
             List<String[]> acts = fakeActions.get(stick);
             if (acts != null && fake != null) {
                 for (String[] a : acts) fakeAct(a);
@@ -618,6 +692,11 @@ public final class Rig {
         } else if (k.equals("USE")) {
             // Right click with the held item, as a client sends it.
             p = new C08PacketPlayerBlockPlacement(fake.inventory.getCurrentItem());
+        } else if (k.equals("SLOT")) {
+            p = new C09PacketHeldItemChange(Integer.parseInt(a[3]));
+        } else if (k.equals("LOOK")) {
+            // Turn on the spot: yaw and pitch, standing or in the air as before.
+            p = new C03PacketPlayer.C05PacketPlayerLook(Float.parseFloat(a[3]), Float.parseFloat(a[4]), fake.onGround);
         } else if (k.equals("RELEASE")) {
             p = new C07PacketPlayerDigging(C07PacketPlayerDigging.Action.RELEASE_USE_ITEM, BlockPos.ORIGIN, EnumFacing.DOWN);
         } else {
@@ -629,6 +708,7 @@ public final class Rig {
         else if (p instanceof C0APacketAnimation) fakeNet.handleAnimation((C0APacketAnimation) p);
         else if (p instanceof C08PacketPlayerBlockPlacement) fakeNet.processPlayerBlockPlacement((C08PacketPlayerBlockPlacement) p);
         else if (p instanceof C07PacketPlayerDigging) fakeNet.processPlayerDigging((C07PacketPlayerDigging) p);
+        else if (p instanceof C09PacketHeldItemChange) fakeNet.processHeldItemChange((C09PacketHeldItemChange) p);
         else fakeNet.processUseEntity((C02PacketUseEntity) p);
     }
 
@@ -640,6 +720,9 @@ public final class Rig {
         try {
             log("ST " + stick + " " + sp(real));
             if (fake != null) log("ST " + stick + " " + sp(fake));
+            for (Object o : real.worldObj.loadedEntityList) {
+                if (o instanceof EntityEnderPearl) log("SE " + stick + " " + pearl((EntityEnderPearl) o));
+            }
         } catch (Throwable t) {
             t.printStackTrace();
             fail("serverPost " + t);
@@ -648,17 +731,41 @@ public final class Rig {
 
     public static void onServerSend(NetHandlerPlayServer h, Packet p) {
         if (!serverRecording || finished || !wanted(p)) return;
-        log("SS " + stick + " " + who(h.playerEntity) + " " + dump(p));
+        log("SS " + stick + " " + who(h.playerEntity) + " " + dump(p) + exact(p));
+    }
+
+    /** For a spawn packet: the exact position and motion of the new entity, which the packet rounds. */
+    static String exact(Packet p) {
+        if (!(p instanceof S0EPacketSpawnObject)) return "";
+        // The world's table of ids is filled in after the tracker has sent this, so look in the list.
+        Entity e = null;
+        int id = ((S0EPacketSpawnObject) p).getEntityID();
+        for (Object o : real.worldObj.loadedEntityList) {
+            if (((Entity) o).getEntityId() == id) e = (Entity) o;
+        }
+        if (e == null) return "";
+        return " ex=" + hd(e.posX) + " ey=" + hd(e.posY) + " ez=" + hd(e.posZ)
+            + " emx=" + hd(e.motionX) + " emy=" + hd(e.motionY) + " emz=" + hd(e.motionZ)
+            + " eyaw=" + hf(e.rotationYaw) + " epitch=" + hf(e.rotationPitch);
     }
 
     /** Connection of the scripted player: nothing is sent anywhere, only written down. */
     static final class FakeNet extends NetHandlerPlayServer {
         FakeNet(MinecraftServer server, EntityPlayerMP p) {
-            super(server, new NetworkManager(EnumPacketDirection.SERVERBOUND), p);
+            // The game only moves a player to its pearl while its connection is open.
+            super(server, new NetworkManager(EnumPacketDirection.SERVERBOUND) {
+                public boolean isChannelOpen() {
+                    return true;
+                }
+            }, p);
         }
 
         public void sendPacket(Packet p) {
-            if (serverRecording && !finished && wanted(p)) log("SS " + stick + " 1 " + dump(p));
+            if (serverRecording && !finished && wanted(p)) log("SS " + stick + " 1 " + dump(p) + exact(p));
+            if (serverRecording && p instanceof S08PacketPlayerPosLook) {
+                S08PacketPlayerPosLook t = (S08PacketPlayerPosLook) p;
+                fakeTeleport = new double[] {t.getX(), t.getY(), t.getZ(), t.getYaw(), t.getPitch()};
+            }
         }
 
         public void kickPlayerFromServer(String reason) {

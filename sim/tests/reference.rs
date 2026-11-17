@@ -2,7 +2,7 @@
 //! behaviours read from the game source. The bit-exact comparison against
 //! the running game lives in the parity rig, not here.
 use pvpsim::client::{ClientCfg, Input};
-use pvpsim::net::{C2S, S2C};
+use pvpsim::net::{Item, C2S, S2C};
 use pvpsim::server::{KbProfile, ServerCfg};
 use pvpsim::sim::{Match, NetCfg, Spawn};
 use pvpsim::world::World;
@@ -232,7 +232,7 @@ fn server_echoes_sprint_metadata_to_the_player_itself() {
     let mut out = vec![];
     let world = m.world.clone();
     m.s.handle(0, C2S::Sprint(true), &world, &mut m.rng, &mut out);
-    m.s.tick(&mut out);
+    m.s.tick(&world, &mut m.rng, &mut out);
     assert!(out.contains(&(0, S2C::Meta { own: true, sprinting: true, using: false })), "{out:?}");
     assert!(out.contains(&(1, S2C::Meta { own: false, sprinting: true, using: false })), "{out:?}");
     let base = 0.1f32 as f64;
@@ -243,8 +243,8 @@ fn server_echoes_sprint_metadata_to_the_player_itself() {
 fn deterministic() {
     let run = || {
         let mut m = duel([0.0, 0.0, 0.0], 10.0, [1.0, 0.0, 3.0], 170.0, 1, 60);
-        let a = Input { forward: 1, strafe: 1, sprint_key: true, attack: true, dx: 3, dy: -1, jump: true, extra_clicks: 0, use_item: false };
-        let b = Input { forward: 1, strafe: -1, sprint_key: true, attack: true, dx: -2, dy: 1, jump: false, extra_clicks: 0, use_item: false };
+        let a = Input { forward: 1, strafe: 1, sprint_key: true, attack: true, dx: 3, dy: -1, jump: true, extra_clicks: 0, use_item: false, slot_key: 0 };
+        let b = Input { forward: 1, strafe: -1, sprint_key: true, attack: true, dx: -2, dy: 1, jump: false, extra_clicks: 0, use_item: false, slot_key: 0 };
         for _ in 0..400 {
             step(&mut m, &a, &b);
         }
@@ -407,4 +407,172 @@ fn the_sword_coming_back_ends_the_block_on_the_client_only() {
         step(&mut m, &idle, &idle);
     }
     assert!(!m.s.p[0].using_item);
+}
+
+/// A duel in which both players carry sixteen pearls.
+fn pearl_duel(a: [f64; 3], yaw_a: f32, b: [f64; 3], yaw_b: f32, cooldown: i32) -> Match {
+    let mut m = duel(a, yaw_a, b, yaw_b, 1, 20);
+    m.s.cfg.pearl_cooldown = cooldown;
+    for i in 0..2 {
+        m.s.p[i].pearls = 16;
+        m.c[i].lp.pearls = 16;
+    }
+    m
+}
+
+/// Player 0 takes the pearls in hand and throws one, then takes the sword
+/// again: number key 2 with a right click, then number key 1.
+fn throw(m: &mut Match) {
+    let idle = Input::default();
+    step(m, &Input { slot_key: 2, use_item: true, ..Default::default() }, &idle);
+    step(m, &Input { slot_key: 1, ..Default::default() }, &idle);
+}
+
+#[test]
+fn a_pearl_takes_its_thrower_where_it_comes_down() {
+    let mut m = pearl_duel([0.0, 0.0, 0.0], 0.0, [30.0, 0.0, 0.0], 0.0, 0);
+    let idle = Input::default();
+    // Look up a little, one tick before the throw: the server throws along
+    // the view it last heard of.
+    step(&mut m, &Input { dy: -100, ..Default::default() }, &idle);
+    throw(&mut m);
+    assert_eq!(m.c[0].lp.pearls, 15, "the client takes the pearl off its stack at once");
+    let mut flew = 0;
+    let mut seen = false;
+    for _ in 0..80 {
+        step(&mut m, &idle, &idle);
+        seen |= !m.c[0].pearls.is_empty();
+        if !m.s.pearls.is_empty() {
+            flew += 1;
+        }
+        if !m.s.landings.is_empty() {
+            break;
+        }
+    }
+    let l = m.s.landings[0];
+    assert_eq!(m.s.throws, [1, 0]);
+    assert!(seen, "the client never saw its pearl");
+    // 1.5 blocks a tick at 15 degrees up: a little under 40 blocks, in a
+    // second and a half.
+    assert!(l.pos[2] > 30.0 && l.pos[2] < 45.0 && l.pos[0].abs() < 1.0, "{l:?}");
+    assert!((25..=40).contains(&flew), "{flew} ticks in flight");
+    assert!(!l.on_player);
+    assert_eq!(m.s.p[0].pearls, 15);
+    assert_eq!(m.s.p[0].damage_taken, 5.0, "a landing costs two and a half hearts");
+    for _ in 0..6 {
+        step(&mut m, &idle, &idle);
+    }
+    let (c, s) = (m.c[0].lp.l.body.pos, m.s.p[0].l.body.pos);
+    assert!((c[2] - l.pos[2]).abs() < 0.5 && (s[2] - l.pos[2]).abs() < 0.5, "client {c:?}, server {s:?}, landing {l:?}");
+    assert!(m.c[0].pearls.is_empty() && m.s.pearls.is_empty(), "the pearl is gone on both sides");
+    assert_eq!(m.c[0].lp.held, 0);
+    assert_eq!(m.s.p[0].in_hand().0, Item::Sword);
+    assert_eq!(m.c[1].rp.item, Item::Sword, "the other client saw the sword come back");
+}
+
+#[test]
+fn a_pearl_that_meets_the_other_player_stops_there() {
+    let mut m = pearl_duel([0.0, 0.0, 0.0], 0.0, [0.0, 0.0, 12.0], 180.0, 0);
+    let idle = Input::default();
+    step(&mut m, &idle, &idle);
+    throw(&mut m);
+    for _ in 0..40 {
+        step(&mut m, &idle, &idle);
+        if !m.s.landings.is_empty() {
+            break;
+        }
+    }
+    let l = m.s.landings[0];
+    assert!(l.on_player, "{l:?}");
+    assert!(l.pos[2] > 9.5 && l.pos[2] < 12.0, "{l:?}");
+    assert_eq!(m.s.p[1].damage_taken, 0.0, "a pearl does not hurt the player it hits");
+}
+
+#[test]
+fn a_server_with_a_pearl_cooldown_gives_the_second_pearl_back() {
+    let mut m = pearl_duel([0.0, 0.0, 0.0], 0.0, [30.0, 0.0, 0.0], 0.0, 320);
+    let idle = Input::default();
+    step(&mut m, &idle, &idle);
+    throw(&mut m);
+    for _ in 0..10 {
+        step(&mut m, &idle, &idle);
+    }
+    assert_eq!((m.c[0].lp.pearls, m.s.p[0].pearls), (15, 15));
+    let id = m.advance();
+    assert_eq!(id, 0);
+    m.client_tick(0, &Input { slot_key: 2, use_item: true, ..Default::default() });
+    assert_eq!(m.c[0].lp.pearls, 14, "the client believes it threw");
+    let id = m.advance();
+    m.client_tick(id, &idle);
+    step(&mut m, &Input { slot_key: 1, ..Default::default() }, &idle);
+    for _ in 0..6 {
+        step(&mut m, &idle, &idle);
+    }
+    assert_eq!(m.s.throws, [1, 0], "the server refused the second throw");
+    assert_eq!((m.c[0].lp.pearls, m.s.p[0].pearls), (15, 15), "and sent the inventory again");
+}
+
+#[test]
+fn a_hit_right_after_taking_the_sword_back_is_a_bare_hand_hit() {
+    // The server works out what a player holds once per movement packet.
+    // An attack that arrives between the change of slot and the next
+    // movement packet is made with the damage of the item held before.
+    let mut m = pearl_duel([0.0, 0.0, 0.0], 0.0, [0.0, 0.0, 2.5], 180.0, 0);
+    m.s.p[0].pearls = 0;
+    m.c[0].lp.pearls = 0;
+    let idle = Input::default();
+    // An empty slot in hand for a few ticks, then the sword and a click in
+    // the same tick.
+    step(&mut m, &Input { slot_key: 2, ..Default::default() }, &idle);
+    for _ in 0..4 {
+        step(&mut m, &idle, &idle);
+    }
+    assert_eq!(m.c[1].rp.item, Item::Empty);
+    step(&mut m, &Input { slot_key: 1, attack: true, ..Default::default() }, &idle);
+    let mut first = None;
+    for _ in 0..4 {
+        step(&mut m, &idle, &idle);
+        if let Some(h) = m.s.hits.first() {
+            first = Some(h.damage);
+            break;
+        }
+    }
+    assert_eq!(first, Some(1.0));
+    // By now the server has seen the sword, and told the other client.
+    assert_eq!(m.s.p[0].equip.0, Item::Sword);
+    assert_eq!(m.c[1].rp.item, Item::Sword);
+}
+
+#[test]
+fn taking_another_slot_ends_a_block_without_a_word() {
+    let mut m = pearl_duel([0.0, 0.0, 0.0], 0.0, [30.0, 0.0, 0.0], 0.0, 0);
+    let idle = Input::default();
+    let hold = Input { use_item: true, ..Default::default() };
+    for _ in 0..4 {
+        step(&mut m, &hold, &idle);
+    }
+    assert!(m.c[0].lp.using_item && m.s.p[0].using_item);
+    // The pearls in hand with the button still down: the block ends on the
+    // client, and on the next tick the held button throws a pearl.
+    step(&mut m, &Input { slot_key: 2, use_item: true, ..Default::default() }, &idle);
+    assert!(!m.c[0].lp.using_item);
+    assert_eq!(m.c[0].lp.pearls, 16);
+    step(&mut m, &hold, &idle);
+    assert_eq!(m.c[0].lp.pearls, 15);
+    for _ in 0..4 {
+        step(&mut m, &idle, &idle);
+    }
+    assert!(!m.s.p[0].using_item, "the server's next update saw that the sword is not in hand");
+    assert_eq!(m.s.throws, [1, 0]);
+}
+
+#[test]
+fn a_head_inside_a_block_hurts() {
+    use pvpsim::server::inside_opaque_block;
+    let w = World::with_blocks(0.0, &[[0, 1, 0]]);
+    assert!(inside_opaque_block(&w, [0.5, 0.0, 0.5]));
+    assert!(!inside_opaque_block(&w, [0.5, 0.0, 1.5]));
+    // The eight points checked reach 0.24 blocks to each side of the eyes.
+    assert!(inside_opaque_block(&w, [0.5, 0.0, 1.2]));
+    assert!(!inside_opaque_block(&w, [0.5, 0.0, 1.3]));
 }

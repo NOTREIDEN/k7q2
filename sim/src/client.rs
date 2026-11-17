@@ -1,10 +1,11 @@
 //! One game client: the local player (`EntityPlayerSP`), the other player
-//! as this client sees it (`EntityOtherPlayerMP`), the crosshair pick
+//! as this client sees it (`EntityOtherPlayerMP`), the ender pearls in
+//! flight as it sees them, the crosshair pick
 //! (`EntityRenderer.getMouseOver`) and one `Minecraft.runTick`.
 use crate::aabb::{dist, Aabb, V3, EYE_HEIGHT};
 use crate::living::Living;
 use crate::mth;
-use crate::net::{C2S, S2C};
+use crate::net::{Item, PearlEv, C2S, S2C, SLOT_PEARL, SLOT_SWORD};
 use crate::world::{RayHit, World};
 
 /// Keys and mouse for one client tick.
@@ -27,8 +28,12 @@ pub struct Input {
     pub dx: i32,
     pub dy: i32,
     /// The right mouse button is down on this tick. Going from up to down
-    /// is a press; with a sword in hand that starts a block.
+    /// is a press; with a sword in hand that starts a block, with pearls in
+    /// hand it throws one.
     pub use_item: bool,
+    /// A number key pressed on this tick, 1 to 9 (0: none): the hotbar slot
+    /// to take in hand. The sword is on 1 and the pearls on 2.
+    pub slot_key: u8,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -81,8 +86,84 @@ pub struct RemotePlayer {
     /// The flag the server sets while this player uses an item: with a
     /// sword in hand, it is shown blocking.
     pub using: bool,
+    /// What this player holds, as the server last said: the item, and the
+    /// wear of a sword or the size of a stack of pearls.
+    pub item: Item,
+    pub item_n: u32,
     /// Bookkeeping for observations, not game state.
     pub ticks_since_hurt: i32,
+}
+
+/// An ender pearl as a client has it: created by the server's spawn packet,
+/// flying on its own between the server's corrections, and gone only when
+/// the server says so. It hits nothing on the client.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ClientPearl {
+    pub id: u32,
+    pub pos: V3,
+    pub motion: V3,
+    pub server_pos: [i32; 3],
+    /// Client ticks since it appeared.
+    pub age: i32,
+}
+
+impl ClientPearl {
+    /// `Entity.setPositionAndRotation2`: put the pearl there, and on top of
+    /// any block it would be inside of.
+    fn set_position2(&mut self, world: &World, p: V3) {
+        self.pos = p;
+        let w = (0.25f32 / 2.0f32) as f64;
+        let bb = Aabb::new([p[0] - w, p[1], p[2] - w], [p[0] + w, p[1] + 0.25f32 as f64, p[2] + w]);
+        let mut boxes = Vec::new();
+        world.colliding_boxes(&bb.contract(0.03125, 0.0, 0.03125), &mut boxes);
+        if !boxes.is_empty() {
+            let mut top = 0.0f64;
+            for b in &boxes {
+                if b.max[1] > top {
+                    top = b.max[1];
+                }
+            }
+            self.pos[1] = p[1] + (top - bb.min[1]);
+        }
+    }
+
+    /// `NetHandlerPlayClient.handleEntityMovement`.
+    fn rel_move(&mut self, world: &World, d: [i8; 3]) {
+        for a in 0..3 {
+            self.server_pos[a] += d[a] as i32;
+        }
+        let sp = self.server_pos;
+        self.set_position2(world, [sp[0] as f64 / 32.0, sp[1] as f64 / 32.0, sp[2] as f64 / 32.0]);
+    }
+
+    /// `NetHandlerPlayClient.handleEntityTeleport`.
+    fn teleport(&mut self, world: &World, sp: [i32; 3]) {
+        self.server_pos = sp;
+        let d = [sp[0] as f64 / 32.0, sp[1] as f64 / 32.0, sp[2] as f64 / 32.0];
+        if (self.pos[0] - d[0]).abs() < 0.03125 && (self.pos[1] - d[1]).abs() < 0.015625 && (self.pos[2] - d[2]).abs() < 0.03125 {
+            let p = self.pos;
+            self.set_position2(world, p);
+        } else {
+            self.set_position2(world, d);
+        }
+    }
+
+    /// `EntityThrowable.onUpdate` as far as it matters on a client. Returns
+    /// false for a pearl that has fallen out of the world: the client then
+    /// drops it on its own.
+    fn tick(&mut self) -> bool {
+        let alive = !(self.pos[1] < -64.0);
+        for a in 0..3 {
+            self.pos[a] += self.motion[a];
+        }
+        let (f2, f3) = (0.99f32 as f64, 0.03f32 as f64);
+        for a in 0..3 {
+            self.motion[a] *= f2;
+        }
+        self.motion[1] -= f3;
+        self.age += 1;
+        alive
+    }
 }
 
 impl RemotePlayer {
@@ -112,6 +193,8 @@ impl RemotePlayer {
             swing_in_progress: false,
             swing_progress_int: 0,
             using: false,
+            item: Item::Sword,
+            item_n: 0,
             ticks_since_hurt: 1000,
         }
     }
@@ -251,6 +334,13 @@ pub struct LocalPlayer {
     pub use_gen: u32,
     /// The using-item flag of this player as the server last sent it.
     pub flag_using: bool,
+    /// `inventory.currentItem`: the hotbar slot in hand.
+    pub held: u8,
+    /// `PlayerControllerMP.currentPlayerItem`: the slot the server was last
+    /// told about.
+    pub synced: u8,
+    /// Ender pearls in the second hotbar slot, as this client counts them.
+    pub pearls: u8,
     /// Bookkeeping for observations, not game state.
     pub last_kb: V3,
     pub ticks_since_kb: i32,
@@ -282,6 +372,9 @@ impl LocalPlayer {
             stack_gen: 0,
             use_gen: 0,
             flag_using: false,
+            held: SLOT_SWORD,
+            synced: SLOT_SWORD,
+            pearls: 0,
             last_kb: [0.0; 3],
             ticks_since_kb: 1000,
             ticks_since_hurt: 1000,
@@ -315,6 +408,26 @@ impl LocalPlayer {
         let p = self.l.body.pos;
         [p[0], p[1] + EYE_HEIGHT, p[2]]
     }
+
+    /// What is in hand.
+    #[inline]
+    pub fn in_hand(&self) -> Item {
+        match self.held {
+            SLOT_SWORD => Item::Sword,
+            SLOT_PEARL if self.pearls > 0 => Item::Pearl,
+            _ => Item::Empty,
+        }
+    }
+
+    /// `PlayerControllerMP.syncCurrentPlayItem`: tell the server which slot
+    /// is in hand, if it does not know yet.
+    #[inline]
+    fn sync_slot(&mut self, out: &mut Vec<C2S>) {
+        if self.held != self.synced {
+            self.synced = self.held;
+            out.push(C2S::HeldItem(self.held));
+        }
+    }
 }
 
 /// What one client tick did, for rewards and statistics.
@@ -329,6 +442,8 @@ pub struct TickOut {
     pub jumped: bool,
     /// A right click was made (the block started or was asked for again).
     pub used: bool,
+    /// An ender pearl was thrown.
+    pub threw: bool,
     /// Left clicks that were swallowed because the client was blocking.
     pub swallowed: u8,
 }
@@ -365,6 +480,8 @@ pub struct Client {
     /// Where the other player was shown at the picks of the last ticks,
     /// newest first.
     shown: [Aabb; MAX_BACKTRACK],
+    /// The ender pearls in flight this client knows of, oldest first.
+    pub pearls: Vec<ClientPearl>,
 }
 
 /// `EntityRenderer.getMouseOver(1.0F)` for a world that holds one other
@@ -419,22 +536,44 @@ pub fn pick_with(world: &World, eye: V3, own_bb: &Aabb, pitch: f32, yaw: f32, re
     }
 }
 
-/// `Minecraft.rightClickMouse` with a sword in hand.
+/// `Minecraft.rightClickMouse`. Returns whether a pearl was thrown.
 #[inline]
-fn right_click(lp: &mut LocalPlayer, pick: &Pick, out: &mut Vec<C2S>) {
+fn right_click(lp: &mut LocalPlayer, pick: &Pick, out: &mut Vec<C2S>) -> bool {
     lp.right_click_delay = 4;
+    let item = lp.in_hand();
     if pick.entity {
         // Neither interaction does anything, so the item is used as well.
+        lp.sync_slot(out);
         out.push(C2S::InteractAt);
         out.push(C2S::Interact);
     } else if pick.block {
+        lp.sync_slot(out);
         out.push(C2S::UseBlock);
+        if item == Item::Empty {
+            return false;
+        }
     }
-    // sendUseItem -> ItemSword.onItemRightClick -> setItemInUse
-    out.push(C2S::UseItem);
-    if !lp.using_item {
-        lp.using_item = true;
-        lp.use_gen = lp.stack_gen;
+    match item {
+        Item::Empty => false,
+        Item::Sword => {
+            // sendUseItem -> ItemSword.onItemRightClick -> setItemInUse
+            lp.sync_slot(out);
+            out.push(C2S::UseItem);
+            if !lp.using_item {
+                lp.using_item = true;
+                lp.use_gen = lp.stack_gen;
+            }
+            false
+        }
+        Item::Pearl => {
+            // sendUseItem -> ItemEnderPearl.onItemRightClick: the client
+            // only takes one off its stack. The pearl itself comes from the
+            // server.
+            lp.sync_slot(out);
+            out.push(C2S::UseItem);
+            lp.pearls -= 1;
+            true
+        }
     }
 }
 
@@ -480,7 +619,7 @@ impl Client {
     pub fn new(pos: V3, yaw: f32, pitch: f32, speed_amp: i8, other_pos: V3, other_yaw: f32, other_pitch: f32) -> Self {
         let rp = RemotePlayer::spawn(other_pos, other_yaw, other_pitch, true);
         let shown = [rp.bb; MAX_BACKTRACK];
-        Client { lp: LocalPlayer::new(pos, yaw, pitch, speed_amp), rp, edge: Edge::default(), shown }
+        Client { lp: LocalPlayer::new(pos, yaw, pitch, speed_amp), rp, edge: Edge::default(), shown, pearls: Vec::new() }
     }
 
     /// The pick the next tick would make if the mouse did not move.
@@ -513,7 +652,7 @@ impl Client {
     ///
     /// The answer to a server teleport is sent from inside the handler, so
     /// it leaves before the packets of the next tick; it goes to `out`.
-    pub fn handle(&mut self, p: S2C, out: &mut Vec<C2S>) {
+    pub fn handle(&mut self, world: &World, p: S2C, out: &mut Vec<C2S>) {
         match p {
             S2C::PosLook { pos, yaw, pitch } => {
                 // handlePlayerPosLook, then Entity.setPositionAndRotation.
@@ -563,7 +702,50 @@ impl Client {
                 }
             }
             // handleSetSlot puts a new stack object into the hotbar.
-            S2C::SetSlot => self.lp.stack_gen = self.lp.stack_gen.wrapping_add(1),
+            S2C::SetSlot { slot, count } => match slot {
+                SLOT_SWORD => self.lp.stack_gen = self.lp.stack_gen.wrapping_add(1),
+                SLOT_PEARL => self.lp.pearls = count,
+                _ => {}
+            },
+            // handleWindowItems puts new stack objects into every slot.
+            S2C::WindowItems { pearls } => {
+                self.lp.stack_gen = self.lp.stack_gen.wrapping_add(1);
+                self.lp.pearls = pearls;
+            }
+            S2C::Cursor => {}
+            // handleEntityEquipment
+            S2C::Equip { item, n } => {
+                self.rp.item = item;
+                self.rp.item_n = n;
+            }
+            S2C::Pearl { id, ev } => match ev {
+                // handleSpawnObject: a pearl at rest; its speed comes in a
+                // packet of its own.
+                PearlEv::Spawn { p, .. } => self.pearls.push(ClientPearl {
+                    id,
+                    pos: [p[0] as f64 / 32.0, p[1] as f64 / 32.0, p[2] as f64 / 32.0],
+                    motion: [0.0; 3],
+                    server_pos: p,
+                    age: 0,
+                }),
+                PearlEv::Meta => {}
+                ev => {
+                    if let Some(e) = self.pearls.iter_mut().find(|e| e.id == id) {
+                        match ev {
+                            PearlEv::Velocity(v) => e.motion = [v[0] as f64 / 8000.0, v[1] as f64 / 8000.0, v[2] as f64 / 8000.0],
+                            PearlEv::RelMove { d, .. } | PearlEv::LookMove { d, .. } => e.rel_move(world, d),
+                            PearlEv::Look { .. } => e.rel_move(world, [0, 0, 0]),
+                            PearlEv::Teleport { p, .. } => e.teleport(world, p),
+                            PearlEv::Spawn { .. } | PearlEv::Meta => {}
+                        }
+                    }
+                }
+            },
+            // handleDestroyEntities
+            S2C::Destroy { ids, n } => {
+                let gone = &ids[..n as usize];
+                self.pearls.retain(|e| !gone.contains(&e.id));
+            }
             S2C::Props { own, base, speed_amp, sprint } => {
                 if own {
                     self.lp.l.attr.base = base;
@@ -582,6 +764,9 @@ impl Client {
         if self.lp.right_click_delay > 0 {
             self.lp.right_click_delay -= 1;
         }
+        // playerController.updateController: a slot taken in hand on the
+        // previous tick is reported now, unless a click already did.
+        self.lp.sync_slot(out);
 
         // Mouse movement accumulated since the previous tick.
         if inp.dx != 0 || inp.dy != 0 {
@@ -594,6 +779,11 @@ impl Client {
         self.shown.copy_within(0..MAX_BACKTRACK - 1, 1);
         self.shown[0] = self.rp.bb;
         let lp = &mut self.lp;
+
+        // The number keys.
+        if (1..=9).contains(&inp.slot_key) {
+            lp.held = inp.slot_key - 1;
+        }
 
         // clickMouse. The button is released again inside the same tick, so
         // leftClickCounter is back at zero before the next one.
@@ -610,6 +800,7 @@ impl Client {
             // Blocking: letting go of the button ends it, and every click
             // and press of this tick is thrown away.
             if !inp.use_item {
+                lp.sync_slot(out);
                 out.push(C2S::ReleaseUse);
                 lp.using_item = false;
             }
@@ -626,12 +817,15 @@ impl Client {
                 if !t.pick.entity {
                     break;
                 }
+                lp.sync_slot(out);
                 out.push(C2S::Attack);
                 t.attacked = true;
                 lp.ticks_since_attack = 0;
                 // attackTargetEntityWithCurrentItem on the client: the copy
-                // of the other player always reports a successful hit.
-                let i = cfg.kb_ench + if lp.l.sprinting { 1 } else { 0 };
+                // of the other player always reports a successful hit, with
+                // whatever is in hand.
+                let ench = if lp.held == SLOT_SWORD { cfg.kb_ench } else { 0 };
+                let i = ench + if lp.l.sprinting { 1 } else { 0 };
                 if i > 0 {
                     lp.l.body.motion[0] *= 0.6;
                     lp.l.body.motion[2] *= 0.6;
@@ -640,20 +834,20 @@ impl Client {
                 }
             }
             if press && !hitting_block {
-                right_click(lp, &t.pick, out);
+                t.threw |= right_click(lp, &t.pick, out);
                 t.used = true;
             }
         }
         // The button held down clicks again once the delay has run out.
         if inp.use_item && lp.right_click_delay == 0 && !lp.using_item && !hitting_block {
-            right_click(lp, &t.pick, out);
+            t.threw |= right_click(lp, &t.pick, out);
             t.used = true;
         }
 
         // --- EntityPlayerSP.onUpdate ---
         // EntityPlayer.onUpdate: the item in use has to be the very stack
         // that is in the hand.
-        if lp.using_item && lp.use_gen != lp.stack_gen {
+        if lp.using_item && (lp.use_gen != lp.stack_gen || lp.held != SLOT_SWORD) {
             lp.using_item = false;
         }
         // onEntityUpdate
@@ -766,8 +960,10 @@ impl Client {
             lp.ticks_since_attack += 1;
         }
 
-        // The other player's entity updates after the local one.
+        // The other player's entity updates after the local one, then the
+        // pearls.
         self.rp.tick();
+        self.pearls.retain_mut(|e| e.tick());
         t
     }
 }

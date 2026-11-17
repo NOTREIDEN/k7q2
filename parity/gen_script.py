@@ -6,9 +6,9 @@ speed is the amplifier of the Speed effect (1 = Speed II, -1 = none);
 sensitivity is the mouse slider from 0 to 1.
 
 A script holds one line per client tick (C forward strafe jump sprint attack
-dx dy, and optionally a last field for the right mouse button) and, when a
-second player is present, its actions keyed by server tick (F tick ACTION
-...)."""
+dx dy, optionally followed by the right mouse button and by a number key, 1
+to 9) and, when a second player is present, its actions keyed by server tick
+(F tick ACTION ...)."""
 import math, random, sys
 
 def hold(rng, n, lo, hi, choices, weights=None):
@@ -39,14 +39,19 @@ def jump_arc():
         ys.append(y)
         vy = (vy - 0.08) * 0.98
 
-def pen(lines, half=4, height=4):
-    """A walled square so that nobody wanders off: inside is [-half, half) on both axes."""
+def pen(lines, half=4, height=4, roof=False):
+    """A walled square so that nobody wanders off: inside is [-half, half) on both axes.
+    With a roof nothing that is thrown leaves it either."""
     for y in range(4, 4 + height):
         for k in range(-half - 1, half + 1):
             for b in ((half, y, k), (-half - 1, y, k), (k, y, half), (k, y, -half - 1)):
                 line = "block %d %d %d" % b
                 if line not in lines:
                     lines.append(line)
+    if roof:
+        for x in range(-half - 1, half + 1):
+            for z in range(-half - 1, half + 1):
+                lines.append("block %d %d %d" % (x, 4 + height, z))
     lines.append("pen %.2f %.2f" % (-half + 0.4, half - 0.4))
 
 def fight_inputs(rng, n, jumps=True, wild=True, per_count=0.15):
@@ -127,11 +132,83 @@ def with_use(rng, seq, holds=False):
             i += 1
     return out
 
-def fight_fake(rng, n, lines, hops=True, attacks=True, blocks=False):
+def with_pearls(rng, seq, per_count, gap=(25, 80), blocking=False, solo=False):
+    """Add ender pearl throws to the inputs: the number key of the pearls, a right click and
+    the number key of the sword. Thrown at once or after carrying the pearl for a while
+    (clicks go on meanwhile), with the button kept down so that more follow, out of a sword
+    block, and with the view flicked up, down or aside just before."""
+    n = len(seq)
+    out = [list(s) + [0] * (9 - len(s)) for s in seq]
+
+    def pitch_at(i):
+        p = 0.0
+        for k in range(i + 1):
+            p = max(-90.0, min(90.0, p - out[k][6] * per_count))
+        return p
+
+    def flick(i, want_pitch, turn):
+        """Look somewhere else from tick i on and come back two ticks later."""
+        d = int(round((pitch_at(i - 1) - want_pitch) / per_count))
+        out[i][6] += d
+        out[i][5] += turn
+        if i + 2 < n:
+            out[i + 2][6] -= d
+            out[i + 2][5] -= turn
+
+    t = rng.randint(14, 40)
+    while t < n - 45:
+        kind = rng.choices(["quick", "carry", "held", "block"], [5, 3, 2, 3 if blocking else 0])[0]
+        aim = rng.choices(["as is", "up", "down", "side", "high"], [3, 3, 2, 2, 1] if not solo else [1, 3, 2, 3, 2])[0]
+        throw = t
+        if kind == "quick":
+            out[t - 1][7] = 0
+            out[t][8], out[t][7] = 2, 1
+            out[t + 1][7] = 0
+            back = t + rng.choice([1, 1, 1, 2, 4])
+        elif kind == "carry":
+            out[t][8] = 2
+            throw = t + rng.randint(1, 8)
+            for k in range(t, throw):
+                out[k][7] = 0
+            out[throw][7] = 1
+            out[throw + 1][7] = 0
+            back = throw + rng.choice([0, 1, 2, 6])
+        elif kind == "held":
+            # The button stays down: another pearl every fourth tick.
+            out[t - 1][7] = 0
+            out[t][8] = 2
+            keep = rng.choice([3, 5, 6, 9, 10])
+            for k in range(t, t + keep):
+                out[k][7] = 1
+            out[t + keep][7] = 0
+            back = t + keep + rng.choice([0, 1, 3])
+        else:
+            # Out of a block with the sword, the button never let go.
+            for k in range(t - 4, t + 1):
+                out[k][7] = 1
+            out[t][8] = 2
+            keep = rng.choice([1, 2, 5, 9])
+            for k in range(t, t + keep):
+                out[k][7] = 1
+            out[t + keep][7] = 0
+            throw = t + 1
+            back = t + keep + rng.choice([0, 1, 2])
+        if back < n:
+            out[back][8] = 1 if out[back][8] == 0 else out[back][8]
+        if aim != "as is" and throw - 1 > 0:
+            want = {"up": rng.uniform(-50, -15), "down": rng.uniform(40, 90), "side": rng.uniform(-30, 20),
+                    "high": rng.uniform(-90, -60)}[aim]
+            turn = rng.choice([0, 0, 200, -200, 600, -600, 1200]) if aim in ("side", "high") or solo else 0
+            flick(throw - 1, want, turn)
+        t = back + rng.randint(*gap)
+    return [tuple(o) for o in out]
+
+def fight_fake(rng, n, lines, hops=True, attacks=True, blocks=False, pearls=0.0):
     """What the scripted player does on each server tick."""
     arc, air = jump_arc(), []
     dist, angle = 2.5, 0.0
     t = 0
+    later = {}
     while t < n:
         mode = rng.choices(["front", "free", "still"], [6, 2, 1])[0]
         length = rng.randint(15, 90)
@@ -161,6 +238,19 @@ def fight_fake(rng, n, lines, hops=True, attacks=True, blocks=False):
                 lines.append("F %d SPRINT 1" % t)
             elif r < 0.14:
                 lines.append("F %d SPRINT 0" % t)
+            if pearls and not later and rng.random() < pearls:
+                # Take the pearls in hand, throw (now or a little later, sometimes after
+                # turning the head), take the sword again.
+                lines.append("F %d SLOT 1" % t)
+                k = t + rng.choice([0, 0, 0, 1, 3])
+                if rng.random() < 0.5:
+                    later.setdefault(k, []).append("LOOK %d %d" % (rng.randint(-180, 180), rng.choice([-80, -40, -20, -5, 10, 30, 70, 90])))
+                later.setdefault(k, []).append("USE")
+                if rng.random() < 0.2:
+                    later.setdefault(k + 1, []).append("USE")
+                later.setdefault(k + rng.choice([0, 1, 1, 2, 5]), []).append("SLOT 0")
+            for a in later.pop(t, []):
+                lines.append("F %d %s" % (t, a))
             if hops and not air and rng.random() < 0.04:
                 air = list(arc)
             up = air.pop(0) if air else 0.0
@@ -216,6 +306,24 @@ def main():
             lines.append("unbreakable 1")
         seq = idle8 + with_use(rng, fight_inputs(rng, 1000, per_count=per_count), holds=opts.get("holds", "0") != "0")
         fight_fake(rng, len(seq) + 60, lines, blocks=True)
+    elif name == "pearl":
+        # A fight with ender pearls on both sides, under a roof so that they stay inside.
+        pen(lines, half=6, height=9, roof=True)
+        lines.append("fake 0.5 4 3.0 180 0")
+        lines.append("pearls %s" % opts.get("pearls", "16"))
+        if opts.get("unbreakable", "0") != "0":
+            lines.append("unbreakable 1")
+        seq = fight_inputs(rng, 1000, per_count=per_count)
+        blocking = opts.get("blocks", "0") != "0"
+        seq = with_use(rng, seq) if blocking else seq
+        gap = (8, 30) if opts.get("many", "0") != "0" else (25, 80)
+        seq = [(0,) * 9] * 12 + with_pearls(rng, seq, per_count, gap=gap, blocking=blocking)
+        fight_fake(rng, len(seq) + 60, lines, blocks=blocking, pearls=float(opts.get("fake", "0.02")))
+    elif name == "pearlsolo":
+        # Alone under the roof: pearls in every direction, at the walls, the roof and the floor.
+        pen(lines, half=6, height=9, roof=True)
+        lines.append("pearls %s" % opts.get("pearls", "16"))
+        seq = [(0,) * 9] * 12 + with_pearls(rng, movement(rng, 800, clicks=True), per_count, gap=(10, 45), solo=True)
     elif name == "long":
         # Nobody leaves the ground and the scripted player never hits back, so that the
         # entity tracker reaches its periodic full position update.

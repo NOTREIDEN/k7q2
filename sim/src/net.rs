@@ -1,6 +1,20 @@
-//! The packets a sword duel needs, and a FIFO link with per-packet delay.
+//! The packets a duel with swords and ender pearls needs, and a FIFO link
+//! with per-packet delay.
 use crate::aabb::V3;
 use std::collections::VecDeque;
+
+/// What a hotbar slot holds. The sword is in the first slot and the ender
+/// pearls in the second; the other seven are empty.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Item {
+    Sword,
+    Pearl,
+    Empty,
+}
+
+/// Hotbar slot of the sword and of the pearls.
+pub const SLOT_SWORD: u8 = 0;
+pub const SLOT_PEARL: u8 = 1;
 
 /// Client to server.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -27,6 +41,24 @@ pub enum C2S {
     UseItem,
     /// C07 player digging, action RELEASE_USE_ITEM: stop blocking.
     ReleaseUse,
+    /// C09 held item change: the hotbar slot now in hand, 0 to 8.
+    HeldItem(u8),
+}
+
+/// What the server tells a client about an ender pearl in flight.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum PearlEv {
+    /// S0E spawn object, type 65: position in 1/32 block, angles in 1/256 turn.
+    Spawn { p: [i32; 3], yaw: i8, pitch: i8 },
+    /// S1C entity metadata sent with the spawn. It carries nothing.
+    Meta,
+    /// S12 entity velocity, in 1/8000 block per tick.
+    Velocity([i32; 3]),
+    /// S15, S16, S17, S18 as for a player.
+    RelMove { d: [i8; 3], on_ground: bool },
+    Look { yaw: i8, pitch: i8, on_ground: bool },
+    LookMove { d: [i8; 3], yaw: i8, pitch: i8, on_ground: bool },
+    Teleport { p: [i32; 3], yaw: i8, pitch: i8, on_ground: bool },
 }
 
 /// Server to client. `own` means the packet is about the receiving player.
@@ -47,9 +79,24 @@ pub enum S2C {
     /// S1C entity metadata carrying the flags byte: bit 3 is sprinting,
     /// bit 4 is set while the player uses an item (blocks).
     Meta { own: bool, sprinting: bool, using: bool },
-    /// S2F set slot for the held item of the receiving player. The server
-    /// sends it when the sword has lost durability on a hit.
-    SetSlot,
+    /// S2F set slot for a hotbar slot of the receiving player: a new stack
+    /// of `count` items (0 empties the slot). The server sends it for the
+    /// sword when a hit has cost it durability, and for the pearls after a
+    /// throw.
+    SetSlot { slot: u8, count: u8 },
+    /// S30 window items: the whole inventory again, every stack a new one.
+    /// The server sends it after a throw. `pearls` is how many are left.
+    WindowItems { pearls: u8 },
+    /// S2F for the stack on the mouse cursor, which follows S30. Nothing
+    /// comes of it.
+    Cursor,
+    /// S04 entity equipment: what the other player now holds. `n` is the
+    /// wear of a sword or the size of a stack of pearls.
+    Equip { item: Item, n: u32 },
+    /// Something about the ender pearl with this entity id.
+    Pearl { id: u32, ev: PearlEv },
+    /// S13 destroy entities: these pearls are gone (the first `n` ids).
+    Destroy { ids: [u32; 8], n: u8 },
     /// S20 entity properties for `generic.movementSpeed`.
     Props { own: bool, base: f64, speed_amp: i8, sprint: bool },
     /// S0B animation 0 (arm swing) of the other player.

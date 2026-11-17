@@ -1,11 +1,13 @@
 //! The server side of a duel: `NetHandlerPlayServer` packet handlers, the
-//! parts of `EntityPlayerMP` that decide hits and knockback, and the
-//! `EntityTrackerEntry` that tells each client where the other player is.
-use crate::aabb::{dist_sq, V3, EYE_HEIGHT};
+//! parts of `EntityPlayerMP` that decide hits and knockback, the ender
+//! pearls in flight (`EntityEnderPearl`), and the `EntityTrackerEntry` that
+//! tells each client where the other player and the pearls are.
+use crate::aabb::{dist_sq, Aabb, V3, EYE_HEIGHT};
 use crate::living::Living;
 use crate::mth::{self, Rng};
-use crate::net::{C2S, S2C};
-use crate::world::World;
+use crate::net::{Item, PearlEv, C2S, S2C, SLOT_PEARL, SLOT_SWORD};
+use crate::world::{RayHit, World};
+use std::collections::VecDeque;
 
 /// Knockback numbers. The defaults are the vanilla constants; a test server
 /// plugin exposes the same six values.
@@ -89,6 +91,9 @@ pub struct ServerCfg {
     /// The server then sends the attacker its sword again, and a client
     /// that gets it while blocking stops blocking on its own side only.
     pub sword_wear: f32,
+    /// Server ticks a player has to wait between two ender pearls. The game
+    /// has no wait (0); servers add one with a plugin, usually 16 seconds.
+    pub pearl_cooldown: i32,
 }
 
 impl Default for ServerCfg {
@@ -102,8 +107,80 @@ impl Default for ServerCfg {
             fall_damage: true,
             max_no_damage: 20,
             sword_wear: 1.0,
+            pearl_cooldown: 0,
         }
     }
+}
+
+/// An ender pearl in flight (`EntityEnderPearl`) with its tracker entry.
+#[derive(Clone, Debug)]
+pub struct Pearl {
+    pub id: u32,
+    pub thrower: usize,
+    pub pos: V3,
+    pub motion: V3,
+    pub yaw: f32,
+    pub pitch: f32,
+    pub prev_yaw: f32,
+    pub prev_pitch: f32,
+    pub ticks_in_air: i32,
+    pub dead: bool,
+    // EntityTrackerEntry for this pearl.
+    pub enc_pos: [i32; 3],
+    pub enc_yaw: i32,
+    pub enc_pitch: i32,
+    pub update_counter: i32,
+    pub ticks_since_teleport: i32,
+    pub last_motion: V3,
+    /// The direction and speed of the throw before the game added its
+    /// random part.
+    pub aim: V3,
+}
+
+/// A pearl that came down and moved its thrower.
+#[derive(Clone, Copy, Debug)]
+pub struct Landing {
+    pub thrower: usize,
+    /// Where the thrower was put: the pearl's position at the start of the
+    /// tick in which it hit.
+    pub pos: V3,
+    /// It hit the other player rather than a block.
+    pub on_player: bool,
+    /// Ticks it flew.
+    pub ticks: i32,
+}
+
+/// Damage a pearl does to its thrower on arrival (`DamageSource.fall`).
+pub const PEARL_DAMAGE: f32 = 5.0;
+
+/// Would `World.getEntitiesWithinAABB` find an entity filed under chunk
+/// `c` for the box `q`? It looks through the chunks within two blocks of
+/// the box and the 16-block slices within two blocks of its height.
+#[inline]
+fn filed_near(q: &Aabb, c: [i32; 3]) -> bool {
+    let near = |lo: f64, hi: f64, v: i32| mth::floor_d((lo - 2.0) / 16.0) <= v && v <= mth::floor_d((hi + 2.0) / 16.0);
+    near(q.min[0], q.max[0], c[0])
+        && near(q.min[2], q.max[2], c[2])
+        && mth::floor_d((q.min[1] - 2.0) / 16.0).clamp(0, 15) <= c[1]
+        && c[1] <= mth::floor_d((q.max[1] + 2.0) / 16.0).clamp(0, 15)
+}
+
+/// `Entity.isEntityInsideOpaqueBlock` for a standing player at `pos`: is one
+/// of eight points around the eyes inside a solid block?
+pub fn inside_opaque_block(world: &World, pos: V3) -> bool {
+    let width = 0.6f32;
+    for i in 0..8 {
+        let dy = (((i >> 0) % 2) as f32 - 0.5f32) * 0.1f32;
+        let dx = (((i >> 1) % 2) as f32 - 0.5f32) * width * 0.8f32;
+        let dz = (((i >> 2) % 2) as f32 - 0.5f32) * width * 0.8f32;
+        let j = mth::floor_d(pos[1] + dy as f64 + EYE_HEIGHT);
+        let k = mth::floor_d(pos[0] + dx as f64);
+        let l = mth::floor_d(pos[2] + dz as f64);
+        if world.solid(k, j, l) {
+            return true;
+        }
+    }
+    false
 }
 
 /// A hit that passed the invulnerability check and produced knockback.
@@ -172,6 +249,21 @@ pub struct ServerPlayer {
     pub autoblock: bool,
     /// Damage taken, before armour, since the caller last cleared it.
     pub damage_taken: f32,
+    /// `inventory.currentItem`: the hotbar slot in hand.
+    pub held: u8,
+    /// Ender pearls left in the second hotbar slot.
+    pub pearls: u8,
+    /// Damage value of the sword: the hits that have cost it durability.
+    pub sword_wear: u32,
+    /// `previousEquipment[0]`: what this player held when it was last
+    /// updated. The damage of its attacks comes from this item, and the
+    /// other player is told when it changes.
+    pub equip: (Item, u32),
+    /// Pearls that are gone, reported on the next tick
+    /// (`destroyedItemsNetCache`).
+    pub gone: Vec<u32>,
+    /// Ticks until the server lets this player throw the next pearl.
+    pub pearl_wait: i32,
 }
 
 /// `chunkCoordX/Y/Z` for a position.
@@ -213,6 +305,23 @@ impl ServerPlayer {
             slot_dirty: false,
             autoblock: false,
             damage_taken: 0.0,
+            held: SLOT_SWORD,
+            pearls: 0,
+            sword_wear: 0,
+            equip: (Item::Sword, 0),
+            gone: Vec::new(),
+            pearl_wait: 0,
+        }
+    }
+
+    /// The stack in hand: which item, and its wear (a sword) or its size
+    /// (pearls).
+    #[inline]
+    pub fn in_hand(&self) -> (Item, u32) {
+        match self.held {
+            SLOT_SWORD => (Item::Sword, self.sword_wear),
+            SLOT_PEARL if self.pearls > 0 => (Item::Pearl, self.pearls as u32),
+            _ => (Item::Empty, 0),
         }
     }
 
@@ -281,6 +390,27 @@ pub struct Server {
     pub hits: Vec<Hit>,
     /// Attack packets that reached the server, per attacker.
     pub attacks_received: [u32; 2],
+    /// Ender pearls in flight, oldest first.
+    pub pearls: Vec<Pearl>,
+    pub next_pearl_id: u32,
+    /// Pearls that moved their thrower since the caller last drained this.
+    pub landings: Vec<Landing>,
+    /// Pearls thrown, per player.
+    pub throws: [u32; 2],
+    /// Replaying a recording: the exact motion of the next pearls thrown,
+    /// which in the game has a random part.
+    pub pearl_motions: VecDeque<V3>,
+    /// Replaying a recording: every pearl as it was when thrown.
+    pub spawned: Vec<Pearl>,
+    /// Replaying a recording: pearls the game did not update on this tick.
+    /// It leaves out entities close to a part of the world that is not
+    /// loaded, which only happens to a pearl that got out of the scene.
+    pub frozen: Vec<u32>,
+    /// What servers add against pearl glitches: a pearl that would put its
+    /// thrower inside a block is lost instead. The plain game has no such
+    /// rule, and a pearl that has gone through its own thrower into the
+    /// ground does put the thrower there.
+    pub pearl_guard: bool,
 }
 
 /// Packets produced by the server: (destination client, packet).
@@ -288,7 +418,22 @@ pub type Outbox = Vec<(usize, S2C)>;
 
 impl Server {
     pub fn new(p0: ServerPlayer, p1: ServerPlayer, kb: KbProfile, cfg: ServerCfg) -> Self {
-        Server { p: [p0, p1], kb, plugin: None, cfg, hits: Vec::with_capacity(4), attacks_received: [0; 2] }
+        Server {
+            p: [p0, p1],
+            kb,
+            plugin: None,
+            cfg,
+            hits: Vec::with_capacity(4),
+            attacks_received: [0; 2],
+            pearls: Vec::new(),
+            next_pearl_id: 0,
+            landings: Vec::new(),
+            throws: [0; 2],
+            pearl_motions: VecDeque::new(),
+            spawned: Vec::new(),
+            frozen: Vec::new(),
+            pearl_guard: false,
+        }
     }
 
     /// A packet handler, run at the start of a server tick in arrival order.
@@ -308,14 +453,279 @@ impl Server {
                 self.p[from].client_sprint = s;
             }
             C2S::Player { pos, rot, on_ground } => self.process_player(from, pos, rot, on_ground, world, rng, out),
-            // processUseEntity for the two interactions and the block
-            // placement on a block: nothing changes with a sword in hand.
-            C2S::InteractAt | C2S::Interact | C2S::UseBlock => {}
-            // tryUseItem -> ItemSword.onItemRightClick -> setItemInUse
-            C2S::UseItem => self.p[from].set_using(true),
+            // processUseEntity for the two interactions: nothing comes of
+            // them whatever is in hand.
+            C2S::InteractAt | C2S::Interact => {}
+            // processPlayerBlockPlacement on a block: neither a sword nor a
+            // pearl does anything to it. With anything but the sword in
+            // hand, the handler then brings its copy of the inventory up to
+            // date without sending it, which loses a sword that was about
+            // to be sent again.
+            C2S::UseBlock => {
+                if self.p[from].in_hand().0 != Item::Sword {
+                    self.p[from].slot_dirty = false;
+                }
+            }
+            C2S::UseItem => self.use_item(from, rng, out),
             // processPlayerDigging RELEASE_USE_ITEM -> stopUsingItem
             C2S::ReleaseUse => self.p[from].set_using(false),
+            // processHeldItemChange
+            C2S::HeldItem(slot) => {
+                if slot < 9 {
+                    self.p[from].held = slot;
+                }
+            }
         }
+    }
+
+    /// `processPlayerBlockPlacement` with direction 255: use what is in
+    /// hand. The sword blocks; a pearl is thrown.
+    fn use_item(&mut self, i: usize, rng: &mut Rng, out: &mut Outbox) {
+        match self.p[i].in_hand().0 {
+            Item::Empty => {}
+            // tryUseItem -> ItemSword.onItemRightClick -> setItemInUse
+            Item::Sword => self.p[i].set_using(true),
+            Item::Pearl => {
+                if self.cfg.pearl_cooldown > 0 && self.p[i].pearl_wait > 0 {
+                    // The plugin cancels the click and sends the inventory
+                    // again, so that the client gets its pearl back.
+                    out.push((i, S2C::WindowItems { pearls: self.p[i].pearls }));
+                    out.push((i, S2C::Cursor));
+                    return;
+                }
+                self.p[i].pearl_wait = self.cfg.pearl_cooldown;
+                // ItemEnderPearl.onItemRightClick
+                self.p[i].pearls -= 1;
+                self.throws[i] += 1;
+                self.spawn_pearl(i, rng, out);
+                // tryUseItem: the stack changed, so the whole inventory is
+                // sent, unless the server still has the player blocking.
+                if !self.p[i].using_item {
+                    out.push((i, S2C::WindowItems { pearls: self.p[i].pearls }));
+                    out.push((i, S2C::Cursor));
+                }
+                // Back in the packet handler: the inventory copy is brought
+                // up to date without sending, then the slot is sent because
+                // it differs from what the client said it held.
+                self.p[i].slot_dirty = false;
+                out.push((i, S2C::SetSlot { slot: self.p[i].held, count: self.p[i].pearls }));
+            }
+        }
+    }
+
+    /// `new EntityEnderPearl(world, thrower)` and `spawnEntityInWorld`,
+    /// which makes the entity tracker tell both players at once.
+    fn spawn_pearl(&mut self, i: usize, rng: &mut Rng, out: &mut Outbox) {
+        let p = &self.p[i];
+        let (yaw, pitch) = (p.l.yaw, p.l.pitch);
+        let rad = mth::PI_F;
+        let mut pos = [p.l.body.pos[0], p.l.body.pos[1] + EYE_HEIGHT, p.l.body.pos[2]];
+        pos[0] -= (mth::cos(yaw / 180.0f32 * rad) * 0.16f32) as f64;
+        pos[1] -= 0.10000000149011612;
+        pos[2] -= (mth::sin(yaw / 180.0f32 * rad) * 0.16f32) as f64;
+        let f = 0.4f32;
+        let mx = (-mth::sin(yaw / 180.0f32 * rad) * mth::cos(pitch / 180.0f32 * rad) * f) as f64;
+        let mz = (mth::cos(yaw / 180.0f32 * rad) * mth::cos(pitch / 180.0f32 * rad) * f) as f64;
+        let my = (-mth::sin((pitch + 0.0f32) / 180.0f32 * rad) * f) as f64;
+        // setThrowableHeading(x, y, z, 1.5F, 1.0F)
+        let len = mth::sqrt_d(mx * mx + my * my + mz * mz) as f64;
+        let spread = 0.007499999832361937 * 1.0f32 as f64;
+        let mut m = [mx / len, my / len, mz / len];
+        let aim = [m[0] * 1.5f32 as f64, m[1] * 1.5f32 as f64, m[2] * 1.5f32 as f64];
+        for v in m.iter_mut() {
+            *v += rng.gaussian() * spread;
+            *v *= 1.5f32 as f64;
+        }
+        let replaying = !self.pearl_motions.is_empty();
+        if let Some(exact) = self.pearl_motions.pop_front() {
+            m = exact;
+        }
+        let f1 = mth::sqrt_d(m[0] * m[0] + m[2] * m[2]);
+        let pyaw = (mth::atan2(m[0], m[2]) * 180.0 / std::f64::consts::PI) as f32;
+        let ppitch = (mth::atan2(m[1], f1 as f64) * 180.0 / std::f64::consts::PI) as f32;
+        let id = self.next_pearl_id;
+        self.next_pearl_id += 1;
+        let e = Pearl {
+            id,
+            thrower: i,
+            pos,
+            motion: m,
+            yaw: pyaw,
+            pitch: ppitch,
+            prev_yaw: pyaw,
+            prev_pitch: ppitch,
+            ticks_in_air: 0,
+            dead: false,
+            enc_pos: [mth::floor_d(pos[0] * 32.0), mth::floor_d(pos[1] * 32.0), mth::floor_d(pos[2] * 32.0)],
+            enc_yaw: mth::floor_f(pyaw * 256.0f32 / 360.0f32),
+            enc_pitch: mth::floor_f(ppitch * 256.0f32 / 360.0f32),
+            update_counter: 0,
+            ticks_since_teleport: 0,
+            last_motion: m,
+            aim,
+        };
+        if replaying {
+            self.spawned.push(e.clone());
+        }
+        // EntityTrackerEntry.updatePlayerEntity for each player.
+        for dest in 0..2 {
+            out.push((dest, S2C::Pearl { id, ev: PearlEv::Spawn { p: e.enc_pos, yaw: e.enc_yaw as i8, pitch: e.enc_pitch as i8 } }));
+            out.push((dest, S2C::Pearl { id, ev: PearlEv::Meta }));
+            out.push((dest, S2C::Pearl { id, ev: PearlEv::Velocity(encode_velocity(m)) }));
+        }
+        self.pearls.push(e);
+    }
+
+    /// `EntityThrowable.onUpdate` and `EntityEnderPearl.onImpact` for the
+    /// pearl at index `k`.
+    fn pearl_update(&mut self, k: usize, world: &World, rng: &mut Rng, out: &mut Outbox) {
+        let e = &mut self.pearls[k];
+        // Entity.onEntityUpdate
+        e.prev_yaw = e.yaw;
+        e.prev_pitch = e.pitch;
+        if e.pos[1] < -64.0 {
+            e.dead = true;
+            return;
+        }
+        e.ticks_in_air += 1;
+        let vec3 = e.pos;
+        let mut vec31 = [e.pos[0] + e.motion[0], e.pos[1] + e.motion[1], e.pos[2] + e.motion[2]];
+        let mut hit_block = false;
+        if let RayHit::Block(h) = world.ray_trace_blocks(vec3, vec31, false) {
+            vec31 = h;
+            hit_block = true;
+        }
+        // The players the path comes near. The box of the pearl is a
+        // quarter of a block wide and high.
+        let w = (0.25f32 / 2.0f32) as f64;
+        let bb = Aabb::new([e.pos[0] - w, e.pos[1], e.pos[2] - w], [e.pos[0] + w, e.pos[1] + 0.25f32 as f64, e.pos[2] + w]);
+        let query = bb.add_coord(e.motion[0], e.motion[1], e.motion[2]).expand(1.0, 1.0, 1.0);
+        let (thrower, ticks_in_air) = (e.thrower, e.ticks_in_air);
+        let mut hit_player: Option<usize> = None;
+        let mut d0 = 0.0f64;
+        for j in 0..2 {
+            let q = &self.p[j];
+            if !filed_near(&query, q.chunk) || !q.l.body.bb.intersects(&query) {
+                continue;
+            }
+            if j == thrower && ticks_in_air < 5 {
+                continue;
+            }
+            let f = 0.3f32 as f64;
+            if let Some(h) = q.l.body.bb.expand(f, f, f).calculate_intercept(vec3, vec31) {
+                let d1 = dist_sq(vec3, h);
+                if d1 < d0 || d0 == 0.0 {
+                    hit_player = Some(j);
+                    d0 = d1;
+                }
+            }
+        }
+        // onImpact. A pearl goes through its own thrower, and while it does
+        // it does not notice a block either.
+        let impact = match hit_player {
+            Some(j) => j != thrower,
+            None => hit_block,
+        };
+        if impact {
+            let to = self.pearls[k].pos;
+            let (bx, by, bz) = (mth::floor_d(to[0]), mth::floor_d(to[1]), mth::floor_d(to[2]));
+            let inside = world.solid(bx, by, bz) || world.solid(bx, by + 1, bz);
+            if !(self.pearl_guard && inside) {
+                let (yaw, pitch) = (self.p[thrower].l.yaw, self.p[thrower].l.pitch);
+                self.set_player_location(thrower, to, yaw, pitch, out);
+                self.p[thrower].l.body.fall_distance = 0.0;
+                self.attack_entity_from(thrower, PEARL_DAMAGE, None, rng, out);
+                self.landings.push(Landing { thrower, pos: to, on_player: hit_player.is_some(), ticks: ticks_in_air });
+            }
+            self.pearls[k].dead = true;
+        }
+        let e = &mut self.pearls[k];
+        for a in 0..3 {
+            e.pos[a] += e.motion[a];
+        }
+        let f1 = mth::sqrt_d(e.motion[0] * e.motion[0] + e.motion[2] * e.motion[2]);
+        e.yaw = (mth::atan2(e.motion[0], e.motion[2]) * 180.0 / std::f64::consts::PI) as f32;
+        e.pitch = (mth::atan2(e.motion[1], f1 as f64) * 180.0 / std::f64::consts::PI) as f32;
+        while e.pitch - e.prev_pitch < -180.0f32 {
+            e.prev_pitch -= 360.0f32;
+        }
+        while e.pitch - e.prev_pitch >= 180.0f32 {
+            e.prev_pitch += 360.0f32;
+        }
+        while e.yaw - e.prev_yaw < -180.0f32 {
+            e.prev_yaw -= 360.0f32;
+        }
+        while e.yaw - e.prev_yaw >= 180.0f32 {
+            e.prev_yaw += 360.0f32;
+        }
+        e.pitch = e.prev_pitch + (e.pitch - e.prev_pitch) * 0.2f32;
+        e.yaw = e.prev_yaw + (e.yaw - e.prev_yaw) * 0.2f32;
+        let (f2, f3) = (0.99f32 as f64, 0.03f32 as f64);
+        for a in 0..3 {
+            e.motion[a] *= f2;
+        }
+        e.motion[1] -= f3;
+    }
+
+    /// `EntityTrackerEntry.updatePlayerList` for the pearl at index `k`:
+    /// update frequency 10, with velocity updates, sent to both players.
+    fn pearl_tracker_update(&mut self, k: usize, out: &mut Outbox) {
+        let e = &mut self.pearls[k];
+        let id = e.id;
+        let mut send = |ev: PearlEv| {
+            for dest in 0..2 {
+                out.push((dest, S2C::Pearl { id, ev }));
+            }
+        };
+        if e.update_counter % 10 == 0 {
+            e.ticks_since_teleport += 1;
+            let k0 = mth::floor_d(e.pos[0] * 32.0);
+            let j1 = mth::floor_d(e.pos[1] * 32.0);
+            let k1 = mth::floor_d(e.pos[2] * 32.0);
+            let l1 = mth::floor_f(e.yaw * 256.0f32 / 360.0f32);
+            let i2 = mth::floor_f(e.pitch * 256.0f32 / 360.0f32);
+            let j2 = k0 - e.enc_pos[0];
+            let k2 = j1 - e.enc_pos[1];
+            let ii = k1 - e.enc_pos[2];
+            let flag = j2.abs() >= 4 || k2.abs() >= 4 || ii.abs() >= 4 || e.update_counter % 60 == 0;
+            let flag1 = (l1 - e.enc_yaw).abs() >= 4 || (i2 - e.enc_pitch).abs() >= 4;
+            let mut pkt = None;
+            if e.update_counter > 0 {
+                let in_range = |v: i32| (-128..128).contains(&v);
+                if in_range(j2) && in_range(k2) && in_range(ii) && e.ticks_since_teleport <= 400 {
+                    if !flag || !flag1 {
+                        if flag {
+                            pkt = Some(PearlEv::RelMove { d: [j2 as i8, k2 as i8, ii as i8], on_ground: false });
+                        } else if flag1 {
+                            pkt = Some(PearlEv::Look { yaw: l1 as i8, pitch: i2 as i8, on_ground: false });
+                        }
+                    } else {
+                        pkt = Some(PearlEv::LookMove { d: [j2 as i8, k2 as i8, ii as i8], yaw: l1 as i8, pitch: i2 as i8, on_ground: false });
+                    }
+                } else {
+                    e.ticks_since_teleport = 0;
+                    pkt = Some(PearlEv::Teleport { p: [k0, j1, k1], yaw: l1 as i8, pitch: i2 as i8, on_ground: false });
+                }
+            }
+            let d = [e.motion[0] - e.last_motion[0], e.motion[1] - e.last_motion[1], e.motion[2] - e.last_motion[2]];
+            let d3 = 0.02f64;
+            let d4 = d[0] * d[0] + d[1] * d[1] + d[2] * d[2];
+            if d4 > d3 * d3 || (d4 > 0.0 && e.motion == [0.0; 3]) {
+                e.last_motion = e.motion;
+                send(PearlEv::Velocity(encode_velocity(e.motion)));
+            }
+            if let Some(p) = pkt {
+                send(p);
+            }
+            if flag {
+                e.enc_pos = [k0, j1, k1];
+            }
+            if flag1 {
+                e.enc_yaw = l1;
+                e.enc_pitch = i2;
+            }
+        }
+        e.update_counter += 1;
     }
 
     /// `NetHandlerPlayServer.setPlayerLocation` with no relative flags.
@@ -364,7 +774,7 @@ impl Server {
         let d = pos.unwrap_or(last);
         let (f1, f2) = rot.unwrap_or((self.p[i].l.yaw, self.p[i].l.pitch));
 
-        self.on_update_entity(i, world);
+        self.on_update_entity(i, world, rng, out);
 
         let p = &mut self.p[i];
         p.set_position_and_rotation(last, f1, f2);
@@ -427,11 +837,30 @@ impl Server {
     /// `EntityPlayerMP.onUpdateEntity`: the server runs a living update with
     /// no input on its own copy of the motion, then the caller snaps the
     /// position back. Only the motion and the ground flag survive.
-    fn on_update_entity(&mut self, i: usize, world: &World) {
+    fn on_update_entity(&mut self, i: usize, world: &World, rng: &mut Rng, out: &mut Outbox) {
+        // EntityPlayer.onUpdate: an item is in use only while it is the one
+        // in hand.
+        if self.p[i].using_item && self.p[i].held != SLOT_SWORD {
+            self.p[i].set_using(false);
+        }
+        // EntityLivingBase.onEntityUpdate: a player whose head is inside a
+        // block suffocates. A pearl that lands against a ceiling or close
+        // to a wall puts its thrower there.
+        if inside_opaque_block(world, self.p[i].l.body.pos) {
+            self.attack_entity_from(i, 1.0, None, rng, out);
+        }
         {
             let p = &mut self.p[i];
             if p.hurt_time > 0 {
                 p.hurt_time -= 1;
+            }
+            // EntityLivingBase.onUpdate: when the stack in hand is not the
+            // one last seen, the other player is told, and the attack
+            // damage follows the new item from here on.
+            let now = p.in_hand();
+            if now != p.equip {
+                p.equip = now;
+                out.push((1 - i, S2C::Equip { item: now.0, n: now.1 }));
             }
             // updateArmSwingProgress
             if p.swing_in_progress {
@@ -451,12 +880,7 @@ impl Server {
         // getEntitiesInAABBexcluding looks through the chunks within two
         // blocks of the box, where a player is filed by its position at the
         // last world tick.
-        let c = self.p[j].chunk;
-        let near = |lo: f64, hi: f64, v: i32| mth::floor_d((lo - 2.0) / 16.0) <= v && v <= mth::floor_d((hi + 2.0) / 16.0);
-        let filed = near(q.min[0], q.max[0], c[0])
-            && near(q.min[2], q.max[2], c[2])
-            && mth::floor_d((q.min[1] - 2.0) / 16.0).clamp(0, 15) <= c[1]
-            && c[1] <= mth::floor_d((q.max[1] + 2.0) / 16.0).clamp(0, 15);
+        let filed = filed_near(&q, self.p[j].chunk);
         if filed && self.p[j].l.body.bb.intersects(&q) {
             // other.applyEntityCollision(this)
             let mut d0 = self.p[i].l.body.pos[0] - self.p[j].l.body.pos[0];
@@ -494,12 +918,15 @@ impl Server {
         if !(dsq < limit) {
             return;
         }
-        let mut f = self.cfg.damage;
-        let f1 = self.cfg.ench_damage;
-        let mut i = self.cfg.kb_ench;
-        if self.p[a].l.sprinting {
-            i += 1;
-        }
+        // generic.attackDamage carries the sword's bonus only once an
+        // update has seen the sword in hand; the enchantments are read from
+        // what is in hand now.
+        let sword_now = self.p[a].in_hand().0 == Item::Sword;
+        let mut f = if self.p[a].equip.0 == Item::Sword { self.cfg.damage } else { 1.0 };
+        let f1 = if sword_now { self.cfg.ench_damage } else { 0.0 };
+        let ench = if sword_now { self.cfg.kb_ench } else { 0 };
+        let sprinting = self.p[a].l.sprinting;
+        let i = ench + sprinting as i32;
         if f > 0.0 || f1 > 0.0 {
             let crit = self.p[a].l.body.fall_distance > 0.0 && !self.p[a].l.body.on_ground;
             if crit && f > 0.0 {
@@ -510,9 +937,10 @@ impl Server {
             let n_hits = self.hits.len();
             let flag2 = self.attack_entity_from(v, f, Some(a), rng, out);
             if flag2 {
-                // ItemSword.hitEntity -> damageItem
+                // ItemSword.hitEntity -> damageItem, for the item in hand.
                 let wear = self.cfg.sword_wear;
-                if wear >= 1.0 || (wear > 0.0 && rng.f64() < wear as f64) {
+                if sword_now && (wear >= 1.0 || (wear > 0.0 && rng.f64() < wear as f64)) {
+                    self.p[a].sword_wear += 1;
                     self.p[a].slot_dirty = true;
                 }
                 if i > 0 {
@@ -531,7 +959,7 @@ impl Server {
                     if let (Some(k), true) = (self.plugin, self.hits.len() > n_hits) {
                         // The plugin replaces the velocity in the event
                         // the server raises before sending it.
-                        let (vel, sp) = self.plugin_velocity(&k, a, v, i > self.cfg.kb_ench, rng);
+                        let (vel, sp) = self.plugin_velocity(&k, a, v, sprinting, ench, rng);
                         m = vel;
                         sprint_kb = sp;
                     }
@@ -553,8 +981,9 @@ impl Server {
 
     /// The velocity a `KbPlugin` sends for a hit of `a` on `v`, and whether
     /// it carried sprint knockback. `server_sprint` is the attacker's
-    /// server-side sprint flag as it was when the hit was made.
-    fn plugin_velocity(&mut self, k: &KbPlugin, a: usize, v: usize, server_sprint: bool, rng: &mut Rng) -> (V3, bool) {
+    /// server-side sprint flag as it was when the hit was made, and `ench`
+    /// the Knockback level of what it held.
+    fn plugin_velocity(&mut self, k: &KbPlugin, a: usize, v: usize, server_sprint: bool, ench: i32, rng: &mut Rng) -> (V3, bool) {
         let pa = self.p[a].l.body.pos;
         let pv = self.p[v].l.body.pos;
         let (mut dx, mut dz) = (pv[0] - pa[0], pv[2] - pa[2]);
@@ -568,7 +997,7 @@ impl Server {
         let (h, up) = if self.p[v].l.body.on_ground { (k.h_ground, k.v_ground) } else { (k.h_air, k.v_air) };
         let mut vel = [dx / dist * h, up, dz / dist * h];
         let sprint = if k.stop_sprint { server_sprint } else { self.p[a].client_sprint };
-        let level = self.cfg.kb_ench + sprint as i32;
+        let level = ench + sprint as i32;
         if level > 0 {
             let yaw = (self.p[a].l.yaw * 0.017453292f32) as f64;
             vel[0] -= yaw.sin() * level as f64 * k.h_sprint;
@@ -676,10 +1105,11 @@ impl Server {
         }
     }
 
-    /// The part of a server tick after the packet handlers:
-    /// `EntityPlayerMP.onUpdate` for both players, the entity tracker, then
-    /// the network tick.
-    pub fn tick(&mut self, out: &mut Outbox) {
+    /// The part of a server tick after the packet handlers: the world
+    /// update (`EntityPlayerMP.onUpdate` for both players, then every pearl
+    /// in the order they were thrown), the entity tracker, then the network
+    /// tick.
+    pub fn tick(&mut self, world: &World, rng: &mut Rng, out: &mut Outbox) {
         for (i, p) in self.p.iter_mut().enumerate() {
             if p.hurt_resistant_time > 0 {
                 p.hurt_resistant_time -= 1;
@@ -687,12 +1117,45 @@ impl Server {
             // openContainer.detectAndSendChanges
             if p.slot_dirty {
                 p.slot_dirty = false;
-                out.push((i, S2C::SetSlot));
+                out.push((i, S2C::SetSlot { slot: SLOT_SWORD, count: 1 }));
+            }
+            // destroyedItemsNetCache
+            if !p.gone.is_empty() {
+                for part in p.gone.chunks(8) {
+                    let mut ids = [0u32; 8];
+                    ids[..part.len()].copy_from_slice(part);
+                    out.push((i, S2C::Destroy { ids, n: part.len() as u8 }));
+                }
+                p.gone.clear();
+            }
+            if p.pearl_wait > 0 {
+                p.pearl_wait -= 1;
             }
             p.chunk = chunk_of(p.l.body.pos);
         }
+        let mut k = 0;
+        while k < self.pearls.len() {
+            if self.frozen.contains(&self.pearls[k].id) {
+                k += 1;
+                continue;
+            }
+            self.pearl_update(k, world, rng, out);
+            if self.pearls[k].dead {
+                // World.updateEntities takes a dead entity out at once, and
+                // the tracker notes it for both players.
+                let id = self.pearls.remove(k).id;
+                for p in self.p.iter_mut() {
+                    p.gone.push(id);
+                }
+            } else {
+                k += 1;
+            }
+        }
         for i in 0..2 {
             self.tracker_update(i, out);
+        }
+        for k in 0..self.pearls.len() {
+            self.pearl_tracker_update(k, out);
         }
         // NetHandlerPlayServer.update
         for p in self.p.iter_mut() {

@@ -15,28 +15,38 @@ For every client tick: the packets the client handled before the tick, the
 keys, clicks and mouse counts applied, the packets it sent, and afterwards
 the local player (position, motion, angles, sprint state, timers, the
 crosshair pick as nothing, the player or a block, whether it is blocking
-with its sword, the right click delay) and the other player as this client
-sees it, including whether it is shown blocking.
+with its sword, the right click delay, the slot in hand, the slot the
+server was told, the pearls left) and the other player as this client sees
+it, including whether it is shown blocking, and every pearl in flight as
+this client has it.
 
 For every server tick: the packets handled from each player, the packets
 sent to each player, and afterwards both players (position, motion, hurt
 timers, last damage, fall distance, the movement check's state, the chunk
-they are filed under, whether the server has them blocking) and their
-entity tracker entries.
+they are filed under, whether the server has them blocking, the slot in
+hand, the pearls left, the attack damage) and their entity tracker
+entries, and then one `SE` line per pearl in flight with its position,
+motion, angles, age and tracker entry.
 
 The packets written down are the ones a sword duel is made of: movement,
 swings, attacks, sprint and sneak actions, the right click (`C08`, and the
 two `C02` interact packets that go with it when the crosshair is on the
-player), the release of the block (`C07`), and from the server the entity
-tracker's packets, velocity, teleports, the flags byte and the sword being
-sent again after a hit that wore it (`S2F`).
+player), the release of the block (`C07`), the change of slot (`C09`), and
+from the server the entity tracker's packets, velocity, teleports, the
+flags byte, the sword being sent again after a hit that wore it (`S2F`),
+a pearl appearing and going (`S0E`, `S13`), the inventory sent again after
+a throw (`S30`) and what the other player holds (`S04`). The line of a
+pearl appearing also carries the pearl as the server created it, with the
+random part of its direction, which no packet holds.
 
 Doubles and floats are written as raw bits, so the comparison is exact.
 
 The second player is scripted on the server: it has no client. Its packets
 are injected on the server thread and what the server sends to it is only
 written down. It can stand at a spot relative to the real player (`FRONT`),
-walk towards a point (`GOTO`), jump, sprint, swing, attack and block.
+walk towards a point (`GOTO`), jump, sprint, swing, attack, block, change
+slot, look somewhere and throw a pearl. When a pearl moves it, it answers
+the server's teleport as a client would.
 
 ## How the replay works
 
@@ -81,9 +91,11 @@ hex numbers decoded, for reading one by hand.
 
 ## Scripts
 
-One line per client tick, `C forward strafe jump sprint attack dx dy use`,
-plus optional lines. `attack` is the number of left clicks in the tick,
-`use` is 1 while the right button is held and may be left out:
+One line per client tick, `C forward strafe jump sprint attack dx dy use
+slot`, plus optional lines. `attack` is the number of left clicks in the
+tick, `use` is 1 while the right button is held, and `slot` is a number
+key pressed on that tick (1 the sword, 2 the pearls, 0 none); the last two
+may be left out:
 
 | Line | Meaning |
 |---|---|
@@ -92,6 +104,7 @@ plus optional lines. `attack` is the number of left clicks in the tick,
 | `speed N` | Speed amplifier for both, `1` is Speed II (default), `-1` none |
 | `sensitivity X` | mouse slider, 0 to 1 (default 0.5) |
 | `unbreakable 1` | swords that do not wear, so the server never sends one again |
+| `pearls N` | both players get N ender pearls in the second hotbar slot |
 | `block x y z` | a stone block |
 | `pen lo hi` | keep the scripted player's spots inside this square |
 | `settle N` | ticks to wait before recording starts (default 100) |
@@ -99,16 +112,23 @@ plus optional lines. `attack` is the number of left clicks in the tick,
 | `F tick FRONT dist angle height yaw pitch` | stand `dist` from the real player, `angle` degrees off its line of sight, facing it |
 | `F tick GOTO x z step height yaw pitch` | walk towards a point, one step at most |
 | `F tick SPRINT 0/1`, `SWING`, `ATTACK`, `GROUND 0/1` | the matching packet |
-| `F tick USE`, `RELEASE` | scripted player: start and stop blocking |
+| `F tick USE`, `RELEASE` | scripted player: right click (block with the sword, throw with pearls in hand) and stop blocking |
+| `F tick SLOT n`, `LOOK yaw pitch` | scripted player: take hotbar slot n (from 0) in hand; turn the view without moving |
 
 Both players hold a diamond sword and get Resistance V and Saturation, so
 hits do no damage and knock back in full, which is the infinite-health
 setting of training stage one. The world is a flat grass floor at y = 4.
 
 The first line of a recording says which format it is (`fmt=2` has the
-right button, the block and the kind of crosshair pick) and whether the
-swords wear. Recordings without it are older and are compared on what they
-hold.
+right button, the block and the kind of crosshair pick; `fmt=3` adds the
+hotbar, the pearls and what the other player holds), whether the swords
+wear and how many pearls there are. Recordings without it are older and
+are compared on what they hold.
+
+`gen_script.py` writes the scenes: `fight`, `block`, `wall` and so on, and
+for pearls `pearl` (a fight in a pen with a roof) and `pearlsolo`.
+`scenarios.txt` lists the scenes that are stored as tests, with their seeds
+and options.
 
 ## Hooks
 

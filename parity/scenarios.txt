@@ -17,3 +17,10 @@ block3      block      53    unbreakable=1
 block4      block      54    speed=-1
 block5      block      55    holds=1
 block6      block      56    holds=1 unbreakable=1
+pearl1      pearl      66
+pearl2      pearl      62    sensitivity=0.83
+pearl3      pearl      63    blocks=1
+pearl4      pearl      64    blocks=1 unbreakable=1 speed=-1
+pearl5      pearl      65    many=1 fake=0.05
+pearlsolo1  pearlsolo  71
+pearlsolo2  pearlsolo  72    sensitivity=0.3 speed=-1

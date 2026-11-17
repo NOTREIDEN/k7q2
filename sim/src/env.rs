@@ -293,6 +293,7 @@ pub fn decode_action(a: &[i32]) -> Input {
         dx: YAW_BINS[pick(a[5], 27)],
         dy: PITCH_BINS[pick(a[6], 21)],
         use_item: a.len() > 7 && a[7] != 0,
+        slot_key: 0,
     }
 }
 
@@ -517,6 +518,7 @@ pub fn new_match(p: &Params, rng: &mut Rng, mode: Mode) -> (Match, [f64; 2], Bot
         fall_damage: p.fall_damage,
         max_no_damage,
         sword_wear: if p.sword_wear >= 0.0 { p.sword_wear as f32 } else { [1.0f32, 0.25, 0.25, 0.0][(rng.next_u64() % 4) as usize] },
+        pearl_cooldown: 0,
     };
     let seed = rng.next_u64();
     let mut m = Match::new(world, spawns, p.speed_amp, kb, scfg, ccfg, net, [0, c1, sv], seed);

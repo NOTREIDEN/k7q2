@@ -9,6 +9,7 @@
 //! the block grid cell by cell like `World.rayTraceBlocks`.
 use crate::aabb::{dist_sq, Aabb, V3};
 use crate::mth::floor_d;
+use std::collections::HashSet;
 
 #[derive(Clone, Debug)]
 pub struct World {
@@ -19,7 +20,7 @@ pub struct World {
     top_i: i32,
     walls: bool,
     /// Single full cubes placed on top of the floor (parity scenarios).
-    extra: Vec<[i32; 3]>,
+    extra: HashSet<[i32; 3]>,
 }
 
 /// Result of `World.rayTraceBlocks`.
@@ -41,15 +42,16 @@ impl World {
         let floor_i = floor_y.round() as i32;
         let half_i = half.round() as i32;
         let (floor_y, half) = (floor_i as f64, half_i as f64);
-        let top_i = floor_i + 32;
-        World { floor_y, half, floor_i, half_i, top_i, walls, extra: Vec::new() }
+        // Higher than an ender pearl can be thrown.
+        let top_i = floor_i + 64;
+        World { floor_y, half, floor_i, half_i, top_i, walls, extra: HashSet::new() }
     }
 
     /// A flat floor with single full cubes at the given block coordinates.
     /// Used to rebuild the scenery of a recording made in the real game.
     pub fn with_blocks(floor_y: f64, blocks: &[[i32; 3]]) -> World {
         let mut w = World::arena(floor_y, 4096.0, false);
-        w.extra.extend_from_slice(blocks);
+        w.extra.extend(blocks.iter().copied());
         w
     }
 
