@@ -10,7 +10,11 @@ import net.minecraft.client.entity.EntityPlayerSP;
 import net.minecraft.client.gui.GuiDisconnected;
 import net.minecraft.client.gui.GuiGameOver;
 import net.minecraft.client.gui.GuiMainMenu;
+import net.minecraft.client.gui.inventory.GuiInventory;
 import net.minecraft.client.multiplayer.GuiConnecting;
+import net.minecraft.item.ItemEnderPearl;
+import net.minecraft.item.ItemFood;
+import net.minecraft.item.ItemPotion;
 import net.minecraft.item.ItemStack;
 import net.minecraft.item.ItemSword;
 
@@ -31,6 +35,10 @@ final class ServerTest {
     private final String host;
     private final int port, ticksWanted;
     private int state, waited, ticks, duels, swings, deaths, settled;
+    /** What the agent used up and how often it went to its inventory, and the counts and the screen of the tick before. */
+    private int potions, meals, pearls, visits;
+    private int[] had;
+    private boolean wasOpen;
 
     ServerTest(PvpAi mod, String address) {
         this.mod = mod;
@@ -92,6 +100,8 @@ final class ServerTest {
             if (mod.on()) {
                 duels++;
                 state = 2;
+                had = null;
+                wasOpen = false;
             }
             settled = 0;
             return;
@@ -104,13 +114,32 @@ final class ServerTest {
         } else {
             swings += me.isSwingInProgress && me.swingProgressInt == 0 ? 1 : 0;
             ticks++;
+            int[] has = new int[3];
+            for (ItemStack s : me.inventory.mainInventory) {
+                if (s != null) {
+                    int kind = s.getItem() instanceof ItemPotion ? 0 : s.getItem() instanceof ItemFood ? 1 : s.getItem() instanceof ItemEnderPearl ? 2 : -1;
+                    if (kind >= 0) {
+                        has[kind] += s.stackSize;
+                    }
+                }
+            }
+            // One less than a tick ago was used; a death or a new kit changes more than that.
+            if (had != null && me.getHealth() > 0.0F) {
+                potions += had[0] - has[0] == 1 ? 1 : 0;
+                meals += had[1] - has[1] == 1 ? 1 : 0;
+                pearls += had[2] - has[2] == 1 ? 1 : 0;
+            }
+            had = has;
+            boolean open = mc.currentScreen instanceof GuiInventory;
+            visits += open && !wasOpen ? 1 : 0;
+            wasOpen = open;
         }
         if (ticks >= ticksWanted) {
             if (mod.on()) {
                 mod.flip(mc);
             }
-            end(mc, String.format(Locale.ROOT, "%s: %d ticks with the agent at the keys in %d duels, swung %d times, died %d times",
-                swings > 0 ? "ok" : "FAILED", ticks, duels, swings, deaths));
+            end(mc, String.format(Locale.ROOT, "%s: %d ticks with the agent at the keys in %d duels, swung %d times, died %d times, used %d potions, %d meals and %d pearls, went to its inventory %d times",
+                swings > 0 ? "ok" : "FAILED", ticks, duels, swings, deaths, potions, meals, pearls, visits));
         }
     }
 

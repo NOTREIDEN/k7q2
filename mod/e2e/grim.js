@@ -33,6 +33,8 @@ fs.writeFileSync(path.join(dir, 'server.properties'), [
 ].join('\n'))
 fs.writeFileSync(path.join(dir, 'bukkit.yml'), 'settings:\n  allow-end: false\n  connection-throttle: -1\n')
 
+/** The name of the mod's player, once the server has said it. */
+let modName = null
 let lines = []
 let server = null
 let exited = true
@@ -104,7 +106,14 @@ function rival() {
     bot.once('spawn', () => resolve(bot))
     bot.on('kicked', reason => console.log(RIVAL + ' was kicked: ' + JSON.stringify(reason)))
     bot.on('error', e => console.log(RIVAL + ': ' + e))
-    bot.on('spawn', () => setTimeout(() => { if (!exited) say('kit ' + RIVAL) }, 1000))
+    // Its kit on every life, hits that cost it next to nothing so that a duel lasts, and back beside the other player.
+    bot.on('spawn', () => setTimeout(() => {
+      if (exited) return
+      say('kit ' + RIVAL)
+      say(`effect ${RIVAL} 11 100000 3`)
+      if (modName) say(`tp ${RIVAL} ${modName}`)
+    }, 1000))
+    let alone = 0
     let last = 0
     bot.on('physicsTick', () => {
       let near = null
@@ -114,8 +123,11 @@ function rival() {
       }
       if (!near) {
         bot.setControlState('forward', false)
+        // The fight took the other player out of sight: go where it is.
+        if (modName && ++alone % 100 === 0) say(`tp ${RIVAL} ${modName}`)
         return
       }
+      alone = 0
       const d = bot.entity.position.distanceTo(near.position)
       bot.lookAt(near.position.offset(0, 1.5, 0), true)
       bot.setControlState('forward', d > 5)
@@ -186,6 +198,7 @@ async function main() {
     client.kill('SIGKILL')
     return
   }
+  modName = name
   // Its kit now and after every death, and now and then hungry and without Speed, to see it eat, drink and go to its inventory.
   let seen = lines.length
   let kits = 0
@@ -208,6 +221,8 @@ async function main() {
   })
   // The ping the server has for it: what the player list says and what Grim measures.
   const pings = []
+  // Health taken from it now and then, so that it heals, runs out of potions in its hotbar and goes to its inventory for more.
+  const hurt = setInterval(() => { if (!exited && !clientDone) say(`effect ${name} 7 1 0`) }, 7000)
   const asked = setInterval(() => {
     if (exited || clientDone) return
     const listed = bot.players[name] ? bot.players[name].ping : null
@@ -227,6 +242,7 @@ async function main() {
     await sleep(200)
   }
   clearInterval(asked)
+  clearInterval(hurt)
   if (!clientDone) client.kill('SIGKILL')
   const result = path.join(modDir, 'run', 'servertest.txt')
   const told = fs.existsSync(result) ? fs.readFileSync(result, 'utf8').trim() : 'nothing written'
@@ -245,7 +261,7 @@ async function main() {
   bot.quit()
 
   // What Grim said about the mod's player.
-  const about = lines.slice(from).filter(l => l.includes(name) && /grim|fail|flag|violat/i.test(l) && !/joined the game|left the game|logged in|lost connection|Kit para/.test(l))
+  const about = lines.slice(from).filter(l => l.includes(name) && /grim|fail|flag|violat/i.test(l) && !/joined the game|left the game|logged in|lost connection|Kit para|Profile for/.test(l))
   const by = {}
   for (const l of about) {
     const m = /failed\s+(\S+)/i.exec(l)
@@ -258,8 +274,15 @@ async function main() {
   console.log(`GRIM about ${name}: ${about.length} lines` + (about.length ? '' : ' (nothing flagged)'))
   for (const k of Object.keys(by).sort((a, b) => by[b] - by[a])) console.log(`GRIM   ${k}: ${by[k]}`)
   for (const l of about.slice(0, 400)) console.log('GRIM   | ' + l)
-  const rivalLines = lines.slice(from, mark).filter(l => l.includes(RIVAL) && /failed/i.test(l)).length
-  console.log(`GRIM about ${RIVAL} (a scripted player, for comparison): ${rivalLines} lines before its jump`)
+  const rivalBy = {}
+  for (const l of lines.slice(from, mark)) {
+    const m = l.includes(RIVAL) && /failed\s+(\S+)/i.exec(l)
+    if (m) rivalBy[m[1]] = (rivalBy[m[1]] || 0) + 1
+  }
+  console.log(`GRIM about ${RIVAL} (a scripted player, for comparison) before its jump: ` + (Object.keys(rivalBy).map(k => `${k} ${rivalBy[k]}`).join(', ') || 'nothing'))
+  // What the mod's player did meanwhile, as the server saw it.
+  const count = re => lines.slice(from, mark).filter(l => re.test(l)).length
+  console.log(`DID   ${name}: killed ${RIVAL} ${count(new RegExp(RIVAL + ' was slain by ' + name))} times, died ${count(new RegExp('\\]: ' + name + ' (was slain|was killed|died)'))} times, was given ${kits} kits`)
 }
 
 const limit = setTimeout(() => {
