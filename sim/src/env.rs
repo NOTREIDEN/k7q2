@@ -9,28 +9,34 @@
 //! the reward that agent earned since its previous action.
 use crate::aabb::{dist, Aabb, V3};
 use crate::bot::{self, BotParams, BotState};
-use crate::client::{ClientCfg, Edge, Input, TickOut, MAX_BACKTRACK};
+use crate::client::{pearl_landing, pearl_preview, ClientCfg, Edge, Input, TickOut, MAX_BACKTRACK};
 use crate::mth::{self, Rng};
-use crate::server::{KbPlugin, KbProfile, ServerCfg};
+use crate::net::{Item, SLOT_PEARL, SLOT_SWORD};
+use crate::server::{KbPlugin, KbProfile, ServerCfg, PEARL_DAMAGE};
 use crate::sim::{Match, NetCfg, Spawn, TICK_US};
 use crate::world::World;
 
-pub const ACT_HEADS: usize = 8;
+pub const ACT_HEADS: usize = 9;
 /// forward, strafe, jump, sprint key, attack, yaw bin, pitch bin, right
-/// mouse button (block with the sword).
-pub const ACT_DIMS: [i32; ACT_HEADS] = [3, 3, 2, 2, 2, 27, 21, 2];
+/// mouse button (block with the sword), throw a pearl.
+///
+/// The last one stands for three key presses a player makes in a row: the
+/// number key of the pearls with a right click, then the number key of the
+/// sword on the next tick (see `Env::pearl_keys`). It does nothing while
+/// the server's cooldown runs or when no pearl is left.
+pub const ACT_DIMS: [i32; ACT_HEADS] = [3, 3, 2, 2, 2, 27, 21, 2, 2];
 /// Mouse counts per tick. One count is 0.15 degrees at sensitivity 0.5.
 pub const YAW_BINS: [i32; 27] = [
     -377, -233, -144, -89, -55, -34, -21, -13, -8, -5, -3, -2, -1, 0, 1, 2, 3, 5, 8, 13, 21, 34, 55, 89, 144, 233, 377,
 ];
 pub const PITCH_BINS: [i32; 21] = [-89, -55, -34, -21, -13, -8, -5, -3, -2, -1, 0, 1, 2, 3, 5, 8, 13, 21, 34, 55, 89];
 
-pub const OBS_DIM: usize = 68;
-pub const PRIV_DIM: usize = 48;
-pub const STATS_DIM: usize = 24;
+pub const OBS_DIM: usize = 96;
+pub const PRIV_DIM: usize = 54;
+pub const STATS_DIM: usize = 38;
 /// Floats per player and in total written by `Env::write_view`.
-pub const VIEW_PLAYER: usize = 24;
-pub const VIEW_DIM: usize = 2 * VIEW_PLAYER + 18;
+pub const VIEW_PLAYER: usize = 30;
+pub const VIEW_DIM: usize = 2 * VIEW_PLAYER + 19;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Mode {
@@ -148,6 +154,15 @@ pub struct Params {
     pub sword_wear: f64,
     /// Scales how often scripted bots block. 0 turns their blocking off.
     pub bot_block: f64,
+    /// Ender pearls each player starts a duel with, in the share
+    /// `pearl_prob` of the duels. The others are fought without pearls.
+    pub pearls: f64,
+    pub pearl_prob: f64,
+    /// Seconds a server makes a player wait between two pearls, drawn per
+    /// duel from this range. Zero is the plain game, which has no wait.
+    pub pearl_cd_s: [f64; 2],
+    /// Scales how often scripted bots throw pearls. 0 turns it off.
+    pub bot_pearl: f64,
 }
 
 impl Default for Params {
@@ -205,6 +220,10 @@ impl Default for Params {
             opp_autoblock: 0.3,
             sword_wear: -1.0,
             bot_block: 1.0,
+            pearls: 16.0,
+            pearl_prob: 0.8,
+            pearl_cd_s: [10.0, 16.0],
+            bot_pearl: 1.0,
         }
     }
 }
@@ -275,6 +294,11 @@ impl Params {
             58 => self.opp_autoblock = v,
             59 => self.sword_wear = v,
             60 => self.bot_block = v,
+            61 => self.pearls = v,
+            62 => self.pearl_prob = v,
+            63 => self.pearl_cd_s[0] = v,
+            64 => self.pearl_cd_s[1] = v,
+            65 => self.bot_pearl = v,
             _ => return false,
         }
         true
@@ -343,6 +367,21 @@ pub struct Stats {
     /// Damage dealt, before armour.
     pub damage: [f64; 2],
     pub crits: [f64; 2],
+    /// Pearls thrown, and pearls that landed and moved their thrower.
+    pub pearls: [f64; 2],
+    pub landings: [f64; 2],
+    /// After a pearl of this player landed: the times it got the next hit
+    /// in, and the times the other player did, within two seconds.
+    pub pearl_won: [f64; 2],
+    pub pearl_lost: [f64; 2],
+    /// Blocks started. `use_ticks` over this is how long one is held.
+    pub blocks: [f64; 2],
+    /// Sum over the hits dealt of the horizontal speed each gave the
+    /// victim, blocks per tick.
+    pub kb: [f64; 2],
+    /// Hits dealt with sprint within six ticks of the end of a block: the
+    /// block used as a sprint reset.
+    pub tap_hits: [f64; 2],
 }
 
 impl Stats {
@@ -362,6 +401,13 @@ impl Stats {
             self.blocked[a] += o.blocked[a];
             self.damage[a] += o.damage[a];
             self.crits[a] += o.crits[a];
+            self.pearls[a] += o.pearls[a];
+            self.landings[a] += o.landings[a];
+            self.pearl_won[a] += o.pearl_won[a];
+            self.pearl_lost[a] += o.pearl_lost[a];
+            self.blocks[a] += o.blocks[a];
+            self.kb[a] += o.kb[a];
+            self.tap_hits[a] += o.tap_hits[a];
         }
     }
     pub fn write(&self, out: &mut [f64]) {
@@ -390,6 +436,20 @@ impl Stats {
             self.damage[1],
             self.crits[0],
             self.crits[1],
+            self.pearls[0],
+            self.pearls[1],
+            self.landings[0],
+            self.landings[1],
+            self.pearl_won[0],
+            self.pearl_won[1],
+            self.pearl_lost[0],
+            self.pearl_lost[1],
+            self.blocks[0],
+            self.blocks[1],
+            self.kb[0],
+            self.kb[1],
+            self.tap_hits[0],
+            self.tap_hits[1],
         ];
         for (o, x) in out.iter_mut().zip(v.iter()) {
             *o = *x;
@@ -424,6 +484,18 @@ pub struct Env {
     /// budget.
     cps: [f64; 2],
     click_tokens: [f64; 2],
+    /// Where each player is in the key presses of a pearl throw: 0 not
+    /// throwing, 1 the right click comes next, 2 the sword comes next.
+    pearl_stage: [u8; 2],
+    /// Own ticks until each player may throw again, as it counts them
+    /// itself from its last throw.
+    pearl_wait: [i32; 2],
+    asked_pearl: [bool; 2],
+    /// The thrower of the last pearl that landed, and the server ticks left
+    /// in which the next hit is counted for or against that pearl.
+    landed: Option<(usize, i32)>,
+    /// Own ticks since each player last had its sword up; 0 while it is.
+    since_block: [i32; 2],
 }
 
 pub fn new_match(p: &Params, rng: &mut Rng, mode: Mode) -> (Match, [f64; 2], BotParams) {
@@ -518,11 +590,17 @@ pub fn new_match(p: &Params, rng: &mut Rng, mode: Mode) -> (Match, [f64; 2], Bot
         fall_damage: p.fall_damage,
         max_no_damage,
         sword_wear: if p.sword_wear >= 0.0 { p.sword_wear as f32 } else { [1.0f32, 0.25, 0.25, 0.0][(rng.next_u64() % 4) as usize] },
-        pearl_cooldown: 0,
+        pearl_cooldown: (rng.range(p.pearl_cd_s[0], p.pearl_cd_s[1].max(p.pearl_cd_s[0])) * 20.0).round().max(0.0) as i32,
     };
+    let pearls = if rng.chance(p.pearl_prob) { p.pearls.clamp(0.0, 64.0) as u8 } else { 0 };
     let seed = rng.next_u64();
     let mut m = Match::new(world, spawns, p.speed_amp, kb, scfg, ccfg, net, [0, c1, sv], seed);
     m.s.plugin = plugin;
+    m.s.pearl_guard = true;
+    for i in 0..2 {
+        m.s.p[i].pearls = pearls;
+        m.c[i].lp.pearls = pearls;
+    }
     if rng.chance(p.opp_edge_prob) {
         let ms = rng.range(p.opp_backtrack_ms[0], p.opp_backtrack_ms[1].max(p.opp_backtrack_ms[0]));
         m.c[1].edge = Edge {
@@ -547,6 +625,9 @@ pub fn new_match(p: &Params, rng: &mut Rng, mode: Mode) -> (Match, [f64; 2], Bot
     }
     bot.blockhit *= p.bot_block;
     bot.block_react *= p.bot_block;
+    bot.pearl_attack *= p.bot_pearl;
+    bot.pearl_escape *= p.bot_pearl;
+    bot.pearl_cd = m.s.cfg.pearl_cooldown;
     (m, ping, bot)
 }
 
@@ -578,6 +659,11 @@ impl Env {
             ping_ms: ping,
             cps: [20.0; 2],
             click_tokens: [2.0; 2],
+            pearl_stage: [0; 2],
+            pearl_wait: [0; 2],
+            asked_pearl: [false; 2],
+            landed: None,
+            since_block: [1000; 2],
         };
         e.begin();
         e
@@ -593,6 +679,11 @@ impl Env {
         self.max_combo = [0; 2];
         self.ep = Stats::default();
         self.bot_state = BotState::default();
+        self.pearl_stage = [0; 2];
+        self.pearl_wait = [0; 2];
+        self.asked_pearl = [false; 2];
+        self.landed = None;
+        self.since_block = [1000; 2];
         let own = self.rng.range(p.cps_min, p.cps_max.max(p.cps_min));
         let (lo, hi) = if p.opp_cps_min < 0.0 { (p.cps_min, p.cps_max) } else { (p.opp_cps_min, p.opp_cps_max) };
         let other = self.rng.range(lo, hi.max(lo));
@@ -617,9 +708,31 @@ impl Env {
         self.begin();
     }
 
+    /// Pearls that landed: the thrower pays for the damage it took the way
+    /// it pays for a hit taken, and the next hit is watched.
+    fn collect_landings(&mut self) {
+        for k in 0..self.m.s.landings.len() {
+            let l = self.m.s.landings[k];
+            let p = &self.params;
+            self.rew_acc[l.thrower] -= p.w_taken * p.w_damage * (PEARL_DAMAGE / p.damage.max(0.5));
+            self.ep.landings[l.thrower] += 1.0;
+            self.landed = Some((l.thrower, 40));
+        }
+        self.m.s.landings.clear();
+    }
+
     fn collect_hits(&mut self) {
+        self.collect_landings();
         if self.m.s.hits.is_empty() {
             return;
+        }
+        if let Some((thrower, _)) = self.landed.take() {
+            let first = self.m.s.hits[0];
+            if first.attacker == thrower {
+                self.ep.pearl_won[thrower] += 1.0;
+            } else {
+                self.ep.pearl_lost[thrower] += 1.0;
+            }
         }
         let (wh, wt) = (self.params.w_hit, self.params.w_taken);
         for k in 0..self.m.s.hits.len() {
@@ -635,9 +748,13 @@ impl Env {
             if h.crit {
                 self.ep.crits[h.attacker] += 1.0;
             }
+            self.ep.kb[h.attacker] += h.kb[0].hypot(h.kb[2]);
             if h.sprint {
                 self.ep.sprint_hits[h.attacker] += 1.0;
                 self.rew_acc[h.attacker] += self.params.w_sprint_hit;
+                if (1..=6).contains(&self.since_block[h.attacker]) {
+                    self.ep.tap_hits[h.attacker] += 1.0;
+                }
             }
             let run = self.combo[h.attacker].min(5) as f32 * self.params.w_combo;
             self.rew_acc[h.attacker] += run;
@@ -702,6 +819,56 @@ impl Env {
         }
     }
 
+    /// Statistics of the episode under way.
+    pub fn episode(&self) -> &Stats {
+        &self.ep
+    }
+
+    /// Can player `id` throw a pearl now, as far as it can tell itself?
+    fn pearl_ready(&self, id: usize) -> bool {
+        let lp = &self.m.c[id].lp;
+        lp.pearls > 0 && self.pearl_wait[id] <= 0 && self.pearl_stage[id] == 0 && lp.held == SLOT_SWORD
+    }
+
+    /// The key presses of a pearl throw, laid over what player `id` asked
+    /// for on this tick. Tick one: the number key of the pearls and a right
+    /// click, which throws along the view the server already has. Tick two:
+    /// the number key of the sword. If the right button was down, it is let
+    /// go on tick one and the click comes a tick later. No left click is
+    /// made on the tick of the throw, because one that lands on a block
+    /// would swallow the right click.
+    fn pearl_keys(&mut self, id: usize, want: bool, inp: &mut Input) {
+        if self.pearl_wait[id] > 0 {
+            self.pearl_wait[id] -= 1;
+        }
+        self.asked_pearl[id] = want;
+        match self.pearl_stage[id] {
+            0 => {
+                if want && self.pearl_ready(id) {
+                    inp.slot_key = SLOT_PEARL + 1;
+                    inp.attack = false;
+                    if self.prev_inp[id].use_item {
+                        inp.use_item = false;
+                        self.pearl_stage[id] = 1;
+                    } else {
+                        inp.use_item = true;
+                        self.pearl_stage[id] = 2;
+                    }
+                }
+            }
+            1 => {
+                inp.use_item = true;
+                inp.attack = false;
+                self.pearl_stage[id] = 2;
+            }
+            _ => {
+                inp.slot_key = SLOT_SWORD + 1;
+                inp.use_item = false;
+                self.pearl_stage[id] = 0;
+            }
+        }
+    }
+
     /// Shaping terms and statistics for the tick `id` just made.
     fn account(&mut self, id: usize, inp: &Input, out: &TickOut) {
         let (phi, ang) = self.potential(id);
@@ -743,6 +910,18 @@ impl Env {
         }
         if self.m.c[id].lp.using_item {
             self.ep.use_ticks[id] += 1.0;
+            if self.since_block[id] != 0 {
+                self.ep.blocks[id] += 1.0;
+            }
+            self.since_block[id] = 0;
+        } else if self.since_block[id] < 1000 {
+            self.since_block[id] += 1;
+        }
+        if out.threw {
+            self.ep.pearls[id] += 1.0;
+            // The server starts its wait when the throw reaches it, a
+            // little later than this; two ticks more cover the difference.
+            self.pearl_wait[id] = self.m.s.cfg.pearl_cooldown + 2;
         }
         self.prev_inp[id] = *inp;
     }
@@ -775,6 +954,7 @@ impl Env {
     pub fn step(&mut self, action: &[i32]) -> usize {
         let id = self.pending;
         let mut inp = decode_action(action);
+        self.pearl_keys(id, action.len() > 8 && action[8] != 0, &mut inp);
         self.limit_clicks(id, &mut inp);
         let out = self.m.client_tick(id, &inp);
         self.account(id, &inp, &out);
@@ -796,6 +976,9 @@ impl Env {
         }
         self.pending = next;
         if round_done {
+            if let Some((who, left)) = self.landed {
+                self.landed = if left > 1 { Some((who, left - 1)) } else { None };
+            }
             self.ticks_left -= 1;
             if self.ticks_left <= 0 {
                 self.finish_episode();
@@ -862,6 +1045,15 @@ impl Env {
             o[b + 21] = self.m.s.p[id].using_item as i32 as f32;
             o[b + 22] = self.ep.blocked[id] as f32;
             o[b + 23] = self.ep.damage[id] as f32;
+            o[b + 24] = lp.held as f32;
+            o[b + 25] = lp.pearls as f32;
+            // The newest pearl of this player still in flight, as the
+            // server has it.
+            let e = self.m.s.pearls.iter().rev().find(|e| e.thrower == id);
+            o[b + 26] = e.is_some() as u8 as f32;
+            for a in 0..3 {
+                o[b + 27 + a] = e.map(|e| e.pos[a] as f32).unwrap_or(0.0);
+            }
         }
         let g = 2 * VIEW_PLAYER;
         o[g] = self.ticks_left as f32;
@@ -895,6 +1087,7 @@ impl Env {
         o[g + 15] = s.cfg.max_no_damage as f32;
         o[g + 16] = s.p[1].autoblock as i32 as f32;
         o[g + 17] = s.cfg.sword_wear;
+        o[g + 18] = s.cfg.pearl_cooldown as f32 / 20.0;
     }
 
     /// What agent `id` can know from its own client.
@@ -1000,6 +1193,66 @@ impl Env {
         o[65] = rp.using as u8 as f32;
         o[66] = pi.use_item as u8 as f32;
         o[67] = lp.flag_using as u8 as f32;
+        // Ender pearls: what is in hand, how many are left, whether one can
+        // be thrown now and how much of the wait is left, where the throw's
+        // key presses are, what was asked last tick, whether the opponent
+        // holds pearls, and how long ago either player was moved at once.
+        let cd = self.m.s.cfg.pearl_cooldown.max(1) as f32;
+        o[68] = (lp.held == SLOT_SWORD) as u8 as f32;
+        o[69] = lp.pearls as f32 / 16.0;
+        o[70] = self.pearl_ready(id) as u8 as f32;
+        o[71] = (self.pearl_wait[id].max(0) as f32 / cd).min(1.0);
+        o[72] = self.pearl_stage[id] as f32 / 2.0;
+        o[73] = self.asked_pearl[id] as u8 as f32;
+        o[74] = (rp.item == Item::Pearl) as u8 as f32;
+        o[75] = (lp.ticks_since_moved.min(20)) as f32 / 20.0;
+        o[76] = (rp.ticks_since_jump.min(20)) as f32 / 20.0;
+        // The newest pearl of its own in flight: where it will put this
+        // player (relative to where it stands now), in how many ticks, and
+        // how far from the opponent that is.
+        for v in o[77..96].iter_mut() {
+            *v = 0.0;
+        }
+        if let Some(e) = c.pearls.iter().rev().find(|e| e.mine) {
+            let (land, ticks) = pearl_landing(&self.m.world, e);
+            let (lf, lr) = local(yaw, land[0] - b.pos[0], land[2] - b.pos[2]);
+            o[77] = 1.0;
+            o[78] = clip(lf / 8.0, 4.0);
+            o[79] = clip(lr / 8.0, 4.0);
+            o[80] = clip((land[1] - b.pos[1]) / 3.0, 2.0);
+            o[81] = (ticks.min(40)) as f32 / 20.0;
+            o[82] = clip(dist(land, rp.pos) / 8.0, 4.0);
+        }
+        // The newest pearl of the opponent: where it is, where it will put
+        // the opponent, in how many ticks, and how far the view has to
+        // turn to face that spot.
+        if let Some(e) = c.pearls.iter().rev().find(|e| !e.mine) {
+            let (land, ticks) = pearl_landing(&self.m.world, e);
+            let (pf, pr) = local(yaw, e.pos[0] - b.pos[0], e.pos[2] - b.pos[2]);
+            let (lf, lr) = local(yaw, land[0] - b.pos[0], land[2] - b.pos[2]);
+            o[83] = 1.0;
+            o[84] = clip(pf / 8.0, 4.0);
+            o[85] = clip(pr / 8.0, 4.0);
+            o[86] = clip((e.pos[1] - b.pos[1]) / 3.0, 2.0);
+            o[87] = clip(lf / 8.0, 4.0);
+            o[88] = clip(lr / 8.0, 4.0);
+            o[89] = clip((land[1] - b.pos[1]) / 3.0, 2.0);
+            o[90] = (ticks.min(40)) as f32 / 20.0;
+            let (ly, _) = bot::angles_to(eye, [land[0], land[1] + 1.0, land[2]]);
+            o[91] = (mth::wrap_deg(ly - yaw as f64) / 180.0) as f32;
+        }
+        // A pearl thrown on this tick flies along the view the server has,
+        // which is the view at the start of the tick: how far it would
+        // carry this player, in how many ticks, and where that is seen from
+        // the opponent (further along the view, to the right of it).
+        if lp.pearls > 0 {
+            let (land, ticks) = pearl_preview(&self.m.world, b.pos, lp.l.yaw, lp.l.pitch);
+            let (lf, lr) = local(yaw, land[0] - b.pos[0], land[2] - b.pos[2]);
+            o[92] = clip(lf.hypot(lr) / 16.0, 4.0);
+            o[93] = (ticks.min(60)) as f32 / 30.0;
+            o[94] = clip((lf - rf) / 8.0, 4.0);
+            o[95] = clip((lr - rr) / 8.0, 4.0);
+        }
     }
 
     /// Extra inputs for the value function only: things a client cannot see.
@@ -1074,6 +1327,14 @@ impl Env {
         }
         o[43] = s.cfg.max_no_damage as f32 / 20.0;
         o[44] = s.cfg.sword_wear;
+        // Pearls as the server has them.
+        let cd = s.cfg.pearl_cooldown.max(1) as f32;
+        o[48] = s.p[id].pearl_wait as f32 / cd;
+        o[49] = s.p[1 - id].pearl_wait as f32 / cd;
+        o[50] = s.p[1 - id].pearls as f32 / 16.0;
+        o[51] = (s.p[1 - id].held == SLOT_PEARL) as u8 as f32;
+        o[52] = s.pearls.iter().any(|e| e.thrower != id) as u8 as f32;
+        o[53] = s.cfg.pearl_cooldown as f32 / 320.0;
     }
 }
 

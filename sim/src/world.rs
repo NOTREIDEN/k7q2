@@ -67,6 +67,22 @@ impl World {
         self.walls && y < self.top_i && (x >= self.half_i || x < -self.half_i || z >= self.half_i || z < -self.half_i)
     }
 
+    /// Whether the straight path from `a` to `b` is certain to touch no
+    /// block: both ends lie in the open space above the floor and between
+    /// the walls, and that space has no corner to cut.
+    #[inline]
+    pub fn clear_path(&self, a: V3, b: V3) -> bool {
+        if !self.extra.is_empty() {
+            return false;
+        }
+        let open = |p: &V3| {
+            p[1] >= self.floor_y
+                && (!self.walls
+                    || (p[1] < self.top_i as f64 && p[0] >= -self.half && p[0] < self.half && p[2] >= -self.half && p[2] < self.half))
+        };
+        open(&a) && open(&b)
+    }
+
     /// `World.getCollidingBoundingBoxes`: the boxes of the solid blocks
     /// that overlap `bb`, appended to `out`.
     pub fn colliding_boxes(&self, bb: &Aabb, out: &mut Vec<Aabb>) {
