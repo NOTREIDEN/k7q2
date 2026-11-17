@@ -28,6 +28,7 @@ PARAM = {
     "health_prob": 67, "prot_min": 68, "prot_max": 69, "sharp_min": 70, "sharp_max": 71, "feather": 72,
     "potions_min": 73, "potions_max": 74, "start_hurt": 75, "start_health_min": 76, "start_health_max": 77,
     "w_win": 78, "w_heal": 79, "w_waste": 80, "bot_potion": 81, "hunger": 82,
+    "hurt_who": 83, "pearls_who": 84,
 }
 
 STAT_NAMES = [

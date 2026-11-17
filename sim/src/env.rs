@@ -203,6 +203,12 @@ pub struct Params {
     pub bot_potion: f64,
     /// Running, jumping and fighting use up food.
     pub hunger: bool,
+    /// Who may start hurt: 0 either player, 1 only the first (the agent
+    /// against a bot), 2 only the second. For looking at single cases.
+    pub hurt_who: u8,
+    /// Pearls for one player only: 0 both, 1 only the first, 2 only the
+    /// second.
+    pub pearls_who: u8,
 }
 
 impl Default for Params {
@@ -277,6 +283,8 @@ impl Default for Params {
             w_waste: 0.5,
             bot_potion: 1.0,
             hunger: false,
+            hurt_who: 0,
+            pearls_who: 0,
         }
     }
 }
@@ -369,6 +377,8 @@ impl Params {
             80 => self.w_waste = v as f32,
             81 => self.bot_potion = v,
             82 => self.hunger = v != 0.0,
+            83 => self.hurt_who = v as u8,
+            84 => self.pearls_who = v as u8,
             _ => return false,
         }
         true
@@ -809,13 +819,14 @@ pub fn new_match(p: &Params, rng: &mut Rng, mode: Mode) -> (Match, [f64; 2], Bot
     m.s.plugin = plugin;
     m.s.pearl_guard = true;
     for i in 0..2 {
+        let pearls = if p.pearls_who == 0 || p.pearls_who as usize == i + 1 { pearls } else { 0 };
         m.s.p[i].pearls = pearls;
         m.c[i].lp.pearls = pearls;
         if real {
             let n = level(p.potions, rng).clamp(0, 7) as u8;
             m.s.p[i].potions = potion_mask(n);
             m.c[i].lp.potions = potion_mask(n);
-            if rng.chance(p.start_hurt) {
+            if (p.hurt_who == 0 || p.hurt_who as usize == i + 1) && rng.chance(p.start_hurt) {
                 // Both sides start out knowing it.
                 let h = (rng.range(p.start_health[0], p.start_health[1].max(p.start_health[0])) * 2.0).round() as f32 / 2.0;
                 let h = h.clamp(1.0, MAX_HEALTH);
