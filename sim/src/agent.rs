@@ -32,10 +32,14 @@ pub const ACT_HEADS: usize = 10;
 /// inventory is the inventory key, a shift click on the potion on the next
 /// tick, and the key again on the third; asked for on every tick, another
 /// potion comes down on each (see `Agent::refill_keys`).
-pub const ACT_DIMS: [i32; ACT_HEADS] = [3, 3, 2, 2, 2, 27, 29, 2, 2, 7];
+pub const ACT_DIMS: [i32; ACT_HEADS] = [3, 3, 2, 2, 2, 31, 29, 2, 2, 7];
 /// Mouse counts per tick. One count is 0.15 degrees at sensitivity 0.5.
-pub const YAW_BINS: [i32; 27] = [
-    -377, -233, -144, -89, -55, -34, -21, -13, -8, -5, -3, -2, -1, 0, 1, 2, 3, 5, 8, 13, 21, 34, 55, 89, 144, 233, 377,
+/// The four large ones at the end came later, for turning away from the
+/// opponent and back within a tick or two: 600 counts are a quarter turn
+/// and 1200 a half.
+pub const YAW_BINS: [i32; 31] = [
+    -377, -233, -144, -89, -55, -34, -21, -13, -8, -5, -3, -2, -1, 0, 1, 2, 3, 5, 8, 13, 21, 34, 55, 89, 144, 233, 377, -600, 600,
+    -1200, 1200,
 ];
 /// The eight large ones at the end came later, for looking at the ground
 /// and back up within one tick: 600 counts are a quarter turn at the
@@ -44,7 +48,7 @@ pub const PITCH_BINS: [i32; 29] = [
     -89, -55, -34, -21, -13, -8, -5, -3, -2, -1, 0, 1, 2, 3, 5, 8, 13, 21, 34, 55, 89, -377, -233, -144, 144, 233, 377, -600, 600,
 ];
 
-pub const OBS_DIM: usize = 151;
+pub const OBS_DIM: usize = 152;
 
 /// How many of its last positions an agent keeps.
 const TRAIL: usize = 16;
@@ -115,6 +119,11 @@ pub struct Agent {
     fate: [Option<(u32, V3, [f32; 2])>; 2],
     /// The same for pearls: which one and where it lands.
     pearl_fate: [Option<(u32, V3)>; 2],
+    /// The opponent's pearl it last saw appear, and its own ticks since:
+    /// for that long out of the server's wait the opponent has no pearl to
+    /// come over with.
+    opp_pearl: Option<u32>,
+    opp_pearl_age: i32,
     /// The drink (1) or the meal (2) it has its right button down for, and
     /// what it asked of the rest of the hotbar on its last tick.
     consume: u8,
@@ -154,6 +163,8 @@ impl Agent {
             lag: (ping_ms[0] / 50.0).floor() as i32 + 1,
             fate: [None; 2],
             pearl_fate: [None; 2],
+            opp_pearl: None,
+            opp_pearl_age: 100_000,
             consume: 0,
             asked_bar: 0,
             was_consuming: false,
@@ -195,6 +206,9 @@ impl Agent {
         self.was_consuming = c.lp.consuming();
         let seen = c.rp.using && matches!(c.rp.item, Item::Drink | Item::Food);
         self.opp_use_ticks = if seen { self.opp_use_ticks + 1 } else { 0 };
+        if self.opp_pearl_age < 100_000 {
+            self.opp_pearl_age += 1;
+        }
         if out.threw {
             // The server starts its wait when the throw reaches it, a
             // little later than this; two ticks more cover the difference.
@@ -570,6 +584,12 @@ impl Agent {
             self.fate[mine as usize] = fate;
             self.pearl_fate[mine as usize] = pearl;
         }
+        if let Some(e) = c.thrown.iter().rev().find(|e| !e.mine && e.kind == Kind::Pearl) {
+            if self.opp_pearl != Some(e.id) {
+                self.opp_pearl = Some(e.id);
+                self.opp_pearl_age = 0;
+            }
+        }
     }
 
     /// What the policy is shown: what the agent can know from its own
@@ -850,6 +870,9 @@ impl Agent {
         } else {
             (lp.speed_ticks.max(0) as f32 / duel.drink_window().max(1) as f32).min(1.0)
         };
+        // How much of the server's wait between pearls the opponent still
+        // has in front of it, counted from when its last pearl was seen.
+        o[151] = ((duel.pearl_cooldown - self.opp_pearl_age).max(0) as f32 / cd).min(1.0);
     }
 }
 
@@ -862,7 +885,7 @@ pub fn decode_action(a: &[i32]) -> Input {
         sprint_key: a[3] != 0,
         attack: a[4] != 0,
         extra_clicks: 0,
-        dx: YAW_BINS[pick(a[5], 27)],
+        dx: YAW_BINS[pick(a[5], 31)],
         dy: PITCH_BINS[pick(a[6], 29)],
         use_item: a.len() > 7 && a[7] != 0,
         use_again: false,

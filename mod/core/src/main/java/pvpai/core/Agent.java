@@ -16,15 +16,16 @@ import java.util.Random;
  */
 public final strictfp class Agent {
     /** Choices of each control: forward, strafe, jump, sprint key, attack, yaw, pitch, right button, pearl, and the rest of the hotbar. */
-    public static final int[] ACT_DIMS = {3, 3, 2, 2, 2, 27, 29, 2, 2, 7};
-    /** Mouse counts per tick. */
+    public static final int[] ACT_DIMS = {3, 3, 2, 2, 2, 31, 29, 2, 2, 7};
+    /** Mouse counts per tick; the four large ones at the end are a quarter turn and a half turn each way. */
     public static final int[] YAW_BINS = {
-        -377, -233, -144, -89, -55, -34, -21, -13, -8, -5, -3, -2, -1, 0, 1, 2, 3, 5, 8, 13, 21, 34, 55, 89, 144, 233, 377,
+        -377, -233, -144, -89, -55, -34, -21, -13, -8, -5, -3, -2, -1, 0, 1, 2, 3, 5, 8, 13, 21, 34, 55, 89, 144, 233, 377, -600, 600,
+        -1200, 1200,
     };
     public static final int[] PITCH_BINS = {
         -89, -55, -34, -21, -13, -8, -5, -3, -2, -1, 0, 1, 2, 3, 5, 8, 13, 21, 34, 55, 89, -377, -233, -144, 144, 233, 377, -600, 600,
     };
-    public static final int OBS_DIM = 151;
+    public static final int OBS_DIM = 152;
     private static final int TRAIL = 16;
     /**
      * A hurt of the other player counts as a hit of this one's for this
@@ -105,6 +106,9 @@ public final strictfp class Agent {
     private final Fate[] fate = new Fate[2];
     private final long[] pearlFateId = {-1, -1};
     private final double[][] pearlFate = new double[2][];
+    /** The opponent's pearl it last saw appear, and its own ticks since. */
+    private long oppPearl = -1;
+    private int oppPearlAge = 100000;
     /** The drink (1) or the meal (2) it has its right button down for, and what it asked of the hotbar on its last tick. */
     private int consume, askedBar;
     /** Whether it was drinking or eating on its last tick, and for how many ticks in a row it has seen the other do so. */
@@ -151,7 +155,7 @@ public final strictfp class Agent {
         k.jump = a[2] != 0;
         k.sprintKey = a[3] != 0;
         k.attack = a[4] != 0;
-        k.dx = YAW_BINS[pick(a[5], 27)];
+        k.dx = YAW_BINS[pick(a[5], 31)];
         k.dy = PITCH_BINS[pick(a[6], 29)];
         k.useItem = a.length > 7 && a[7] != 0;
         return k;
@@ -194,6 +198,9 @@ public final strictfp class Agent {
         }
         wasConsuming = consuming;
         oppUseTicks = oppConsuming ? oppUseTicks + 1 : 0;
+        if (oppPearlAge < 100000) {
+            oppPearlAge++;
+        }
         if (threwPearl) {
             // The server starts its wait when the throw reaches it, a
             // little later than this; two ticks more cover the difference.
@@ -597,6 +604,11 @@ public final strictfp class Agent {
             pearlFate[i] = p;
             pearlFateId[i] = pid;
         }
+        View.Thrown theirs = newest(v, false, Inv.KIND_PEARL);
+        if (theirs != null && theirs.id != oppPearl) {
+            oppPearl = theirs.id;
+            oppPearlAge = 0;
+        }
     }
 
     private static float clip(double v, double lim) {
@@ -873,5 +885,8 @@ public final strictfp class Agent {
         // The Speed it has left out of the last seconds in which a drink is
         // taken: 1 with more than that, when a drink would not be.
         o[150] = duel.drinkWindowS < 0.0 ? flag(speed) : Math.min((float) Math.max(v.speedTicks, 0) / (float) Math.max(duel.drinkWindow(), 1), 1.0f);
+        // How much of the server's wait between pearls the opponent still
+        // has in front of it, counted from when its last pearl was seen.
+        o[151] = Math.min((float) Math.max(duel.pearlCooldown - oppPearlAge, 0) / cd, 1.0f);
     }
 }

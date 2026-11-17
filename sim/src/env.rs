@@ -28,6 +28,10 @@ pub const MISS_POINTS: f32 = 2.0;
 pub const POT_TIME_TICKS: i32 = 10;
 /// The degrees of a turn undone at once that `w_shake` counts in full, and
 /// how many ticks the view may have stood still in between.
+/// The food from which the game heals a player by itself, and the food a
+/// player needs more than to sprint.
+pub const FOOD_TO_HEAL: i32 = 18;
+pub const FOOD_TO_SPRINT: i32 = 6;
 pub const SHAKE_DEG: f32 = 6.0;
 pub const SHAKE_TICKS: i32 = 2;
 pub const PRIV_DIM: usize = 71;
@@ -276,7 +280,12 @@ pub struct Params {
     /// neither can be got off the other. 64: the first player stands in a
     /// corner of the arena with the other one in its way out, who takes
     /// less knockback than the game gives; most of the time it has no
-    /// pearl to leave with.
+    /// pearl to leave with. 128: the first player, hurt as in those, has
+    /// its back to the other one, who is a few blocks behind and coming:
+    /// what it throws lands away from the opponent, and its view has to
+    /// come round again. 256, with nobody hurt: the other one is next to
+    /// it, to a side or behind, as after a pearl thrown there, and the
+    /// view has to get there.
     pub lesson_prob: f64,
     pub lessons: u32,
     /// Of the lessons, the share that is one of the extreme ones. Their
@@ -309,6 +318,22 @@ pub struct Params {
     /// that they do. The players are not told which duels these are.
     pub pot_strict_prob: f64,
     pub pot_strict: f64,
+    /// What the thrower of a healing potion pays, on top of what the
+    /// opponent gains, for every point of health its potion gives the
+    /// opponent: a potion thrown towards an opponent that is close heals
+    /// both.
+    pub w_gift: f32,
+    /// Cost per tick of carrying steak with less food than the game asks
+    /// for to heal a player by itself (18): half of it as soon as that is
+    /// so, all of it at the food that ends the sprint.
+    pub w_hungry: f32,
+    /// Cost per tick of being without Speed while carrying a potion of it,
+    /// in the hotbar or in the inventory.
+    pub w_slow: f32,
+    /// Share of the players that start with potions of Speed at hand whose
+    /// potions of it are in the inventory instead, as most players carry
+    /// them: to drink one it has to be brought down first.
+    pub drinks_stowed: f64,
 }
 
 impl Default for Params {
@@ -411,6 +436,10 @@ impl Default for Params {
             w_shake: 0.0,
             pot_strict_prob: 0.0,
             pot_strict: 0.25,
+            w_gift: 0.0,
+            w_hungry: 0.0,
+            w_slow: 0.0,
+            drinks_stowed: 0.0,
         }
     }
 }
@@ -537,6 +566,10 @@ impl Params {
             114 => self.w_shake = v as f32,
             115 => self.pot_strict_prob = v,
             116 => self.pot_strict = v,
+            117 => self.w_gift = v as f32,
+            118 => self.w_hungry = v as f32,
+            119 => self.w_slow = v as f32,
+            120 => self.drinks_stowed = v,
             _ => return false,
         }
         true
@@ -836,9 +869,9 @@ pub fn new_duel(p: &Params, rng: &mut Rng, mode: Mode) -> (Match, [f64; 2], BotP
     let lim = (p.arena_half - 2.0).max(1.0);
     // Drawn only when lessons are on, so that duels without them come out
     // as they always did.
-    let offered = if mode == Mode::Bot { 127 } else { 111 };
+    let offered = if mode == Mode::Bot { 511 } else { 495 };
     let lesson = if p.lesson_prob > 0.0 && p.lessons & offered != 0 && rng.chance(p.lesson_prob) {
-        let mut on: Vec<u8> = (0..7u8).filter(|k| (p.lessons & offered) >> k & 1 != 0).collect();
+        let mut on: Vec<u8> = (0..9u8).filter(|k| (p.lessons & offered) >> k & 1 != 0).collect();
         if p.extreme_share >= 0.0 && on.iter().any(|&k| k >= 4) && on.iter().any(|&k| k < 4) {
             let extreme = rng.chance(p.extreme_share);
             on.retain(|&k| (k >= 4) == extreme);
@@ -850,6 +883,8 @@ pub fn new_duel(p: &Params, rng: &mut Rng, mode: Mode) -> (Match, [f64; 2], BotP
     let (d_lo, d_hi) = match lesson {
         0 => (p.start_dist_min, p.start_dist_max),
         5 | 6 => (2.5, 5.0),
+        8 => (3.5, 7.0),
+        9 => (2.0, 4.5),
         _ => (p.lesson_dist[0], p.lesson_dist[1]),
     };
     let mut a;
@@ -882,10 +917,26 @@ pub fn new_duel(p: &Params, rng: &mut Rng, mode: Mode) -> (Match, [f64; 2], BotP
         let (yaw, _) = bot::angles_to(from, to);
         (yaw + rng.range(-p.start_yaw_noise, p.start_yaw_noise)) as f32
     };
-    let spawns = [
-        Spawn { pos: a, yaw: face(a, b, rng), pitch: rng.range(-8.0, 8.0) as f32 },
-        Spawn { pos: b, yaw: face(b, a, rng), pitch: rng.range(-8.0, 8.0) as f32 },
-    ];
+    let yaw_a = face(a, b, rng);
+    let pitch_a = rng.range(-8.0, 8.0) as f32;
+    let yaw_b = face(b, a, rng);
+    let pitch = [pitch_a, rng.range(-8.0, 8.0) as f32];
+    // The lessons that start with the view turned away: drawn only for
+    // them, and from where the other player is, whatever the views of a
+    // duel start as. The other one looks at the first, near enough.
+    let (yaw_a, yaw_b) = if lesson == 8 || lesson == 9 {
+        let off = if lesson == 8 {
+            180.0 + rng.range(-25.0, 25.0)
+        } else {
+            rng.range(70.0, 180.0) * if rng.chance(0.5) { 1.0 } else { -1.0 }
+        };
+        let to_b = bot::angles_to(a, b).0;
+        let to_a = bot::angles_to(b, a).0 + rng.range(-15.0, 15.0);
+        (crate::mth::wrap_deg(to_b + off) as f32, to_a as f32)
+    } else {
+        (yaw_a, yaw_b)
+    };
+    let spawns = [Spawn { pos: a, yaw: yaw_a, pitch: pitch[0] }, Spawn { pos: b, yaw: yaw_b, pitch: pitch[1] }];
     let mut ping = [0.0; 2];
     let mut net = NetCfg { up_us: [0; 2], down_us: [0; 2], jitter_us: [0; 2] };
     for i in 0..2 {
@@ -1013,6 +1064,7 @@ pub fn new_duel(p: &Params, rng: &mut Rng, mode: Mode) -> (Match, [f64; 2], BotP
             // the one that uses them better is the one that is left.
             let lesson = if i == 0 || lesson == 6 { lesson } else { 0 };
             let timed_i = timed && (p.speed_who == 0 || p.speed_who as usize == i + 1 || lesson == 1 || lesson == 4);
+            let mut stowed = 0u8;
             if timed_i {
                 // Speed as after a potion drunk some time ago, and potions
                 // of it in the slots after the healing ones.
@@ -1023,6 +1075,12 @@ pub fn new_duel(p: &Params, rng: &mut Rng, mode: Mode) -> (Match, [f64; 2], BotP
                     cups = cups.max(1);
                 } else if lesson == 4 {
                     left = 0;
+                    cups = 0;
+                }
+                // Drawn only when asked for, so that duels without it come
+                // out as they always did.
+                if cups > 0 && lesson != 1 && p.drinks_stowed > 0.0 && rng.chance(p.drinks_stowed) {
+                    stowed = cups;
                     cups = 0;
                 }
                 n = n.min(7 - cups - hungry as u8);
@@ -1078,13 +1136,23 @@ pub fn new_duel(p: &Params, rng: &mut Rng, mode: Mode) -> (Match, [f64; 2], BotP
                 m.s.p[i].rows = rows;
                 m.c[i].lp.rows = rows;
             }
-            if lesson >= 5 {
+            if stowed > 0 {
+                // After whatever else the rows hold.
+                let mut rows = m.s.p[i].rows;
+                for cell in rows.0.iter_mut().filter(|c| **c == 0).take(stowed as usize) {
+                    *cell = 2;
+                }
+                m.s.p[i].rows = rows;
+                m.c[i].lp.rows = rows;
+            }
+            let hurt = (5..=8).contains(&lesson);
+            if hurt {
                 n = n.max(3);
             }
             m.s.p[i].potions = potion_mask(n);
             m.c[i].lp.potions = potion_mask(n);
-            if lesson == 3 || lesson >= 5 {
-                let lo = if lesson >= 5 { 4.0 } else { 6.0 };
+            if lesson == 3 || hurt {
+                let lo = if hurt { 4.0 } else { 6.0 };
                 let h = (rng.range(lo, 12.0) * 2.0).round() as f32 / 2.0;
                 m.s.p[i].health = h;
                 m.s.p[i].last_health = h;
@@ -1276,6 +1344,7 @@ impl Env {
             }
             let t = s.thrower;
             self.rew_acc[t] -= p.w_waste * (POTION_HEAL - s.would[t]).max(0.0) / hh;
+            self.rew_acc[t] -= p.w_gift * s.healed[1 - t] / hh;
             self.rew_acc[t] -= p.w_miss * (POTION_HEAL - s.offered[t]).clamp(0.0, MISS_POINTS) / hh;
             self.ep.splashes[t] += 1.0;
             self.ep.heal_self[t] += s.healed[t] as f64;
@@ -1464,6 +1533,16 @@ impl Env {
             if d < p.close_dist {
                 r -= p.w_close * ((p.close_dist - d) / p.close_dist) as f32;
             }
+        }
+        // Fighting on hungry with steak at hand, and slow with a potion of
+        // Speed to drink.
+        let sp = &self.m.s.p[id];
+        if p.w_hungry != 0.0 && sp.steak > 0 && sp.food.level < FOOD_TO_HEAL {
+            let short = ((FOOD_TO_HEAL - sp.food.level) as f32 / (FOOD_TO_HEAL - FOOD_TO_SPRINT) as f32).min(1.0);
+            r -= p.w_hungry * (0.5 + 0.5 * short);
+        }
+        if p.w_slow != 0.0 && sp.speed_ticks <= 0 && (sp.drinks != 0 || sp.rows.count(Item::Drink) > 0) {
+            r -= p.w_slow;
         }
         // A turn of the view that takes back the one before it.
         let view = [self.m.c[id].lp.l.yaw, self.m.c[id].lp.l.pitch];

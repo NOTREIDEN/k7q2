@@ -107,6 +107,27 @@ def main():
         combos += list(c[ends])
         combos.append(c[-1])
     combos = np.array([c for c in combos if c > 0])
+    # What a hit taken does to the agent, by whether it was blocking: how
+    # far it is pushed in ten ticks, how far apart the two are then, and
+    # whether the next hit is the opponent's again.
+    took = {"blocking": [], "not blocking": []}
+    for j in range(n):
+        for t0 in np.flatnonzero(np.diff(hits1[:, j]) > 0) + 1:
+            if t0 + 10 >= T or t0 < 2:
+                continue
+            dx, dz = x0[t0 - 1, j] - x1[t0 - 1, j], z0[t0 - 1, j] - z1[t0 - 1, j]
+            d = np.hypot(dx, dz) + 1e-9
+            push = ((x0[t0 + 9, j] - x0[t0 - 1, j]) * dx + (z0[t0 + 9, j] - z0[t0 - 1, j]) * dz) / d
+            apart = np.hypot(x0[t0 + 9, j] - x1[t0 + 9, j], z0[t0 + 9, j] - z1[t0 + 9, j])
+            later0 = np.flatnonzero(hits0[t0 + 1:, j] > hits0[t0, j])
+            later1 = np.flatnonzero(hits1[t0 + 1:, j] > hits1[t0, j])
+            again = (len(later1) > 0) and (len(later0) == 0 or later1[0] < later0[0])
+            took["blocking" if blk[t0 - 1, j] or blk[t0, j] else "not blocking"].append((push, apart, again))
+    for k, a in took.items():
+        if a:
+            a = np.array(a, float)
+            print(f"  hits taken {k}: {len(a)/minutes:.1f} per minute, pushed the agent {a[:,0].mean():.2f} blocks, "
+                  f"{a[:,1].mean():.2f} apart ten ticks later, next hit is the opponent's too {a[:,2].mean():.2f}")
     print(f"  hits dealt {hits0[-1].sum()/minutes:.1f} per minute, taken {hits1[-1].sum()/minutes:.1f}; taken while blocking {taken_block/max(1, taken_block+taken_free):.2f}")
     print(f"  hits taken per second while blocking {taken_block/max(1, blk.sum())*20:.2f}, while not {taken_free/max(1, (~blk).sum())*20:.2f}")
     print(f"  combos of the bot on the agent: mean length {combos.mean():.2f}, of 3 or more {np.mean(combos >= 3):.2f}, of 5 or more {np.mean(combos >= 5):.3f}, longest {combos.max():.0f}")

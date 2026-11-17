@@ -42,6 +42,7 @@ def main():
     ap.add_argument("--param", action="append", default=[])
     ap.add_argument("--health", action="store_true", help="real health, armour and healing potions; a duel ends with a death")
     ap.add_argument("--lib", default=None, help="path to libpvpsim.so")
+    ap.add_argument("--no-block", action="store_true", help="the agent never holds the right button with its sword")
     args = ap.parse_args()
 
     policy, ck, _ = load_policy(args.checkpoint, sim_dims(args.lib))
@@ -66,7 +67,10 @@ def main():
         state = policy.initial_state(args.duels)
         for _ in range(ticks):
             act, _, _, state = policy.act(torch.from_numpy(obs.copy()), torch.from_numpy(priv.copy()), state, args.greedy)
-            env.step(act.numpy().astype(np.int32))
+            act = act.numpy().astype(np.int32)
+            if args.no_block:
+                act[:, 7] = 0
+            env.step(act)
             obs, priv = env.obs, env.priv
         st = env.take_stats()
         mins = st["ticks0"] / 1200.0

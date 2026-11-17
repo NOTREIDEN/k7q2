@@ -26,6 +26,11 @@ START_BIAS = {7: USE_BIAS, 8: PEARL_BIAS, 9: POTION_BIAS}
 # in states the policy is sure of, and beside it a choice that hangs on
 # nothing is asked for on one tick in thousands and never tried.
 NEW_CHOICE_BIAS = -5.0
+# Choices that start as a copy of another choice than the first, with their
+# own starting preference, by control: the quarter and half turns of the
+# view start as the largest turn there was the same way, one time in twenty
+# of those on which that one is asked for.
+COPY_OF = {5: {27: (0, -3.0), 28: (26, -3.0), 29: (0, -3.0), 30: (26, -3.0)}}
 # When the potion control is added, the pearl control starts over. With
 # infinite health the agent had learnt never to throw a pearl; with health
 # to lose, and an opponent that can be knocked away from its own potion, a
@@ -187,6 +192,12 @@ def fit_state(sd, policy):
                     w.copy_(old[0] + torch.tensor(start, dtype=ref.dtype) - start[0])
                 else:
                     w[:, : old.shape[1]] = old[0]
+                for new, (src, bias) in COPY_OF.get(head, {}).items():
+                    if old.shape[0] <= new < ref.shape[0] and src < old.shape[0]:
+                        if part[2] == "bias":
+                            w[new] = old[src] + bias
+                        else:
+                            w[new, : old.shape[1]] = old[src]
             w[tuple(slice(0, n) for n in old.shape)] = old
             out[k] = w
             grown = True

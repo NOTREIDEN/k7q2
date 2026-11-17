@@ -56,6 +56,8 @@ impl Line {
     }
 }
 
+/// The numbers an agent was shown when the first recordings with one were made.
+const OBS_RECORDED: usize = 151;
 const SPRINT_UUID: &str = "662a6b8d-da3e-4c1c-8813-96ea6097278d";
 const SPEED_UUID: &str = "91aeaa56-376b-4498-935b-2f7f68070635";
 
@@ -678,7 +680,13 @@ fn replay_client(lines: &[Line], world: &World, speed: i8, sens: f32, o: &Option
                     let mut o = [0f32; OBS_DIM];
                     a.write_obs(&c, world, &cfg, d, &mut o);
                     let want: Vec<f32> = l.s("o").split(',').map(|s| f32::from_bits(u32::from_str_radix(s, 16).unwrap())).collect();
-                    let off: Vec<usize> = (0..OBS_DIM).filter(|&k| want.get(k).map(|w| w.to_bits()) != Some(o[k].to_bits())).collect();
+                    // A recording made before the agent was shown more has
+                    // fewer numbers: the ones it has are compared.
+                    let n = want.len().min(OBS_DIM);
+                    let mut off: Vec<usize> = (0..n).filter(|&k| want[k].to_bits() != o[k].to_bits()).collect();
+                    if want.len() < OBS_RECORDED || want.len() > OBS_DIM {
+                        off.push(n.min(OBS_DIM - 1));
+                    }
                     rep.count("observations compared", 1);
                     let same = rep.note("observation", off.is_empty(), || {
                         let what: Vec<String> = off.iter().take(8).map(|&k| format!("number {k} {:?} for {:?}", o[k], want.get(k))).collect();
