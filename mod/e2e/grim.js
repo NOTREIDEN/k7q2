@@ -156,6 +156,8 @@ async function main() {
         else kept.push(l)
       }
       after = kept.join('\n')
+      const left = Array.from(new Set(kept.filter(l => /^\s*-\s*"\d+:\d+\s/.test(l)).map(l => l.trim().replace(/^-\s*"\d+:\d+\s+/, '').replace(/"$/, ''))))
+      console.log('what Grim does about a flag: ' + left.join(' | '))
     }
     if (after !== before) fs.writeFileSync(f, after)
   }
@@ -176,7 +178,8 @@ async function main() {
   client.stderr.pipe(log)
   let clientDone = false
   client.on('exit', () => { clientDone = true })
-  const joined = await line(/\]: (\w+) joined the game/, from, 900000)
+  // This server does not tell its console of a join in the words the players read.
+  const joined = await line(/\]: (\w+)\[\/[^\]]*\] logged in with entity id/, from, 900000)
   const name = joined ? joined[1] : null
   check(!!name && name !== RIVAL, 'the client with the mod joined as ' + name)
   if (!name) {
@@ -195,6 +198,14 @@ async function main() {
     }
   }
   setTimeout(() => outfit(name), 1500)
+  // A death also as the second player reads it, should the console not have it.
+  let lastKit = 0
+  bot.on('messagestr', m => {
+    if (m.startsWith(name + ' ') && /slain|killed|died|fell|shot|blown|burned|drowned|starved|withered/.test(m) && Date.now() - lastKit > 4000) {
+      lastKit = Date.now()
+      setTimeout(() => { if (!exited) outfit(name) }, 2500)
+    }
+  })
   // The ping the server has for it: what the player list says and what Grim measures.
   const pings = []
   const asked = setInterval(() => {
@@ -208,7 +219,10 @@ async function main() {
   while (!clientDone && Date.now() < until) {
     for (; seen < lines.length; seen++) {
       const m = /\]: (\w+) (was slain|was killed|died|was shot|fell|hit the ground|starved|withered|drowned|burned|went up|was blown|suffocated|was pricked|walked into|tried to swim)/.exec(lines[seen])
-      if (m && m[1] === name) setTimeout(() => { if (!exited) outfit(name) }, 2500)
+      if (m && m[1] === name && Date.now() - lastKit > 4000) {
+        lastKit = Date.now()
+        setTimeout(() => { if (!exited) outfit(name) }, 2500)
+      }
     }
     await sleep(200)
   }
