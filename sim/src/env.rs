@@ -11,7 +11,7 @@ use crate::aabb::{dist, V3};
 use crate::agent::{aim_error, clip, local, Agent, Duel};
 pub use crate::agent::{decode_action, ACT_DIMS, ACT_HEADS, BAR_TURN, BAR_TURNS, FLICK_BINS, OBS_DIM, PITCH_BINS, YAW_BINS};
 use crate::bot::{self, BotParams, BotState};
-use crate::client::{ClientCfg, Edge, Input, TickOut, INV_SHUT, MAX_BACKTRACK};
+use crate::client::{Client, ClientCfg, Edge, Input, TickOut, INV_SHUT, MAX_BACKTRACK};
 use crate::mth::Rng;
 use crate::net::{potion_mask, Item, Kind, Rows, SLOT_PEARL, SLOT_SWORD, USE_TICKS};
 use crate::server::{
@@ -340,6 +340,12 @@ pub struct Params {
     /// block or a sprint.
     pub w_inv_near: f32,
     pub inv_near_dist: f64,
+    /// In self-play, the share of duels in which player 1, whose actions
+    /// are not trained on (an earlier version in the league), goes for the
+    /// other player's potions: while that player holds a potion, has one in
+    /// the air or is under 12 health, it runs straight at it (`steal_keys`).
+    /// A potion thrown at its own feet in front of such a player heals both.
+    pub league_steal: f64,
     /// Share of the players that start with potions of Speed at hand whose
     /// potions of it are in the inventory instead, as most players carry
     /// them: to drink one it has to be brought down first.
@@ -452,6 +458,7 @@ impl Default for Params {
             w_slow: 0.0,
             w_inv_near: 0.0,
             inv_near_dist: 4.5,
+            league_steal: 0.0,
             drinks_stowed: 0.0,
         }
     }
@@ -578,6 +585,7 @@ impl Params {
             121 => self.bot_presser = v,
             122 => self.w_inv_near = v as f32,
             123 => self.inv_near_dist = v,
+            124 => self.league_steal = v,
             113 => self.extreme_share = v,
             114 => self.w_shake = v as f32,
             115 => self.pot_strict_prob = v,
@@ -860,6 +868,9 @@ pub struct Env {
     pot_since: [i32; 2],
     pot_back: [bool; 2],
     off_run: [i32; 2],
+    /// Whether player 1 goes for player 0's potions in this duel (see
+    /// `Params::league_steal`).
+    steal: bool,
     /// Whether each player's inventory was open on its last tick.
     was_open: [bool; 2],
     /// Each player's view after its last tick, its last turn sideways and
@@ -871,6 +882,31 @@ pub struct Env {
     pub lesson: u8,
     /// A player has died: the duel ends when both have made their tick.
     over: bool,
+}
+
+/// The keys of a player that goes for its opponent's potions, laid over
+/// what its policy asked for: while the opponent holds a potion, has one
+/// of its own in the air or is under 12 health, the view turned onto it
+/// (at most 60 degrees a tick), W with sprint, no strafe, no right button,
+/// and jumps while it is out of reach. Clicks stay the policy's.
+fn steal_keys(c: &Client, deg_per_count: f64, inp: &mut Input) {
+    let (lp, rp) = (&c.lp, &c.rp);
+    let potting = rp.item == Item::Potion || c.thrown.iter().any(|e| e.kind == Kind::Potion && !e.mine);
+    if lp.inv_open || !(potting || rp.health <= 12.0) {
+        return;
+    }
+    let (yaw_to, pitch_to) = bot::angles_to(lp.eye(), [rp.pos[0], rp.pos[1] + 1.2, rp.pos[2]]);
+    let dyaw = crate::mth::wrap_deg(yaw_to - lp.l.yaw as f64).clamp(-60.0, 60.0);
+    let dpitch = (pitch_to - lp.l.pitch as f64).clamp(-60.0, 60.0);
+    inp.dx = (dyaw / deg_per_count).round() as i32;
+    inp.dy = (dpitch / deg_per_count).round() as i32;
+    inp.forward = 1;
+    inp.strafe = 0;
+    inp.sprint_key = true;
+    inp.use_item = false;
+    inp.use_again = false;
+    let hdist = (rp.pos[0] - lp.l.body.pos[0]).hypot(rp.pos[2] - lp.l.body.pos[2]);
+    inp.jump = hdist > 3.2 && lp.l.body.on_ground;
 }
 
 pub fn new_match(p: &Params, rng: &mut Rng, mode: Mode) -> (Match, [f64; 2], BotParams) {
@@ -1280,6 +1316,7 @@ impl Env {
             lesson,
             pot_back: [true; 2],
             off_run: [0; 2],
+            steal: false,
             over: false,
         };
         e.begin();
@@ -1301,6 +1338,7 @@ impl Env {
         self.was_open = [false; 2];
         self.pot_back = [true; 2];
         self.off_run = [0; 2];
+        self.steal = self.mode == Mode::SelfPlay && p.league_steal > 0.0 && self.rng.chance(p.league_steal);
         self.over = false;
         self.view_was = [0, 1].map(|a| [self.m.c[a].lp.l.yaw, self.m.c[a].lp.l.pitch]);
         self.turn_last = [[0.0; 2]; 2];
@@ -1711,7 +1749,10 @@ impl Env {
     pub fn step(&mut self, action: &[i32]) -> usize {
         let id = self.pending;
         let duel = self.duel();
-        let inp = self.ag[id].keys(&self.m.c[id], &self.m.world, &duel, action, &mut self.rng);
+        let mut inp = self.ag[id].keys(&self.m.c[id], &self.m.world, &duel, action, &mut self.rng);
+        if id == 1 && self.steal && !self.ag[1].busy() && inp.inv == 0 {
+            steal_keys(&self.m.c[1], self.m.ccfg.mouse_f1 as f64 * 0.15, &mut inp);
+        }
         let out = self.m.client_tick(id, &inp);
         self.account(id, &inp, &out);
         let mut round_done = id == 1;

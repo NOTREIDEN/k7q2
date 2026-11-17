@@ -27,6 +27,8 @@ public final strictfp class Agent {
     /** Degrees of one mouse count, the ticks of its own run a potion thrown with a turn is aimed over, and the most the run goes on for. */
     private static final float COUNT_DEG = 0.15f;
     private static final int RUN_TICKS = 16, MOVE_TICKS = 14;
+    /** Pitches {@link #runAim} tries: 90 down to 20, a degree apart. */
+    private static final int AIM_PITCHES = 71;
     /** Mouse counts a flick adds to the yaw of its tick: an eighth of a turn, a quarter either way, or half a turn. */
     public static final int[] FLICK_BINS = {0, -300, 300, -600, 600, 1200};
     /** Mouse counts per tick; the four large ones at the end are a quarter turn and a half turn each way. */
@@ -581,21 +583,30 @@ public final strictfp class Agent {
         Feet feet = potionFeet(v, -1, lag + 2, true);
         feet.run = run;
         double sp = Geo.speed(Inv.KIND_POTION);
-        float bestPitch = 90.0f, bestHeal = -1.0f, bestGift = 0.0f;
-        int bestTicks = 0;
-        for (int k = 0; k <= 14; k++) {
-            float pitch = 90.0f - 5.0f * (float) k;
-            double[] hd = Geo.throwHeading(Inv.KIND_POTION, run[0], yaw, pitch);
+        int[] ticks = new int[AIM_PITCHES];
+        float[] heal = new float[AIM_PITCHES], gift = new float[AIM_PITCHES];
+        for (int k = 0; k < AIM_PITCHES; k++) {
+            double[] hd = Geo.throwHeading(Inv.KIND_POTION, run[0], yaw, 90.0f - (float) k);
             double[] from = {hd[0], hd[1], hd[2]}, m = {hd[3] * sp, hd[4] * sp, hd[5] * sp};
             Fate f = potionOutcome(blocks, from, m, 0, 0, feet);
-            if (f.heal[0] > bestHeal || (f.heal[0] == bestHeal && (f.ticks < bestTicks || (f.ticks == bestTicks && f.heal[1] < bestGift)))) {
-                bestPitch = pitch;
-                bestTicks = f.ticks;
-                bestHeal = f.heal[0];
-                bestGift = f.heal[1];
+            ticks[k] = f.ticks;
+            heal[k] = f.heal[0];
+            gift[k] = f.heal[1];
+        }
+        // The most health even a degree higher or lower, then the soonest, then the least for the opponent.
+        int best = 0;
+        float bestSure = -1.0f;
+        for (int k = 0; k < AIM_PITCHES; k++) {
+            float sure = Float.MAX_VALUE;
+            for (int q = Math.max(k - 1, 0); q < Math.min(k + 2, AIM_PITCHES); q++) {
+                sure = Math.min(sure, heal[q]);
+            }
+            if (sure > bestSure || (sure == bestSure && (ticks[k] < ticks[best] || (ticks[k] == ticks[best] && gift[k] < gift[best])))) {
+                best = k;
+                bestSure = sure;
             }
         }
-        return new float[] {bestPitch, (float) bestTicks};
+        return new float[] {90.0f - (float) best, (float) ticks[best]};
     }
 
     /**

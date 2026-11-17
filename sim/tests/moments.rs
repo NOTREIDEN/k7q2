@@ -164,8 +164,10 @@ fn a_potion_thrown_with_a_turn_lands_on_the_runner_and_the_view_comes_back() {
         let ran = (pos[0] - start[0]).hypot(pos[2] - start[2]);
         assert_eq!(e.m.s.potion_throws[0], 1);
         assert_eq!(e.m.c[0].lp.potions.count_ones(), 6);
-        // It came down on the player that ran, not on the one far away.
-        assert!(e.m.s.p[0].health >= health + 6.0, "turn {turn}: {health} to {} after {ticks} ticks and {ran:.1} blocks", e.m.s.p[0].health);
+        // It came down on the player that ran, and not on the one far away;
+        // with the mouse spun this far the keys follow the run only to the
+        // nearest of eight ways (see the next test for a still mouse).
+        assert!(e.m.s.p[0].health >= health + 7.0, "turn {turn}: {health} to {} after {ticks} ticks and {ran:.1} blocks", e.m.s.p[0].health);
         assert_eq!(e.m.s.p[1].health, other);
         assert!(ran > 1.0, "{ran}");
     }
@@ -463,4 +465,49 @@ fn a_bot_that_presses_does_not_stop_to_heal_itself_and_jumps_at_a_hurt_opponent(
     assert!(plain >= 3, "bots that do not press heal themselves at that health: {plain} potions in 8 duels");
     assert_eq!(pressing, 0);
     assert_eq!(jumps, 8);
+}
+
+#[test]
+fn a_player_that_goes_for_potions_runs_at_a_hurt_opponent_and_a_plain_one_does_not() {
+    let mut apart = Vec::new();
+    for steal in [0.0, 1.0] {
+        let mut p = params();
+        p.league_steal = steal;
+        let mut e = Env::new(Mode::SelfPlay, p, 5);
+        assert!(e.m.c[1].rp.health <= 12.0);
+        let (_, at) = off_and_apart(&e, 1);
+        // Ticks until it is within reach, and how far its view is off then.
+        let mut reach = (0, 0.0);
+        for k in 0..40 {
+            run(&mut e, 1, |_| IDLE);
+            let (off, now) = off_and_apart(&e, 1);
+            if now < 3.0 {
+                reach = (k + 1, off);
+                break;
+            }
+        }
+        apart.push((at, off_and_apart(&e, 1).1, reach));
+    }
+    let (plain, keen) = (apart[0], apart[1]);
+    assert!((plain.0 - plain.1).abs() < 0.5 && plain.2 .0 == 0, "{apart:?}");
+    // Nine blocks in a sprint with jumps, a second and a half.
+    assert!((1..=35).contains(&keen.2 .0) && keen.2 .1 < 10.0, "{apart:?}");
+}
+
+#[test]
+fn a_potion_thrown_with_a_turn_and_the_mouse_still_heals_all_eight() {
+    for turn in 0..3 {
+        let mut full = 0;
+        for seed in 0..20 {
+            let mut p = params();
+            p.start_yaw_noise = 25.0;
+            let mut e = Env::new(Mode::SelfPlay, p, seed);
+            let health = e.m.s.p[0].health;
+            run(&mut e, 1, |_| with(9, BAR_TURN + turn));
+            run(&mut e, 30, |_| IDLE);
+            assert_eq!(e.m.s.potion_throws[0], 1);
+            full += (e.m.s.p[0].health >= health + 8.0) as i32;
+        }
+        assert!(full >= 19, "turn {turn}: {full} of 20");
+    }
 }

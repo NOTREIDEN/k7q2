@@ -56,6 +56,11 @@ RESTART = {9: (8,)}
 # drink or the meal was finished, and within half an hour the agent had
 # stopped trying either.
 RESTART_CHOICES = {"drink-eat": ((9, 2, -4.0), (9, 3, -4.0))}
+# A restart can start a choice as a copy of another choice than the first,
+# named fourth. The potions thrown with a turn broke a little short one time
+# in four and healed 7 instead of 8, and the fleet let them die; with that
+# mended they start over as the plain throw does in `COPY_OF`.
+RESTART_CHOICES["turned-potions"] = ((9, 7, -2.0, 1), (9, 8, -2.0, 1), (9, 9, -2.0, 1))
 
 
 def start_bias(head, n):
@@ -73,10 +78,11 @@ def restart_choices(policy, marks):
         for name, choices in RESTART_CHOICES.items():
             if name in marks:
                 continue
-            for head, choice, bias in choices:
+            for head, choice, bias, *src in choices:
+                src = src[0] if src else 0
                 if len(policy.act_dims) > head and policy.act_dims[head] > choice:
-                    policy.heads[head].weight[choice] = policy.heads[head].weight[0]
-                    policy.heads[head].bias[choice] = policy.heads[head].bias[0] + bias
+                    policy.heads[head].weight[choice] = policy.heads[head].weight[src]
+                    policy.heads[head].bias[choice] = policy.heads[head].bias[src] + bias
             marks.append(name)
             made.append(name)
     return made

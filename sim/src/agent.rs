@@ -68,7 +68,9 @@ pub const BAR_TURNS: [i32; 3] = [1200, 600, -600];
 pub const COUNT_DEG: f32 = 0.15;
 /// The ticks of its own run that a potion thrown with a turn is aimed
 /// over, and the most the run goes on for.
-const RUN_TICKS: usize = 16;
+pub const RUN_TICKS: usize = 16;
+/// Pitches `Agent::run_aim` tries: 90 down to 20, a degree apart.
+const AIM_PITCHES: usize = 71;
 const MOVE_TICKS: i32 = 14;
 /// Mouse counts a flick adds to the yaw of its tick.
 pub const FLICK_BINS: [i32; 6] = [0, -300, 300, -600, 600, 1200];
@@ -304,6 +306,12 @@ impl Agent {
     }
 
     /// Is the view turned for a potion thrown with a turn?
+    /// Whether a throw, a drink or a meal, the inventory or the run after a
+    /// turned throw has the keys.
+    pub fn busy(&self) -> bool {
+        self.potion_stage != 0 || self.pearl_stage != 0 || self.consume != 0 || self.refill != 0 || self.turned > 0
+    }
+
     pub fn turned(&self) -> bool {
         self.turned > 0 && self.turned <= self.view_until
     }
@@ -502,28 +510,32 @@ impl Agent {
 
     /// The pitch for a potion thrown on the tick after next by a player
     /// that turns its view to `yaw` on the next and runs along it (see
-    /// `run_feet`), and the ticks that potion flies: of the pitches from
-    /// straight down to a little under level, the one whose potion gives
-    /// this player the most health, breaks soonest, and gives the opponent
-    /// the least, in that order.
+    /// `run_feet`), and the ticks that potion flies. Of the pitches from
+    /// straight down to 20 degrees under level, in steps of one, the one
+    /// whose potion gives this player the most health even a degree higher
+    /// or lower (the server throws a little off the view, at random), then
+    /// breaks soonest, then gives the opponent the least.
     fn run_aim(&self, c: &Client, world: &World, yaw: f32) -> (f32, i32) {
         let run = run_feet(c, world, yaw);
         let other = self.potion_feet(c, -1, self.lag + 2, true);
         let v = Kind::Potion.speed() as f64;
-        let mut best = (90.0f32, 0, -1.0f32, 0.0f32);
-        let mut k = 0;
-        while k <= 14 {
-            let pitch = 90.0f32 - 5.0f32 * k as f32;
-            let (from, dir) = throw_heading(Kind::Potion, run[0], yaw, pitch);
+        let feet = |j: usize, t: i32| if j == 0 { run[((t + 1).max(0) as usize).min(RUN_TICKS - 1)] } else { other(1, t) };
+        let mut out = [(0i32, [0.0f32; 2]); AIM_PITCHES];
+        for (k, o) in out.iter_mut().enumerate() {
+            let (from, dir) = throw_heading(Kind::Potion, run[0], yaw, 90.0f32 - k as f32);
             let m = [dir[0] * v, dir[1] * v, dir[2] * v];
-            let feet = |j: usize, t: i32| if j == 0 { run[((t + 1).max(0) as usize).min(RUN_TICKS - 1)] } else { other(1, t) };
-            let (_, ticks, heal) = potion_outcome(world, from, m, 0, 0, feet);
-            if heal[0] > best.2 || (heal[0] == best.2 && (ticks < best.1 || (ticks == best.1 && heal[1] < best.3))) {
-                best = (pitch, ticks, heal[0], heal[1]);
-            }
-            k += 1;
+            let (_, ticks, heal) = potion_outcome(world, from, m, 0, 0, &feet);
+            *o = (ticks, heal);
         }
-        (best.0, best.1)
+        let mut best = (0usize, -1.0f32);
+        for k in 0..AIM_PITCHES {
+            let sure = out[k.saturating_sub(1)..(k + 2).min(AIM_PITCHES)].iter().map(|o| o.1[0]).fold(f32::MAX, f32::min);
+            let (b, o) = (out[best.0], out[k]);
+            if sure > best.1 || (sure == best.1 && (o.0 < b.0 || (o.0 == b.0 && o.1[1] < b.1[1]))) {
+                best = (k, sure);
+            }
+        }
+        (90.0f32 - best.0 as f32, out[best.0].0)
     }
 
     /// The key presses of a potion throw, as `pearl_keys`: the number key
@@ -1062,7 +1074,7 @@ fn run_away(inp: &mut Input, yaw: f32, dir: [f64; 2]) {
 /// same way (see `run_away`). The pull of its keys and the friction of the
 /// ground or the air on the motion it has, the fall to the ground under
 /// it, and a wall in its way.
-fn run_feet(c: &Client, world: &World, yaw: f32) -> [V3; RUN_TICKS] {
+pub fn run_feet(c: &Client, world: &World, yaw: f32) -> [V3; RUN_TICKS] {
     let l = &c.lp.l;
     let (mut pos, mut m, mut on_ground) = (l.body.pos, l.body.motion, l.body.on_ground);
     let floor = match world.ray_trace_blocks([pos[0], pos[1] + 0.1, pos[2]], [pos[0], pos[1] - 6.0, pos[2]], false) {

@@ -45,6 +45,7 @@ def main():
     ap.add_argument("--n-league", type=int, default=0, help="duels against earlier versions of the agent")
     ap.add_argument("--league-dir", default=None, help="folder with the weights of those versions")
     ap.add_argument("--league-groups", type=int, default=4, help="versions played at the same time")
+    ap.add_argument("--league-param", action="append", default=[], help="name=value for the duels against earlier versions only")
     ap.add_argument("--league-swap", type=int, default=40, help="iterations until the versions played are drawn again")
     ap.add_argument("--worker-id", type=int, default=0, help="process number inside one machine")
     ap.add_argument("--workers", type=int, default=1, help="processes on this machine that share weights")
@@ -91,6 +92,11 @@ def main():
         for kv in args.param:
             k, v = kv.split("=")
             e.set_param(k, float(v))
+    for k, e in envs.items():
+        if k.startswith("lg"):
+            for kv in args.league_param:
+                name, v = kv.split("=")
+                e.set_param(name, float(v))
 
     torch.manual_seed(base_seed)
     policy = Policy(any_env.obs_dim, any_env.priv_dim, any_env.act_dims, args.hidden)
