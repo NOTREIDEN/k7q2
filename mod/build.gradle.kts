@@ -65,6 +65,7 @@ tasks.assemble.get().dependsOn(tasks.named("remapJar"))
 tasks.register<JavaExec>("selftest") {
     val run = net.fabricmc.loom.configuration.ide.RunConfig.runConfig(project, loom.runConfigs.getByName("client"))
     dependsOn("downloadAssets")
+    javaLauncher.set(javaToolchains.launcherFor { languageVersion.set(JavaLanguageVersion.of(8)) })
     classpath = run.sourceSet.runtimeClasspath
     mainClass.set(run.mainClass)
     jvmArgs(run.vmArgs)
