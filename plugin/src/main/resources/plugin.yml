@@ -1,0 +1,15 @@
+name: KbTest
+main: pvpai.plugin.KbTest
+version: "1.0"
+commands:
+  kb:
+    usage: /kb ver | list | use PERFIL [JUGADOR] | use azar | clear JUGADOR | set CAMPO VALOR | pearl SEGUNDOS | verify on|off | log on|off | reload
+    permission: kbtest.kb
+  kit:
+    usage: /kit [jugador]
+    permission: kbtest.kit
+permissions:
+  kbtest.kb:
+    default: op
+  kbtest.kit:
+    default: true

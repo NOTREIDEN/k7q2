@@ -1,0 +1,90 @@
+# El KB de todos al arrancar: uno de los perfiles de abajo. /kb use PERFIL lo cambia.
+profile: vanilla
+# Segundos de espera entre dos perlas (0: sin espera).
+pearl-cooldown: 16
+# Con el perfil vanilla, comparar la cuenta del plugin con la del juego en cada golpe.
+verify: false
+# Anotar cada golpe cambiado en la consola.
+log-hits: false
+
+# kind: vanilla  el del juego, sin tocar.
+# kind: game     la cuenta del juego con otros numeros: lo que traia el golpeado se divide por
+#                friction, se lo empuja horizontal y vertical (hasta vertical-limit), y un golpe
+#                con sprint o Knockback suma extra-horizontal y extra-vertical.
+# kind: hit      como los plugins de KB de los servidores: sale solo del golpe, con un par de
+#                numeros si el golpeado esta en el piso y otro si esta en el aire.
+#                stop-sprint true: el extra de sprint pide un sprint nuevo (w-tap), como en el
+#                juego. false: lo lleva todo golpe de alguien que corre.
+#                height-limit: desde esa altura sobre el ultimo piso, el empuje hacia arriba es
+#                vertical-after-limit hasta que aterriza (menos de 0: sin limite).
+# hit-delay: 20 es un golpe cada 10 ticks, como el juego.
+profiles:
+  bajo:
+    kind: game
+    friction: 2.0
+    horizontal: 0.33
+    vertical: 0.34
+    vertical-limit: 0.4
+    extra-horizontal: 0.4
+    extra-vertical: 0.07
+    hit-delay: 20
+  alto:
+    kind: game
+    friction: 1.8
+    horizontal: 0.48
+    vertical: 0.42
+    vertical-limit: 0.42
+    extra-horizontal: 0.58
+    extra-vertical: 0.11
+    hit-delay: 20
+  servidor:
+    kind: hit
+    ground-horizontal: 0.4
+    ground-vertical: 0.36075
+    air-horizontal: 0.4
+    air-vertical: 0.24775
+    sprint-horizontal: 0.5
+    sprint-vertical: 0.1
+    stop-sprint: true
+    height-limit: 0.675
+    vertical-after-limit: 0.0
+    hit-delay: 20
+  combo:
+    kind: hit
+    ground-horizontal: 0.3
+    ground-vertical: 0.32
+    air-horizontal: 0.27
+    air-vertical: 0.22
+    sprint-horizontal: 0.35
+    sprint-vertical: 0.04
+    stop-sprint: false
+    height-limit: 0.9
+    vertical-after-limit: -0.05
+    hit-delay: 18
+  cero:
+    kind: hit
+    ground-horizontal: 0.0
+    ground-vertical: 0.0
+    air-horizontal: 0.0
+    air-vertical: 0.0
+    sprint-horizontal: 0.0
+    sprint-vertical: 0.0
+    stop-sprint: true
+    height-limit: -1.0
+    vertical-after-limit: 0.0
+    hit-delay: 20
+
+# El kit de /kit: espada en el 1, perlas en el 2, pociones de vida, Speed II para tomar y
+# comida en el 9, como espera el bot. Mas pociones en el inventario para bajar.
+kit:
+  sharpness: 2
+  protection: 2
+  feather-falling: 4
+  unbreakable: true
+  pearls: 16
+  hotbar-potions: 5
+  hotbar-speed: 1
+  steak: 64
+  inventory-potions: 12
+  inventory-speed: 2
+  speed-seconds: 90

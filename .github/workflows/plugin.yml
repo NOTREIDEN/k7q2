@@ -1,0 +1,51 @@
+name: plugin
+
+# Builds the knockback plugin for a 1.8.8 test server, checks its arithmetic
+# against the simulator's and puts the jar on the branch "plugin".
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: plugin
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/cache@v4
+        with:
+          path: sim/target
+          key: sim-${{ hashFiles('sim/Cargo.toml', 'sim/Cargo.lock', 'sim/src/**', 'sim/tests/**') }}
+      - name: Hits of the simulator to compare with
+        run: cd sim && cargo run --release --example kb_dump -- ../hits.txt 20000
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 8
+      - name: Check the plugin's arithmetic against the simulator's
+        run: |
+          mkdir -p out
+          javac -encoding UTF-8 -d out plugin/src/main/java/pvpai/plugin/Profile.java plugin/src/main/java/pvpai/plugin/Knock.java plugin/src/test/java/pvpai/plugin/KnockCheck.java
+          java -cp out pvpai.plugin.KnockCheck hits.txt
+      - name: Build the plugin
+        run: cd plugin && mvn -B -ntp package
+      - name: Look into the jar
+        run: unzip -l plugin/target/kbtest.jar
+      - uses: actions/upload-artifact@v4
+        with:
+          name: plugin
+          path: plugin/target/kbtest.jar
+      - name: Put the jar on the branch "plugin"
+        run: |
+          blob=$(git hash-object -w plugin/target/kbtest.jar)
+          tree=$(printf '100644 blob %s\tkbtest-1.8.8.jar\n' "$blob" | git mktree)
+          commit=$(git -c user.name='github-actions[bot]' \
+            -c user.email='41898282+github-actions[bot]@users.noreply.github.com' \
+            commit-tree "$tree" -m "Plugin built by run $GITHUB_RUN_ID from $GITHUB_SHA")
+          git push --force origin "$commit:refs/heads/plugin"
