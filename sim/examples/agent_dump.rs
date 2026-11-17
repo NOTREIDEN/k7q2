@@ -304,6 +304,7 @@ fn main() {
         let d = Duel {
             arena_half: p.arena_half,
             floor_y: p.floor_y,
+            center: [0.0, 0.0],
             real_health: !cfg.infinite_health,
             hit_health: cfg.hit_health(),
             pearl_cooldown: cfg.pearl_cooldown,

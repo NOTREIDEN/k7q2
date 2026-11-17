@@ -91,6 +91,13 @@ public final class Rig {
     static final String AGENT = System.getProperty("rig.agent");
     static pvpai.client.Bot bot;
     static pvpai.core.Policy policy;
+    /**
+     * With -Drig.session the policy is put at the keys the way the mod does it for a player:
+     * the arena, the floor and what a hit costs are found out from the game instead of taken
+     * from the script.
+     */
+    static final boolean SESSION = System.getProperty("rig.session") != null;
+    static pvpai.client.Session session;
     /** What an agent is told of the duel: its ping and the other's, its click rate, half the arena. */
     static double ping = 200.0, otherPing = 60.0, cps = 15.5, arenaHalf = 24.0;
     /** Chunks the client sees around it. */
@@ -344,6 +351,10 @@ public final class Rig {
             int[] in = inputs.get(ctick);
             boolean open = mc.currentScreen instanceof GuiInventory;
             if (bot != null) {
+                if (session != null) {
+                    String why = session.check();
+                    if (why != null) System.out.println("SESSION " + why);
+                }
                 pvpai.core.Keys k = null;
                 if (policy == null) {
                     // The script's keys, pressed by the mod's code.
@@ -532,10 +543,25 @@ public final class Rig {
                     return policy.act(obs, draws);
                 }
             };
+            if (SESSION) {
+                pvpai.client.Settings s = new pvpai.client.Settings();
+                s.cpsMin = s.cpsMax = cps;
+                s.ping = ping;
+                s.otherPing = otherPing;
+                s.pearlCooldownS = 0.0;
+                session = new pvpai.client.Session(mc, policy);
+                System.out.println("SESSION " + session.start(s));
+                pvpai.core.Duel f = session.duel();
+                System.out.println("SESSION found half " + f.arenaHalf + " centre " + f.centerX + " " + f.centerZ + " floor " + f.floorY + " hit " + f.hitHealth
+                    + ", the script says half " + d.arenaHalf + " floor " + d.floorY + " hit " + d.hitHealth);
+                d = f;
+            }
             log("AGENT half=" + hd(d.arenaHalf) + " floor=" + hd(d.floorY) + " health=" + (d.realHealth ? 1 : 0) + " hit=" + hf(d.hitHealth)
-                + " pearlcd=" + d.pearlCooldown + " drink=" + hd(d.drinkWindowS) + " ping=" + hd(ping) + " oping=" + hd(otherPing) + " cps=" + hd(cps));
+                + " pearlcd=" + d.pearlCooldown + " drink=" + hd(d.drinkWindowS) + " ping=" + hd(ping) + " oping=" + hd(otherPing) + " cps=" + hd(cps)
+                + (SESSION ? " cx=" + hd(d.centerX) + " cz=" + hd(d.centerZ) : ""));
         }
-        bot = new pvpai.client.Bot(mc, o, d, ping, otherPing, cps, chooser);
+        // A session has put its own agent at the keys; the rig listens in on its packets below.
+        bot = session != null ? session.bot() : new pvpai.client.Bot(mc, o, d, ping, otherPing, cps, chooser);
         pvpai.client.Wire.install(mc, mc.getNetHandler().getNetworkManager(), new pvpai.client.Wire.Tap() {
             public void before(Packet<?> p) {
                 onHandle(p, mc.getNetHandler());

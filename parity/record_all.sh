@@ -7,7 +7,9 @@
 # With RIG_AGENT=view the mod's own code reads the client and presses the keys, and
 # the recording of a scene is called view_NAME. The scenes called bot* are for a
 # policy at the keys and are left out unless RIG_AGENT is the file of one
-# (python/export_policy.py writes it), which then plays those and no others.
+# (python/export_policy.py writes it), which then plays those and no others; with
+# RIG_SESSION=1 as well the policy is seated the way the mod seats it for a player, and
+# the recording is called session_NAME.
 HERE="$(cd "$(dirname "$0")" && pwd)"
 KEEP=""
 [ "$1" = "--keep" ] && KEEP=1 && shift
@@ -23,6 +25,7 @@ while read -r name gen seed opts; do
   python3 "$HERE/gen_script.py" "$gen" "$seed" "$HERE/work/scripts/$name.txt" $opts
   as="$name"
   [ "$RIG_AGENT" = view ] && as="view_$name"
+  [ -n "$RIG_SESSION" ] && as="session_$name"
   for try in 1 2 3; do
     "$HERE/run.sh" "$HERE/work/scripts/$name.txt" "$HERE/work/traces/$as.log" 400 < /dev/null
     grep -q "^END" "$HERE/work/traces/$as.log" && break

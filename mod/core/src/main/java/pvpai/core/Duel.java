@@ -2,8 +2,9 @@ package pvpai.core;
 
 /** What an agent is told about the duel it plays. */
 public final class Duel {
-    /** Half the side of the arena, which is centred on the origin, and the height of its floor. */
+    /** Half the side of the arena, the height of its floor, and where its centre is (x and z). */
     public double arenaHalf, floorY;
+    public double centerX, centerZ;
     /** Whether hits cost health, and the health a plain hit costs with the armour and swords of this duel. */
     public boolean realHealth;
     public float hitHealth;

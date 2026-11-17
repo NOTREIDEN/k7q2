@@ -1,0 +1,71 @@
+name: mod
+
+# Builds the Forge 1.8.9 mod with the newest trained policy inside and puts
+# the jar on the branch "mod".
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: mod
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+      - name: Fetch the newest weights
+        run: |
+          git fetch -q --depth 1 origin weights
+          git show FETCH_HEAD:latest.pt > latest.pt
+          git show FETCH_HEAD:status.txt | head -n 3
+      - uses: actions/cache@v4
+        with:
+          path: sim/target
+          key: sim-${{ hashFiles('sim/Cargo.toml', 'sim/Cargo.lock', 'sim/src/**', 'sim/tests/**') }}
+      - name: Build the simulator
+        run: cd sim && cargo build --release
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Write the policy as the file the mod reads
+        run: |
+          pip install --index-url https://download.pytorch.org/whl/cpu torch
+          pip install numpy
+          mkdir -p mod/forge/src/main/resources/pvpai
+          cd python
+          python export_policy.py ../latest.pt ../mod/forge/src/main/resources/pvpai/policy.bin --check ../check.bin
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+      - name: Check the mod's arithmetic against the trainer's
+        run: |
+          mkdir -p out
+          javac -encoding UTF-8 -d out mod/core/src/main/java/pvpai/core/*.java mod/core/src/test/java/pvpai/core/PolicyCheck.java
+          java -cp out pvpai.core.PolicyCheck mod/forge/src/main/resources/pvpai/policy.bin check.bin
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: "8.8"
+      - name: Build the mod
+        run: cd mod && gradle build --stacktrace
+      - name: Look into the jar
+        run: |
+          ls -l mod/build/libs
+          unzip -l mod/build/libs/pvpai.jar
+      - uses: actions/upload-artifact@v4
+        with:
+          name: mod
+          path: mod/build/libs/pvpai.jar
+      - name: Put the jar on the branch "mod"
+        run: |
+          blob=$(git hash-object -w mod/build/libs/pvpai.jar)
+          tree=$(printf '100644 blob %s\tpvpai-1.8.9.jar\n' "$blob" | git mktree)
+          commit=$(git -c user.name='github-actions[bot]' \
+            -c user.email='41898282+github-actions[bot]@users.noreply.github.com' \
+            commit-tree "$tree" -m "Mod built by run $GITHUB_RUN_ID from $GITHUB_SHA")
+          git push --force origin "$commit:refs/heads/mod"

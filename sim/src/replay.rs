@@ -584,6 +584,7 @@ fn replay_client(lines: &[Line], world: &World, speed: i8, sens: f32, o: &Option
         let d = Duel {
             arena_half: l.d("half"),
             floor_y: l.d("floor"),
+            center: if l.has("cx") { [l.d("cx"), l.d("cz")] } else { [0.0, 0.0] },
             real_health: l.b("health"),
             hit_health: l.f("hit"),
             pearl_cooldown: l.i("pearlcd") as i32,

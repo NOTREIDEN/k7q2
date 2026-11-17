@@ -56,10 +56,11 @@ const HIT_WINDOW: i32 = 20;
 /// players and for all of the duel.
 #[derive(Clone, Copy, Debug)]
 pub struct Duel {
-    /// Half the side of the arena, which is centred on the origin, and the
-    /// height of its floor.
+    /// Half the side of the arena, the height of its floor, and where its
+    /// centre is (x and z): the origin in every duel of the simulator.
     pub arena_half: f64,
     pub floor_y: f64,
+    pub center: [f64; 2],
     /// Whether hits cost health, and the health a plain hit costs with the
     /// armour and the swords of this duel.
     pub real_health: bool,
@@ -595,8 +596,8 @@ impl Agent {
         let (sy, cy) = (yaw as f64).to_radians().sin_cos();
         o[11] = sy as f32;
         o[12] = cy as f32;
-        o[13] = clip(b.pos[0] / duel.arena_half, 1.5);
-        o[14] = clip(b.pos[2] / duel.arena_half, 1.5);
+        o[13] = clip((b.pos[0] - duel.center[0]) / duel.arena_half, 1.5);
+        o[14] = clip((b.pos[2] - duel.center[1]) / duel.arena_half, 1.5);
         o[15] = clip((b.pos[1] - duel.floor_y) / 3.0, 2.0);
         o[16] = lp.l.attr.value() as f32 / 0.2;
         let (kf, kr) = local(yaw, lp.last_kb[0], lp.last_kb[2]);

@@ -4,3 +4,6 @@ runs/
 *.pt
 target-*/
 !seed/*.pt
+mod/build/
+mod/.gradle/
+mod/forge/src/main/resources/pvpai/policy.bin

@@ -1283,6 +1283,7 @@ impl Env {
         Duel {
             arena_half: self.params.arena_half,
             floor_y: self.params.floor_y,
+            center: [0.0, 0.0],
             real_health: !cfg.infinite_health,
             hit_health: cfg.hit_health(),
             pearl_cooldown: cfg.pearl_cooldown,

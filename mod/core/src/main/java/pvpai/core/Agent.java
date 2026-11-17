@@ -650,8 +650,8 @@ public final strictfp class Agent {
         double yr = (double) yaw * (Math.PI / 180.0);
         o[11] = (float) Math.sin(yr);
         o[12] = (float) Math.cos(yr);
-        o[13] = clip(pos[0] / duel.arenaHalf, 1.5);
-        o[14] = clip(pos[2] / duel.arenaHalf, 1.5);
+        o[13] = clip((pos[0] - duel.centerX) / duel.arenaHalf, 1.5);
+        o[14] = clip((pos[2] - duel.centerZ) / duel.arenaHalf, 1.5);
         o[15] = clip((pos[1] - duel.floorY) / 3.0, 2.0);
         o[16] = (float) v.speed / 0.2f;
         double[] k = local(yaw, v.lastKb[0], v.lastKb[2]);
