@@ -223,6 +223,7 @@ const limit = setTimeout(() => {
 main().catch(e => {
   console.log('FAIL  ' + (e && e.stack || e))
   failed++
+  for (const l of lines.slice(-120)) console.log('LAST  | ' + l)
 }).then(async () => {
   await stop()
   clearTimeout(limit)
