@@ -25,7 +25,8 @@ def main():
     policy.eval()
     ticks = int(args.seconds * 20)
     print(f"checkpoint with {ck.get('samples', 0)/1e6:.1f}M samples; {args.duels} duels of {args.seconds:.0f} s per level")
-    print("level  hits/min  taken/min  sprint-hit  on-target  aim-err  clicks/s  best-combo  blocking  blocked  dmg/min  dmg-taken/min")
+    print("level  hits/min  taken/min  sprint-hit  on-target  aim-err  clicks/s  best-combo  blocking  blocked  dmg/min  dmg-taken/min"
+          "  block-ticks  block-tap  kb/hit  pearls/min  their-pearls/min  first-hit-own  first-hit-theirs")
     for level in [int(x) for x in args.levels.split(",")]:
         env = VecEnv(args.duels, BOT, 1234 + level)
         env.set_param("bot_level_min", level)
@@ -47,7 +48,14 @@ def main():
               f"{st['on_target0']/st['ticks0']:9.2f}  {st['aim_err_sum0']/st['ticks0']:7.1f}  "
               f"{st['swings0']/st['ticks0']*20:8.1f}  {st['max_combo_sum0']/max(st['episodes'],1):10.1f}  "
               f"{st['use_ticks0']/st['ticks0']:8.2f}  {st['blocked0']/max(st['hits1'],1):7.2f}  "
-              f"{st['damage0']/mins:7.0f}  {st['damage1']/mins:13.0f}")
+              f"{st['damage0']/mins:7.0f}  {st['damage1']/mins:13.0f}  "
+              # Ticks a block is held; share of hits dealt with sprint right after a block; speed a
+              # hit gives the bot; pearls thrown by each side; and how often the agent got the first
+              # hit in after its own pearl landed and after the bot's.
+              f"{st['use_ticks0']/max(st['blocks0'],1):11.1f}  {st['tap_hits0']/max(st['hits0'],1):9.2f}  "
+              f"{st['kb0']/max(st['hits0'],1):6.2f}  {st['pearls0']/mins:10.1f}  {st['pearls1']/mins:16.1f}  "
+              f"{st['pearl_won0']/max(st['pearl_won0']+st['pearl_lost0'],1):13.2f}  "
+              f"{st['pearl_lost1']/max(st['pearl_won1']+st['pearl_lost1'],1):16.2f}")
         env.close()
 
 

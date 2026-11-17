@@ -150,6 +150,25 @@ pub struct Landing {
     pub ticks: i32,
 }
 
+/// `new EntityEnderPearl(world, thrower)` up to the random part of
+/// `setThrowableHeading`: where a pearl thrown by a player standing at
+/// `feet` with this view starts, and the direction it is thrown in (length
+/// one).
+pub fn pearl_heading(feet: V3, yaw: f32, pitch: f32) -> (V3, V3) {
+    let rad = mth::PI_F;
+    let mut pos = [feet[0], feet[1] + EYE_HEIGHT, feet[2]];
+    pos[0] -= (mth::cos(yaw / 180.0f32 * rad) * 0.16f32) as f64;
+    pos[1] -= 0.10000000149011612;
+    pos[2] -= (mth::sin(yaw / 180.0f32 * rad) * 0.16f32) as f64;
+    let f = 0.4f32;
+    let mx = (-mth::sin(yaw / 180.0f32 * rad) * mth::cos(pitch / 180.0f32 * rad) * f) as f64;
+    let mz = (mth::cos(yaw / 180.0f32 * rad) * mth::cos(pitch / 180.0f32 * rad) * f) as f64;
+    let my = (-mth::sin((pitch + 0.0f32) / 180.0f32 * rad) * f) as f64;
+    // setThrowableHeading(x, y, z, 1.5F, 1.0F)
+    let len = mth::sqrt_d(mx * mx + my * my + mz * mz) as f64;
+    (pos, [mx / len, my / len, mz / len])
+}
+
 /// Damage a pearl does to its thrower on arrival (`DamageSource.fall`).
 pub const PEARL_DAMAGE: f32 = 5.0;
 
@@ -517,20 +536,8 @@ impl Server {
     /// which makes the entity tracker tell both players at once.
     fn spawn_pearl(&mut self, i: usize, rng: &mut Rng, out: &mut Outbox) {
         let p = &self.p[i];
-        let (yaw, pitch) = (p.l.yaw, p.l.pitch);
-        let rad = mth::PI_F;
-        let mut pos = [p.l.body.pos[0], p.l.body.pos[1] + EYE_HEIGHT, p.l.body.pos[2]];
-        pos[0] -= (mth::cos(yaw / 180.0f32 * rad) * 0.16f32) as f64;
-        pos[1] -= 0.10000000149011612;
-        pos[2] -= (mth::sin(yaw / 180.0f32 * rad) * 0.16f32) as f64;
-        let f = 0.4f32;
-        let mx = (-mth::sin(yaw / 180.0f32 * rad) * mth::cos(pitch / 180.0f32 * rad) * f) as f64;
-        let mz = (mth::cos(yaw / 180.0f32 * rad) * mth::cos(pitch / 180.0f32 * rad) * f) as f64;
-        let my = (-mth::sin((pitch + 0.0f32) / 180.0f32 * rad) * f) as f64;
-        // setThrowableHeading(x, y, z, 1.5F, 1.0F)
-        let len = mth::sqrt_d(mx * mx + my * my + mz * mz) as f64;
+        let (pos, mut m) = pearl_heading(p.l.body.pos, p.l.yaw, p.l.pitch);
         let spread = 0.007499999832361937 * 1.0f32 as f64;
-        let mut m = [mx / len, my / len, mz / len];
         let aim = [m[0] * 1.5f32 as f64, m[1] * 1.5f32 as f64, m[2] * 1.5f32 as f64];
         for v in m.iter_mut() {
             *v += rng.gaussian() * spread;

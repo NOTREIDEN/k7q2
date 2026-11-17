@@ -1,9 +1,10 @@
 //! Scripted opponents. They read the same client state a mod could read and
 //! produce the same kind of input as the learning agent. They give early
 //! training a target, and later serve as fixed yardsticks.
-use crate::aabb::V3;
+use crate::aabb::{V3, EYE_HEIGHT};
 use crate::client::{Client, ClientCfg, Input};
 use crate::mth::{self, Rng};
+use crate::net::SLOT_SWORD;
 use crate::world::World;
 
 #[derive(Clone, Copy, Debug)]
@@ -24,6 +25,15 @@ pub struct BotParams {
     /// Chance to block for a moment when the opponent starts a swing
     /// within reach.
     pub block_react: f64,
+    /// How readily it throws a pearl to get at the opponent: next to it on
+    /// either side, just in front of it, behind it or straight at it. 1 is
+    /// about once per cooldown when there is room for it.
+    pub pearl_attack: f64,
+    /// How readily it throws a pearl to get away after three hits taken in
+    /// a row.
+    pub pearl_escape: f64,
+    /// Client ticks it waits between pearls: the server's cooldown.
+    pub pearl_cd: i32,
 }
 
 impl BotParams {
@@ -39,6 +49,9 @@ impl BotParams {
                 jump_reset: false,
                 blockhit: 0.0,
                 block_react: 0.0,
+                pearl_attack: 0.0,
+                pearl_escape: 0.0,
+                pearl_cd: 0,
             },
             2 => BotParams {
                 level,
@@ -50,6 +63,9 @@ impl BotParams {
                 jump_reset: false,
                 blockhit: 0.0,
                 block_react: 0.0,
+                pearl_attack: 0.3,
+                pearl_escape: 0.0,
+                pearl_cd: 0,
             },
             3 => BotParams {
                 level,
@@ -61,6 +77,9 @@ impl BotParams {
                 jump_reset: false,
                 blockhit: 0.25,
                 block_react: 0.0,
+                pearl_attack: 0.7,
+                pearl_escape: 0.4,
+                pearl_cd: 0,
             },
             _ => BotParams {
                 level: 4,
@@ -72,6 +91,9 @@ impl BotParams {
                 jump_reset: true,
                 blockhit: 0.4,
                 block_react: 0.25,
+                pearl_attack: 1.0,
+                pearl_escape: 0.8,
+                pearl_cd: 0,
             },
         }
     }
@@ -89,6 +111,18 @@ pub struct BotState {
     walk_sprint: bool,
     block_left: i32,
     saw_swing: bool,
+    /// 0: no throw under way. 1: turning to the direction of the throw.
+    /// 2: throw on this tick. 3: take the sword again.
+    pub pearl_stage: u8,
+    /// The spot the throw under way is meant to reach.
+    pub pearl_to: V3,
+    /// Ticks until the next pearl may be thrown.
+    pearl_wait: i32,
+    /// Hits taken since it last landed one.
+    taken_run: i32,
+    /// How the opponent has been moving per tick lately, as seen, with the
+    /// jitter of single ticks smoothed out.
+    pub seen_vel: [f64; 2],
 }
 
 fn gauss(rng: &mut Rng) -> f64 {
@@ -104,6 +138,129 @@ pub fn angles_to(eye: V3, p: V3) -> (f64, f64) {
     let dz = p[2] - eye[2];
     let h = (dx * dx + dz * dz).sqrt();
     ((-dx).atan2(dz).to_degrees(), -(dy.atan2(h)).to_degrees())
+}
+
+/// How far from the thrower a pearl thrown with this pitch (degrees, up is
+/// negative) puts it on a floor `drop` blocks below the eyes, and after how
+/// many ticks. The thrower ends up where the pearl was at the start of the
+/// tick in which it reached the floor.
+pub fn pearl_reach(pitch: f64, drop: f64) -> (f64, i32) {
+    let (sp, cp) = pitch.to_radians().sin_cos();
+    let (mut x, mut y) = (0.0f64, -0.1f64);
+    let (mut vx, mut vy) = (1.5 * cp, -1.5 * sp);
+    for t in 0..200 {
+        if y + vy <= -drop {
+            return (x, t);
+        }
+        x += vx;
+        y += vy;
+        vx *= 0.99;
+        vy = vy * 0.99 - 0.03;
+    }
+    (x, 200)
+}
+
+/// The pitch that brings a pearl's thrower nearest to `dist` blocks away on
+/// a floor `drop` blocks below its eyes, with the most direct throw that
+/// does: from steeply down to 35 degrees up, first in steps of a degree,
+/// then in steps of one mouse count around the best of those.
+pub fn pearl_pitch(dist: f64, drop: f64) -> f64 {
+    let mut best = (f64::MAX, 0.0);
+    let scan = |from: f64, to: f64, step: f64, best: &mut (f64, f64)| {
+        let mut pitch = from;
+        while pitch >= to {
+            let err = (pearl_reach(pitch, drop).0 - dist).abs();
+            if err < best.0 - 0.02 {
+                *best = (err, pitch);
+            }
+            pitch -= step;
+        }
+    };
+    scan(85.0, -35.0, 1.0, &mut best);
+    let mid = best.1;
+    scan((mid + 0.9).min(85.0), (mid - 0.9).max(-35.0), 0.15, &mut best);
+    best.1
+}
+
+/// A spot for the bot to throw a pearl at, or `None`.
+fn pearl_target(c: &Client, world: &World, p: &BotParams, st: &BotState, hdist: f64, rng: &mut Rng) -> Option<V3> {
+    let (me, them) = (c.lp.l.body.pos, c.rp.pos);
+    let lim = world.half - 1.0;
+    let inside = |q: &V3| q[0].abs() <= lim && q[2].abs() <= lim;
+    let dir = if hdist > 1e-6 { [(them[0] - me[0]) / hdist, (them[2] - me[2]) / hdist] } else { [0.0, 1.0] };
+    if st.taken_run >= 3 && rng.chance(0.5 * p.pearl_escape) {
+        // Away from the opponent, 10 to 18 blocks from here.
+        for _ in 0..12 {
+            let ang = rng.range(-1.2, 1.2);
+            let (s, co) = ang.sin_cos();
+            let d = [-(dir[0] * co - dir[1] * s), -(dir[0] * s + dir[1] * co)];
+            let r = rng.range(10.0, 18.0);
+            let q = [me[0] + d[0] * r, me[1], me[2] + d[1] * r];
+            if inside(&q) {
+                return Some(q);
+            }
+        }
+        // Cornered: anywhere far from the opponent.
+        for _ in 0..12 {
+            let q = [rng.range(-lim, lim), me[1], rng.range(-lim, lim)];
+            if (q[0] - them[0]).hypot(q[2] - them[2]) > 9.0 && (q[0] - me[0]).hypot(q[2] - me[2]) > 6.0 {
+                return Some(q);
+            }
+        }
+        return None;
+    }
+    // Towards the opponent: often from far away, now and then in a fight.
+    let chance = if hdist > 7.0 {
+        0.04
+    } else if hdist > 3.5 {
+        0.006
+    } else {
+        0.0
+    };
+    // Not in the half second after a hit on the opponent, while it is being
+    // thrown about.
+    if c.rp.ticks_since_hurt <= 10 || !rng.chance(chance * p.pearl_attack) {
+        return None;
+    }
+    let side = [-dir[1], dir[0]];
+    let r = rng.f64();
+    let off = if r < 0.4 {
+        // Next to it, left or right.
+        let w = rng.range(1.6, 2.6) * if rng.chance(0.5) { 1.0 } else { -1.0 };
+        let along = rng.range(-0.6, 0.6);
+        [side[0] * w + dir[0] * along, side[1] * w + dir[1] * along]
+    } else if r < 0.7 {
+        // Just in front of it.
+        let a = rng.range(1.8, 2.8);
+        [-dir[0] * a, -dir[1] * a]
+    } else if r < 0.85 {
+        // Behind it.
+        let a = rng.range(1.8, 2.8);
+        [dir[0] * a, dir[1] * a]
+    } else {
+        // Straight at it: the pearl stops at the player.
+        [0.0, 0.0]
+    };
+    // Where the opponent will be when the pearl gets there: after the
+    // flight and three ticks for the turn, the click, the way to the server
+    // and the age of what the bot sees of the opponent. A player on foot
+    // loses about half its speed every tick and gains what its keys add,
+    // so the way it moves now fades within a few ticks, and the bot takes
+    // it to end up mostly running the way it faces.
+    let n = (hdist / 1.4).min(20.0) + 3.0;
+    let run = crate::living::Attr { sprint: true, ..c.lp.l.attr }.value() * 2.1;
+    let yaw = (c.rp.yaw as f64).to_radians();
+    let v = st.seen_vel;
+    let goal = [v[0] + (-yaw.sin() * run - v[0]) * 0.7, v[1] + (yaw.cos() * run - v[1]) * 0.7];
+    let keep = 0.55f64;
+    let fade = keep * (1.0 - keep.powf(n)) / (1.0 - keep);
+    let moved = [goal[0] * n + (v[0] - goal[0]) * fade, goal[1] * n + (v[1] - goal[1]) * fade];
+    let q = [them[0] + moved[0] + off[0], them[1], them[2] + moved[1] + off[1]];
+    let q = [q[0].clamp(-lim, lim), q[1], q[2].clamp(-lim, lim)];
+    if (q[0] - me[0]).hypot(q[2] - me[2]) < 3.0 {
+        return None;
+    }
+    Some(q)
 }
 
 pub fn act(c: &Client, world: &World, cfg: &ClientCfg, p: &BotParams, st: &mut BotState, rng: &mut Rng) -> Input {
@@ -196,6 +353,74 @@ pub fn act(c: &Client, world: &World, cfg: &ClientCfg, p: &BotParams, st: &mut B
     let pk = c.pick_ray(world, new_pitch, ray_yaw);
     if pk.entity && rng.chance(p.click_prob) {
         inp.attack = true;
+    }
+
+    // Pearls. The server throws along the view it last heard of and from
+    // where it last heard the player was, so the bot first turns to the
+    // direction of the throw as seen from where this tick will take it
+    // (without touching the movement keys, so that is known), throws on the
+    // next tick (number key 2 and a right click) and takes the sword again
+    // on the one after (number key 1).
+    let step = [rp.pos[0] - rp.prev_pos[0], rp.pos[2] - rp.prev_pos[2]];
+    if step[0].hypot(step[1]) < 1.5 {
+        st.seen_vel = [(st.seen_vel[0] + step[0]) * 0.5, (st.seen_vel[1] + step[1]) * 0.5];
+    }
+    if lp.hurt_time == 10 {
+        st.taken_run += 1;
+    }
+    if (rp.hurt_time == 10 && lp.ticks_since_attack <= 12) || lp.ticks_since_hurt > 30 {
+        st.taken_run = 0;
+    }
+    if st.pearl_wait > 0 {
+        st.pearl_wait -= 1;
+    }
+    match st.pearl_stage {
+        0 => {
+            let ready = (p.pearl_attack > 0.0 || p.pearl_escape > 0.0)
+                && lp.pearls > 0
+                && st.pearl_wait == 0
+                && lp.held == SLOT_SWORD
+                && st.block_left == 0;
+            if ready {
+                if let Some(q) = pearl_target(c, world, p, st, hdist, rng) {
+                    st.pearl_to = q;
+                    st.pearl_stage = 1;
+                    st.taken_run = 0;
+                }
+            }
+        }
+        1 => {
+            let b = &lp.l.body;
+            let from = [b.pos[0] + b.motion[0], (b.pos[1] + b.motion[1]).max(world.floor_y) + EYE_HEIGHT, b.pos[2] + b.motion[2]];
+            let q = st.pearl_to;
+            let want_yaw = angles_to(from, q).0;
+            let want_pitch = pearl_pitch((q[0] - from[0]).hypot(q[2] - from[2]), from[1] - world.floor_y);
+            let lim = p.max_turn.max(45.0);
+            let dyaw = mth::wrap_deg(want_yaw - lp.l.yaw as f64);
+            let dpitch = want_pitch - lp.l.pitch as f64;
+            inp.dx = (dyaw.clamp(-lim, lim) / deg_per_count).round() as i32;
+            inp.dy = (dpitch.clamp(-lim, lim) / deg_per_count).round() as i32;
+            inp.forward = 0;
+            inp.strafe = 0;
+            inp.jump = false;
+            inp.attack = false;
+            inp.use_item = false;
+            if dyaw.abs() <= lim && dpitch.abs() <= lim {
+                st.pearl_stage = 2;
+            }
+        }
+        2 => {
+            inp.slot_key = 2;
+            inp.use_item = true;
+            inp.attack = false;
+            st.pearl_stage = 3;
+            st.pearl_wait = p.pearl_cd + 4;
+        }
+        _ => {
+            inp.slot_key = 1;
+            inp.use_item = false;
+            st.pearl_stage = 0;
+        }
     }
     inp
 }

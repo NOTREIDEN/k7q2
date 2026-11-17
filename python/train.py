@@ -229,6 +229,17 @@ def main():
                         crit_frac=st["crits0"] / max(st["hits0"], 1.0),
                         damage_per_min=st["damage0"] / mins0,
                         damage_taken_per_min=st["damage1"] / mins0,
+                        # Ticks a block is held, share of the hits dealt that came with
+                        # sprint right after a block, and the speed a hit gives the opponent.
+                        block_ticks=st["use_ticks0"] / max(st["blocks0"], 1.0),
+                        block_tap_frac=st["tap_hits0"] / max(st["hits0"], 1.0),
+                        kb_per_hit=st["kb0"] / max(st["hits0"], 1.0),
+                        # Pearls thrown per minute by each side, and who hit first after
+                        # one landed: the thrower's share for player 0, the other's for player 1.
+                        pearls_per_min=st["pearls0"] / mins0,
+                        opp_pearls_per_min=st["pearls1"] / mins0,
+                        pearl_first_hit=st["pearl_won0"] / max(st["pearl_won0"] + st["pearl_lost0"], 1.0),
+                        opp_pearl_answered=st["pearl_lost1"] / max(st["pearl_won1"] + st["pearl_lost1"], 1.0),
                     )
             window.clear()
         log.write(json.dumps(row) + "\n")
@@ -240,7 +251,10 @@ def main():
                   f"kl {info['kl']:.4f} r {info['mean_step_reward']:+.4f} | bot: hit/min {b.get('hits_per_min', 0):5.1f} "
                   f"taken {b.get('taken_per_min', 0):5.1f} on-target {b.get('on_target', 0):.2f} aim {b.get('aim_err_deg', 0):5.1f} "
                   f"sprint {b.get('sprint_hit_frac', 0):.2f} block {b.get('block_frac', 0):.2f} blocked {b.get('blocked_frac', 0):.2f} "
+                  f"hold {b.get('block_ticks', 0):.1f} tap {b.get('block_tap_frac', 0):.2f} kb {b.get('kb_per_hit', 0):.2f} "
                   f"dmg {b.get('damage_per_min', 0):4.0f}/{b.get('damage_taken_per_min', 0):4.0f} "
+                  f"pearl {b.get('pearls_per_min', 0):.1f}/{b.get('opp_pearls_per_min', 0):.1f} "
+                  f"first {b.get('pearl_first_hit', 0):.2f}/{b.get('opp_pearl_answered', 0):.2f} "
                   f"| self: hit/min {s.get('hits_per_min', 0):5.1f} combo {s.get('max_combo', 0):.1f} "
                   f"aim {s.get('aim_err_deg', 0):5.1f}", flush=True)
             for name, whats in sync_log.items():

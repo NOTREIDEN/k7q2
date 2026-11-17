@@ -92,6 +92,9 @@ pub struct RemotePlayer {
     pub item_n: u32,
     /// Bookkeeping for observations, not game state.
     pub ticks_since_hurt: i32,
+    /// Ticks since this player was last moved by more than three blocks at
+    /// once, which is what a pearl landing looks like from outside.
+    pub ticks_since_jump: i32,
 }
 
 /// An ender pearl as a client has it: created by the server's spawn packet,
@@ -105,6 +108,9 @@ pub struct ClientPearl {
     pub server_pos: [i32; 3],
     /// Client ticks since it appeared.
     pub age: i32,
+    /// Bookkeeping for observations: it appeared where this client had
+    /// just thrown one from, so it is taken to be its own.
+    pub mine: bool,
 }
 
 impl ClientPearl {
@@ -196,6 +202,7 @@ impl RemotePlayer {
             item: Item::Sword,
             item_n: 0,
             ticks_since_hurt: 1000,
+            ticks_since_jump: 1000,
         }
     }
 
@@ -242,6 +249,9 @@ impl RemotePlayer {
         self.server_pos = sp;
         let d = [sp[0] as f64 / 32.0, sp[1] as f64 / 32.0, sp[2] as f64 / 32.0];
         let (f, f1) = (Self::byte_angle(yaw), Self::byte_angle(pitch));
+        if crate::aabb::dist_sq(self.target, d) > 9.0 {
+            self.ticks_since_jump = 0;
+        }
         if (self.pos[0] - d[0]).abs() < 0.03125
             && (self.pos[1] - d[1]).abs() < 0.015625
             && (self.pos[2] - d[2]).abs() < 0.03125
@@ -270,6 +280,9 @@ impl RemotePlayer {
         }
         if self.ticks_since_hurt < 1000 {
             self.ticks_since_hurt += 1;
+        }
+        if self.ticks_since_jump < 1000 {
+            self.ticks_since_jump += 1;
         }
         if self.increments > 0 {
             let n = self.increments as f64;
@@ -347,6 +360,13 @@ pub struct LocalPlayer {
     pub ticks_since_hurt: i32,
     pub ticks_since_swing: i32,
     pub ticks_since_attack: i32,
+    /// Ticks since the server last put this player somewhere.
+    pub ticks_since_moved: i32,
+    /// Ticks since this client last threw a pearl, where its eyes were
+    /// then, and how many of its throws have not shown up as a pearl yet.
+    pub ticks_since_throw: i32,
+    pub throw_eye: V3,
+    pub throws_pending: u8,
 }
 
 impl LocalPlayer {
@@ -380,6 +400,10 @@ impl LocalPlayer {
             ticks_since_hurt: 1000,
             ticks_since_swing: 1000,
             ticks_since_attack: 1000,
+            ticks_since_moved: 1000,
+            ticks_since_throw: 1000,
+            throw_eye: pos,
+            throws_pending: 0,
         }
     }
 
@@ -536,6 +560,40 @@ pub fn pick_with(world: &World, eye: V3, own_bb: &Aabb, pitch: f32, yaw: f32, re
     }
 }
 
+/// Where a pearl at `pos` moving by `motion` per tick stops if it flies on
+/// undisturbed, and after how many ticks: its position at the start of the
+/// tick in which it reaches a block, which is where its thrower is put.
+pub fn pearl_flight(world: &World, mut pos: V3, mut m: V3) -> (V3, i32) {
+    let (f2, f3) = (0.99f32 as f64, 0.03f32 as f64);
+    for t in 0..100 {
+        let next = [pos[0] + m[0], pos[1] + m[1], pos[2] + m[2]];
+        if !world.clear_path(pos, next) {
+            if let RayHit::Block(_) = world.ray_trace_blocks(pos, next, false) {
+                return (pos, t);
+            }
+        }
+        pos = next;
+        for a in 0..3 {
+            m[a] *= f2;
+        }
+        m[1] -= f3;
+    }
+    (pos, 100)
+}
+
+/// `pearl_flight` for a pearl this client sees.
+pub fn pearl_landing(world: &World, e: &ClientPearl) -> (V3, i32) {
+    pearl_flight(world, e.pos, e.motion)
+}
+
+/// `pearl_flight` for a pearl that a player standing at `feet` with this
+/// view would throw, leaving out the small random part of a throw.
+pub fn pearl_preview(world: &World, feet: V3, yaw: f32, pitch: f32) -> (V3, i32) {
+    let (pos, m) = crate::server::pearl_heading(feet, yaw, pitch);
+    let v = 1.5f32 as f64;
+    pearl_flight(world, pos, [m[0] * v, m[1] * v, m[2] * v])
+}
+
 /// `Minecraft.rightClickMouse`. Returns whether a pearl was thrown.
 #[inline]
 fn right_click(lp: &mut LocalPlayer, pick: &Pick, out: &mut Vec<C2S>) -> bool {
@@ -661,6 +719,7 @@ impl Client {
                 lp.l.body.set_position(pos);
                 lp.l.yaw = yaw % 360.0f32;
                 lp.l.pitch = pitch % 360.0f32;
+                lp.ticks_since_moved = 0;
                 out.push(C2S::Player {
                     pos: Some([lp.l.body.pos[0], lp.l.body.bb.min[1], lp.l.body.pos[2]]),
                     rot: Some((lp.l.yaw, lp.l.pitch)),
@@ -721,13 +780,15 @@ impl Client {
             S2C::Pearl { id, ev } => match ev {
                 // handleSpawnObject: a pearl at rest; its speed comes in a
                 // packet of its own.
-                PearlEv::Spawn { p, .. } => self.pearls.push(ClientPearl {
-                    id,
-                    pos: [p[0] as f64 / 32.0, p[1] as f64 / 32.0, p[2] as f64 / 32.0],
-                    motion: [0.0; 3],
-                    server_pos: p,
-                    age: 0,
-                }),
+                PearlEv::Spawn { p, .. } => {
+                    let pos = [p[0] as f64 / 32.0, p[1] as f64 / 32.0, p[2] as f64 / 32.0];
+                    let lp = &mut self.lp;
+                    let mine = lp.throws_pending > 0 && crate::aabb::dist_sq(pos, lp.throw_eye) < 1.0;
+                    if mine {
+                        lp.throws_pending -= 1;
+                    }
+                    self.pearls.push(ClientPearl { id, pos, motion: [0.0; 3], server_pos: p, age: 0, mine });
+                }
                 PearlEv::Meta => {}
                 ev => {
                     if let Some(e) = self.pearls.iter_mut().find(|e| e.id == id) {
@@ -842,6 +903,11 @@ impl Client {
         if inp.use_item && lp.right_click_delay == 0 && !lp.using_item && !hitting_block {
             t.threw |= right_click(lp, &t.pick, out);
             t.used = true;
+        }
+        if t.threw {
+            lp.ticks_since_throw = 0;
+            lp.throw_eye = lp.eye();
+            lp.throws_pending = lp.throws_pending.saturating_add(1);
         }
 
         // --- EntityPlayerSP.onUpdate ---
@@ -958,6 +1024,16 @@ impl Client {
         }
         if lp.ticks_since_attack < 1000 {
             lp.ticks_since_attack += 1;
+        }
+        if lp.ticks_since_moved < 1000 {
+            lp.ticks_since_moved += 1;
+        }
+        if lp.ticks_since_throw < 1000 {
+            lp.ticks_since_throw += 1;
+            if lp.ticks_since_throw > 60 {
+                // A throw the server refused never shows up.
+                lp.throws_pending = 0;
+            }
         }
 
         // The other player's entity updates after the local one, then the

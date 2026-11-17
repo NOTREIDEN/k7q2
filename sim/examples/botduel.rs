@@ -3,8 +3,8 @@
 //!     cargo run --release --example botduel -- A B [--duels N] [--seconds S] [--ping LO HI] [--trace] [--ticks]
 //!
 //! A and B are a level (`4`) optionally followed by settings, for example
-//! `4:jr=0:strafe=0:noise=1.5:click=0.6`. `--trace` prints every hit and
-//! `--ticks` every client tick as well.
+//! `4:jr=0:strafe=0:noise=1.5:click=0.6:pearl=0:escape=0`. `--trace` prints
+//! every hit and `--ticks` every client tick as well.
 use pvpsim::bot::{self, BotParams, BotState};
 use pvpsim::env::{new_match, Mode, Params};
 use pvpsim::mth::Rng;
@@ -22,6 +22,8 @@ fn spec(s: &str) -> BotParams {
             "noise" => p.aim_noise = f,
             "turn" => p.max_turn = f,
             "click" => p.click_prob = f,
+            "pearl" => p.pearl_attack = f,
+            "escape" => p.pearl_escape = f,
             _ => panic!("unknown setting {k}"),
         }
     }
@@ -71,10 +73,16 @@ fn main() {
     let mut sprint = [0u64; 2];
     let mut best = [0u64; 2];
     let mut clicks = [0u64; 2];
+    // Pearls that landed, and how far from the opponent they put their thrower.
+    let mut pearls = [0u64; 2];
+    let mut pearl_dist = [0.0f64; 2];
     for d in 0..duels {
         let mut rng = Rng::new(0x5EED_0000 + d);
         let (mut m, ping, _) = new_match(&params, &mut rng, Mode::SelfPlay);
-        let bp = base;
+        let mut bp = base;
+        for b in bp.iter_mut() {
+            b.pearl_cd = m.s.cfg.pearl_cooldown;
+        }
         let mut st = [BotState::default(); 2];
         let mut combo = [0u64; 2];
         let mut top = [0u64; 2];
@@ -116,6 +124,11 @@ fn main() {
                 done += 1;
             }
             next = m.advance();
+            for l in m.s.landings.drain(..) {
+                let o = m.s.p[1 - l.thrower].l.body.pos;
+                pearls[l.thrower] += 1;
+                pearl_dist[l.thrower] += (l.pos[0] - o[0]).hypot(l.pos[2] - o[2]);
+            }
             for h in m.s.hits.drain(..) {
                 if trace {
                     let seen = |k: usize| {
@@ -152,15 +165,17 @@ fn main() {
         }
     }
     let mins = duels as f64 * seconds / 60.0;
-    println!("bot                             hits/min  sprint-hit  attacks/s  best-combo");
+    println!("bot                             hits/min  sprint-hit  attacks/s  best-combo  pearls/min  blocks-from-opponent");
     for k in 0..2 {
         println!(
-            "{:30}  {:8.1}  {:10.2}  {:9.1}  {:10.1}",
+            "{:30}  {:8.1}  {:10.2}  {:9.1}  {:10.1}  {:10.1}  {:20.1}",
             names[k],
             hits[k] as f64 / mins,
             sprint[k] as f64 / hits[k].max(1) as f64,
             clicks[k] as f64 / (mins * 60.0),
-            best[k] as f64 / duels as f64
+            best[k] as f64 / duels as f64,
+            pearls[k] as f64 / mins,
+            pearl_dist[k] / pearls[k].max(1) as f64
         );
     }
 }

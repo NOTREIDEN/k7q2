@@ -23,8 +23,8 @@ simulator and meant to be driven from a client mod.
     python train.py --minutes 30 --out runs/stage1
 
 Stage 1 trains sword duels with infinite health and Speed II: movement
-keys, mouse, both mouse buttons, sprint resets, sword blocking and
-knockback handling.
+keys, mouse, both mouse buttons, sprint resets, sword blocking, ender
+pearls and knockback handling.
 
 The agent is trained for the conditions it will play under: a ping of 160
 to 230 ms and 14 to 17 clicks per second, against opponents with an
@@ -54,6 +54,20 @@ client that is blocking at that moment drops its block without telling the
 server (`sim/PARITY.md`). `sword_wear` sets how often that happens: 1 for
 a plain sword, 0.25 for Unbreaking III, 0 for an unbreakable one, and by
 default it is drawn for each duel.
+
+Both players carry ender pearls in most duels (`pearls`, `pearl_prob`),
+with the wait between two throws that servers add (`pearl_cd_min_s`,
+`pearl_cd_max_s`). The agent's ninth control throws one the way a player
+does: the number key of the pearls with a right click, then the number key
+of the sword on the next tick. A pearl flies along the view, so the agent
+is told how far one thrown now would carry it and where that is as seen
+from the opponent, where its own pearl in flight will put it, and where
+the opponent's pearl is and will come down. As in the game, arriving costs
+the thrower 5 points of health, which counts like damage taken, and for
+half a second after it a sword hit does little damage and no knockback.
+The scripted bots throw their pearls next to the agent, in front of it,
+behind it or straight at it, and away from it when they are being comboed;
+`bot_pearl` scales how often.
 
 Check a checkpoint against each scripted bot level:
 
