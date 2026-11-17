@@ -60,6 +60,9 @@ pub struct BotParams {
     /// off the walls, and comes back healed. With the same Speed nobody
     /// catches it on foot; a pearl does.
     pub runner: bool,
+    /// It runs rings round the opponent: sideways one way for seconds on
+    /// end, just inside its reach.
+    pub circler: bool,
 }
 
 impl BotParams {
@@ -83,6 +86,7 @@ impl BotParams {
                 drink: 0.0,
                 refill: 0.0,
                 runner: false,
+                circler: false,
             },
             2 => BotParams {
                 level,
@@ -102,6 +106,7 @@ impl BotParams {
                 drink: 0.4,
                 refill: 0.4,
                 runner: false,
+                circler: false,
             },
             3 => BotParams {
                 level,
@@ -121,6 +126,7 @@ impl BotParams {
                 drink: 0.7,
                 refill: 0.7,
                 runner: false,
+                circler: false,
             },
             _ => BotParams {
                 level: 4,
@@ -140,6 +146,7 @@ impl BotParams {
                 drink: 1.0,
                 refill: 1.0,
                 runner: false,
+                circler: false,
             },
         }
     }
@@ -579,7 +586,17 @@ pub fn act(c: &Client, world: &World, cfg: &ClientCfg, p: &BotParams, st: &mut B
         st.block_left -= 1;
         inp.use_item = true;
     }
-    if p.strafe && hdist < 6.0 {
+    if p.circler {
+        if st.strafe_left <= 0 {
+            st.strafe_left = 60 + (rng.next_u64() % 140) as i32;
+            st.strafe_dir = if rng.chance(0.5) { 1 } else { -1 };
+        }
+        st.strafe_left -= 1;
+        inp.strafe = st.strafe_dir;
+        if hdist <= 2.4 {
+            inp.forward = 0;
+        }
+    } else if p.strafe && hdist < 6.0 {
         if st.strafe_left <= 0 {
             st.strafe_left = 6 + (rng.next_u64() % 18) as i32;
             st.strafe_dir = if rng.chance(0.5) { 1 } else { -1 };

@@ -360,6 +360,75 @@ fn a_lesson_starts_with_the_thing_to_learn_plainly_the_thing_to_do() {
     assert_eq!(Env::new(Mode::Bot, p, 1).lesson, 0);
 }
 
+/// The extreme lesson: the first player hurt, with potions, and on top of
+/// it a bot that hits hardly move, with Speed III to X, running rings
+/// round it. Against scripted bots only.
+#[test]
+fn the_extreme_lesson_is_a_bot_that_nothing_gets_off() {
+    let mut p = Params::default();
+    p.lesson_prob = 1.0;
+    p.lessons = 16;
+    p.bot_level = [3.0, 4.0];
+    let mut amps = [false; 10];
+    for seed in 0..60 {
+        let e = Env::new(Mode::Bot, p, seed);
+        assert_eq!(e.lesson, 5);
+        let (sp, lp) = (&e.m.s.p[0], &e.m.c[0].lp);
+        assert!(!e.m.s.cfg.infinite_health);
+        assert!((4.0..=12.0).contains(&sp.health) && lp.health == sp.health, "seed {seed}: {}", sp.health);
+        assert!(sp.potions.count_ones() >= 3 && lp.potions == sp.potions, "seed {seed}");
+        let (a, b) = (lp.l.body.pos, e.m.c[1].lp.l.body.pos);
+        let d = (a[0] - b[0]).hypot(a[2] - b[2]);
+        assert!(d < 5.5, "seed {seed}: {d}");
+        let (op, oc) = (&e.m.s.p[1], &e.m.c[1]);
+        let amp = op.l.attr.speed_amp;
+        assert!((2..=9).contains(&amp) && oc.lp.speed_amp == amp && oc.lp.l.attr.speed_amp == amp, "seed {seed}: {amp}");
+        assert!(oc.edge.kb_taken <= 0.2, "seed {seed}");
+        assert!(e.bot.circler);
+        // The first player has the Speed it would have had anyway.
+        assert!(sp.l.attr.speed_amp <= 1);
+        amps[amp as usize] = true;
+    }
+    assert!(amps[2..].iter().all(|&a| a), "{amps:?}");
+    // Two players that both learn do not get it, with or without the others.
+    assert_eq!(Env::new(Mode::SelfPlay, p, 1).lesson, 0);
+    p.lessons = 31;
+    let mut seen = [0; 6];
+    for seed in 0..100 {
+        assert!(Env::new(Mode::SelfPlay, p, seed).lesson <= 4);
+        seen[Env::new(Mode::Bot, p, seed).lesson as usize] += 1;
+    }
+    assert!(seen[0] == 0 && seen[1..].iter().all(|&n| n > 8), "{seen:?}");
+
+    // The bot goes round the first player, which only stands there and
+    // is knocked about: in ten seconds it has been on most sides of it,
+    // and never far.
+    p.lessons = 16;
+    p.potions = [0.0, 0.0];
+    let mut round = 0;
+    for seed in 0..6 {
+        let mut e = Env::new(Mode::Bot, p, 500 + seed);
+        // Enough health to last the ten seconds.
+        e.m.s.cfg.infinite_health = true;
+        let mut sides = [false; 8];
+        let mut far = 0.0f64;
+        for t in 0..200 {
+            run(&mut e, 1, |_, _| IDLE);
+            let (a, b) = (e.m.s.p[0].l.body.pos, e.m.s.p[1].l.body.pos);
+            let ang = (b[2] - a[2]).atan2(b[0] - a[0]);
+            sides[(((ang + std::f64::consts::PI) / std::f64::consts::TAU * 8.0) as usize).min(7)] = true;
+            if t > 40 {
+                far = far.max((a[0] - b[0]).hypot(a[2] - b[2]));
+            }
+        }
+        let n = sides.iter().filter(|&&s| s).count();
+        assert!(n >= 4, "seed {seed}: {sides:?}");
+        assert!(far < 9.0, "seed {seed}: {far}");
+        round += n;
+    }
+    assert!(round >= 36, "{round} of 48 sides seen");
+}
+
 #[test]
 fn a_scripted_bot_goes_to_its_inventory_when_it_is_out_of_potions() {
     let mut p = params();

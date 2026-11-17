@@ -13,7 +13,7 @@ use crate::client::{pearl_landing, pearl_preview, ClientCfg, Edge, Input, TickOu
 use crate::mth::{self, Rng};
 use crate::net::{potion_mask, refill_click, shift_click, Item, Kind, Rows, SLOT_FOOD, SLOT_PEARL, SLOT_SWORD, USE_TICKS, WINDOW_BAR};
 use crate::server::{
-    feather_points, prot_points, splash_heal, throw_heading, Food, KbPlugin, KbProfile, ServerCfg, DRINK_SHOWN, MAX_HEALTH, PEARL_DAMAGE,
+    feather_points, prot_points, splash_heal, throw_heading, Food, KbPlugin, KbProfile, ServerCfg, DRINK_SHOWN, FOR_GOOD, MAX_HEALTH, PEARL_DAMAGE,
     POTION_HEAL,
 };
 use crate::sim::{Match, NetCfg, Spawn, TICK_US};
@@ -293,6 +293,11 @@ pub struct Params {
     /// to sprint and has steak, 4 it is hurt with no healing potion at
     /// hand and some in the inventory, 8 it has no Speed and its potion of
     /// it is in the inventory. The rest of the duel is drawn as always.
+    /// 16 is the extreme one, against scripted bots only and from close
+    /// by: the first player is hurt and has potions, and the bot takes
+    /// next to no knockback, has Speed III to X and runs rings round it
+    /// (`BotParams::circler`). Nothing gets it off: the potions have to be
+    /// thrown with it there.
     pub lesson_prob: f64,
     pub lessons: u32,
     /// How far apart a lesson starts.
@@ -949,13 +954,18 @@ pub fn new_duel(p: &Params, rng: &mut Rng, mode: Mode) -> (Match, [f64; 2], BotP
     let lim = (p.arena_half - 2.0).max(1.0);
     // Drawn only when lessons are on, so that duels without them come out
     // as they always did.
-    let lesson = if p.lesson_prob > 0.0 && p.lessons & 15 != 0 && rng.chance(p.lesson_prob) {
-        let on: Vec<u8> = (0..4u8).filter(|k| p.lessons >> k & 1 != 0).collect();
+    let offered = if mode == Mode::Bot { 31 } else { 15 };
+    let lesson = if p.lesson_prob > 0.0 && p.lessons & offered != 0 && rng.chance(p.lesson_prob) {
+        let on: Vec<u8> = (0..5u8).filter(|k| (p.lessons & offered) >> k & 1 != 0).collect();
         1 + on[(rng.next_u64() % on.len() as u64) as usize]
     } else {
         0
     };
-    let (d_lo, d_hi) = if lesson != 0 { (p.lesson_dist[0], p.lesson_dist[1]) } else { (p.start_dist_min, p.start_dist_max) };
+    let (d_lo, d_hi) = match lesson {
+        0 => (p.start_dist_min, p.start_dist_max),
+        5 => (2.5, 5.0),
+        _ => (p.lesson_dist[0], p.lesson_dist[1]),
+    };
     let mut a;
     let mut b;
     let mut tries = 0;
@@ -1065,7 +1075,7 @@ pub fn new_duel(p: &Params, rng: &mut Rng, mode: Mode) -> (Match, [f64; 2], BotP
     // without it come out as they always did.
     let timed = (real && p.speed_end_prob > 0.0 && rng.chance(p.speed_end_prob)) || lesson == 1 || lesson == 4;
     let hungry = (real && p.hunger_prob > 0.0 && rng.chance(p.hunger_prob)) || lesson == 2;
-    let stocked = (real && p.refill_prob > 0.0 && rng.chance(p.refill_prob)) || lesson >= 3;
+    let stocked = (real && p.refill_prob > 0.0 && rng.chance(p.refill_prob)) || lesson == 3 || lesson == 4;
     let mut scfg = scfg;
     scfg.hunger |= hungry;
     let seed = rng.next_u64();
@@ -1128,7 +1138,7 @@ pub fn new_duel(p: &Params, rng: &mut Rng, mode: Mode) -> (Match, [f64; 2], BotP
                 lp.food = food;
                 lp.saturation = sat;
             }
-            if stocked && (p.refill_who == 0 || p.refill_who as usize == i + 1 || lesson >= 3) {
+            if stocked && (p.refill_who == 0 || p.refill_who as usize == i + 1 || lesson == 3 || lesson == 4) {
                 // More potions in the rows of the inventory, the healing
                 // ones first.
                 let mut pots = level(p.inv_potions, rng).clamp(0, 27) as usize;
@@ -1146,10 +1156,14 @@ pub fn new_duel(p: &Params, rng: &mut Rng, mode: Mode) -> (Match, [f64; 2], BotP
                 m.s.p[i].rows = rows;
                 m.c[i].lp.rows = rows;
             }
+            if lesson == 5 {
+                n = n.max(3);
+            }
             m.s.p[i].potions = potion_mask(n);
             m.c[i].lp.potions = potion_mask(n);
-            if lesson == 3 {
-                let h = (rng.range(6.0, 12.0) * 2.0).round() as f32 / 2.0;
+            if lesson == 3 || lesson == 5 {
+                let lo = if lesson == 5 { 4.0 } else { 6.0 };
+                let h = (rng.range(lo, 12.0) * 2.0).round() as f32 / 2.0;
                 m.s.p[i].health = h;
                 m.s.p[i].last_health = h;
                 m.c[i].lp.health = h;
@@ -1177,6 +1191,18 @@ pub fn new_duel(p: &Params, rng: &mut Rng, mode: Mode) -> (Match, [f64; 2], BotP
             m.s.p[1].set_using(true);
         }
     }
+    if lesson == 5 {
+        // The opponent of the extreme lesson: hits hardly move it, and it
+        // is far faster than anything on foot.
+        let amp = 2 + (rng.next_u64() % 8) as i8;
+        m.c[1].edge.kb_taken = rng.range(0.0, 0.2);
+        let (sp, lp) = (&mut m.s.p[1], &mut m.c[1].lp);
+        sp.l.attr.speed_amp = amp;
+        sp.speed_ticks = FOR_GOOD;
+        lp.speed_amp = amp;
+        lp.l.attr.speed_amp = amp;
+        lp.speed_ticks = FOR_GOOD;
+    }
     let mut bot = if mode == Mode::Bot {
         let lo = p.bot_level[0].round() as i64;
         let hi = (p.bot_level[1].round() as i64).max(lo);
@@ -1201,6 +1227,7 @@ pub fn new_duel(p: &Params, rng: &mut Rng, mode: Mode) -> (Match, [f64; 2], BotP
     if p.bot_runner > 0.0 {
         bot.runner = rng.chance(p.bot_runner);
     }
+    bot.circler = lesson == 5;
     (m, ping, bot, lesson)
 }
 
