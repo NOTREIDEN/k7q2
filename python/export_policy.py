@@ -19,7 +19,7 @@ import numpy as np
 import torch
 
 from pvpai.env import BOT, VecEnv, sim_dims
-from pvpai.model import load_policy
+from pvpai.model import NEVER, load_policy
 
 
 def write_policy(policy, samples, path):
@@ -80,10 +80,17 @@ def main():
     ap.add_argument("checkpoint")
     ap.add_argument("out")
     ap.add_argument("--check", default=None)
+    ap.add_argument("--rest", default="", help="controls, by number, that stay at their first choice in the game, for one the weights are still learning")
     args = ap.parse_args()
     # A control the weights were trained without stays at rest in the game.
     policy, ck, _ = load_policy(args.checkpoint, sim_dims(), still=True)
     policy.eval()
+    with torch.no_grad():
+        for h in [int(x) for x in args.rest.replace(",", " ").split()]:
+            policy.heads[h].weight.zero_()
+            policy.heads[h].bias.fill_(NEVER)
+            policy.heads[h].bias[0] = 0.0
+            print(f"control {h} stays at rest")
     write_policy(policy, ck.get("samples", 0), args.out)
     print(f"{args.out}: {ck.get('samples', 0) / 1e6:.0f}M samples, {policy.enc[0].in_features} inputs, controls {policy.act_dims}")
     if args.check:

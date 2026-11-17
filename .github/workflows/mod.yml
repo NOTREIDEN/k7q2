@@ -4,6 +4,10 @@ name: mod
 # play some seconds in a Forge client and puts the jar on the branch "mod".
 on:
   workflow_dispatch:
+    inputs:
+      rest:
+        description: Controls, by number, that stay at rest in the game (one the weights are still learning)
+        default: ""
 
 permissions:
   contents: write
@@ -33,12 +37,14 @@ jobs:
         with:
           python-version: "3.12"
       - name: Write the policy as the file the mod reads
+        env:
+          REST: ${{ inputs.rest }}
         run: |
           pip install --index-url https://download.pytorch.org/whl/cpu torch
           pip install numpy
           mkdir -p mod/forge/src/main/resources/pvpai
           cd python
-          python export_policy.py ../latest.pt ../mod/forge/src/main/resources/pvpai/policy.bin --check ../check.bin
+          python export_policy.py ../latest.pt ../mod/forge/src/main/resources/pvpai/policy.bin --check ../check.bin --rest "$REST"
       - uses: actions/setup-java@v4
         with:
           distribution: temurin
