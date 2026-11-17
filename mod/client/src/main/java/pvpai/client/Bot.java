@@ -70,7 +70,7 @@ public final class Bot implements Wire.Tap {
         this.duel = duel;
         this.chooser = chooser;
         double[] feet = Reader.pos(mc.thePlayer);
-        this.agent = chooser == null ? null : new Agent(pingOwn, pingOther, cps, Hands.mouseFactor(mc.gameSettings), feet);
+        this.agent = chooser == null ? null : new Agent(pingOwn, pingOther, cps, Hands.TRAINED_FACTOR, feet);
         this.book = new Book(feet);
         this.layout = Layout.of(mc.thePlayer.inventory);
         this.hands = new Hands(mc, layout);
@@ -202,7 +202,7 @@ public final class Bot implements Wire.Tap {
             if (!block && action.length > 7) {
                 action[7] = 0;
             }
-            k = agent.keys(view, duel, action, rng);
+            k = agent.keys(view, blocks, duel, action, rng);
         }
         pressed = k.copy();
         return k;

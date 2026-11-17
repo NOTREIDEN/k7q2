@@ -266,7 +266,7 @@ public final class AgentCheck {
             for (int k = 0; k < heads; k++) {
                 action[k] = i();
             }
-            int[] got = agent.keys(view, duel, action, rng).list();
+            int[] got = agent.keys(view, blocks, duel, action, rng).list();
             int[] want = new int[got.length];
             for (int k = 0; k < want.length; k++) {
                 want[k] = i();

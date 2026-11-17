@@ -1,6 +1,6 @@
 //! Half turns of the view, what the opponent's last pearl tells, and what
 //! it costs to heal the opponent, to fight on hungry and to stay slow.
-use pvpsim::env::{Env, Mode, Params, ACT_DIMS, ACT_HEADS, FLICK_BINS, OBS_DIM, PRIV_DIM, YAW_BINS};
+use pvpsim::env::{Env, Mode, Params, ACT_DIMS, ACT_HEADS, BAR_TURN, BAR_TURNS, FLICK_BINS, OBS_DIM, PRIV_DIM, YAW_BINS};
 
 /// Stand still, mouse at rest, no button down.
 const IDLE: [i32; ACT_HEADS] = [0, 0, 0, 0, 0, 13, 10, 0, 0, 0, 0];
@@ -107,6 +107,85 @@ fn a_flick_is_added_to_the_yaw_of_its_tick() {
         a
     });
     assert!((yaw(&e) - at - 93.15).abs() < 1e-3, "{} from {at}", yaw(&e));
+}
+
+#[test]
+fn a_potion_thrown_with_a_turn_lands_on_the_runner_and_the_view_comes_back() {
+    assert_eq!(ACT_DIMS[9], 10);
+    assert_eq!((BAR_TURN, BAR_TURNS), (7, [1200, 600, -600]));
+    let yaw = |e: &Env| e.m.c[0].lp.l.yaw;
+    let pitch = |e: &Env| e.m.c[0].lp.l.pitch;
+    let shown = |e: &Env| {
+        let mut o = [0.0f32; OBS_DIM];
+        e.write_obs(0, &mut o[..]);
+        o[152]
+    };
+    for (k, turn) in [(0usize, 180.0f32), (1, 90.0), (2, -90.0)] {
+        let mut e = Env::new(Mode::SelfPlay, params(), 3);
+        let (at, up) = (yaw(&e), pitch(&e));
+        let start = e.m.s.p[0].l.body.pos;
+        let (health, other) = (e.m.s.p[0].health, e.m.s.p[1].health);
+        assert_eq!(shown(&e), 0.0);
+        // The tick of the choice turns the view, looks down and takes the
+        // potion in hand; nothing is thrown with it.
+        run(&mut e, 1, |_| with(9, BAR_TURN + k as i32));
+        assert!((yaw(&e) - at - turn).abs() < 1e-3, "{} from {at}", yaw(&e));
+        let down = pitch(&e);
+        assert!(down > 20.0 && down <= 90.0, "{down}");
+        assert_eq!(e.m.s.potion_throws[0], 0);
+        assert!(shown(&e) > 0.0);
+        // The click, whatever is asked of the mouse or the inventory.
+        let busy = |_| {
+            let mut a = with(5, 26);
+            a[6] = 0;
+            a[10] = 5;
+            a[9] = 5;
+            a[1] = 1;
+            a
+        };
+        run(&mut e, 1, busy);
+        assert!((yaw(&e) - at - turn).abs() < 1e-3 && pitch(&e) == down);
+        // The next tick turns the view back, and from then on the mouse is
+        // the policy's while the player keeps going the way it ran.
+        run(&mut e, 1, |_| IDLE);
+        assert!((yaw(&e) - at).abs() < 1e-3 && (pitch(&e) - up).abs() < 0.2, "{} {} from {at} {up}", yaw(&e), pitch(&e));
+        let mut ticks = 3;
+        while shown(&e) > 0.0 {
+            let was = yaw(&e);
+            run(&mut e, 1, busy);
+            ticks += 1;
+            let want = (YAW_BINS[26] + FLICK_BINS[5]) as f32 * 0.15;
+            assert!((yaw(&e) - was - want).abs() < 1e-2, "tick {ticks}: {} from {was}", yaw(&e));
+            assert!(!e.m.c[0].lp.inv_open);
+            assert!(ticks < 18);
+        }
+        run(&mut e, 6, |_| IDLE);
+        let pos = e.m.s.p[0].l.body.pos;
+        let ran = (pos[0] - start[0]).hypot(pos[2] - start[2]);
+        assert_eq!(e.m.s.potion_throws[0], 1);
+        assert_eq!(e.m.c[0].lp.potions.count_ones(), 6);
+        // It came down on the player that ran, not on the one far away.
+        assert!(e.m.s.p[0].health >= health + 6.0, "turn {turn}: {health} to {} after {ticks} ticks and {ran:.1} blocks", e.m.s.p[0].health);
+        assert_eq!(e.m.s.p[1].health, other);
+        assert!(ran > 1.0, "{ran}");
+    }
+    // A potion asked for on the tick after the click follows the first
+    // along the same view, and the view comes back a tick later.
+    let mut e = Env::new(Mode::SelfPlay, params(), 3);
+    let at = yaw(&e);
+    run(&mut e, 2, |_| with(9, BAR_TURN));
+    run(&mut e, 1, |_| with(9, 1));
+    assert!((yaw(&e) - at - 180.0).abs() < 1e-3);
+    run(&mut e, 1, |_| IDLE);
+    assert!((yaw(&e) - at).abs() < 1e-3);
+    run(&mut e, 20, |_| IDLE);
+    assert_eq!(e.m.s.potion_throws[0], 2);
+    // The plain throw of the same start does not turn.
+    let mut e = Env::new(Mode::SelfPlay, params(), 3);
+    run(&mut e, 1, |_| with(9, 1));
+    run(&mut e, 12, |_| IDLE);
+    assert!((yaw(&e) - at).abs() < 1e-3);
+    assert_eq!(e.m.s.potion_throws[0], 1);
 }
 
 #[test]
@@ -324,4 +403,33 @@ fn potions_of_speed_start_in_the_inventory_for_the_share_asked() {
         }
     }
     assert!((300..=420).contains(&stowed) && at_hand + stowed == 600, "{at_hand} {stowed}");
+}
+
+#[test]
+fn a_bot_that_presses_does_not_stop_to_heal_itself_and_jumps_at_a_hurt_opponent() {
+    let throws = |press: f64, seed: u64| {
+        let mut p = params();
+        p.bot_level = [4.0, 4.0];
+        p.start_health = [8.0, 8.0];
+        p.bot_presser = press;
+        let mut e = Env::new(Mode::Bot, p, seed);
+        assert_eq!(e.bot.presser, press > 0.0);
+        let mut jumped = false;
+        for _ in 0..30 {
+            run(&mut e, 1, |_| IDLE);
+            jumped |= !e.m.s.p[1].l.body.on_ground;
+        }
+        (e.m.s.potion_throws[1], jumped)
+    };
+    // Both at eight points of health, twelve blocks apart, the agent standing still.
+    let (mut plain, mut pressing, mut jumps) = (0, 0, 0);
+    for seed in 1..=8 {
+        plain += throws(0.0, seed).0;
+        let (t, j) = throws(1.0, seed);
+        pressing += t;
+        jumps += j as u32;
+    }
+    assert!(plain >= 3, "bots that do not press heal themselves at that health: {plain} potions in 8 duels");
+    assert_eq!(pressing, 0);
+    assert_eq!(jumps, 8);
 }

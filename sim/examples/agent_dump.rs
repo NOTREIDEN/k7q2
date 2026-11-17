@@ -363,7 +363,7 @@ fn main() {
             }
             let was = m.c[id].lp.consuming();
             let (said, said_yaw, said_pitch) = (m.c[id].lp.last_reported, m.c[id].lp.last_yaw, m.c[id].lp.last_pitch);
-            let inp = ag[id].keys(&m.c[id], &d, &action, &mut rng);
+            let inp = ag[id].keys(&m.c[id], &m.world, &d, &action, &mut rng);
             let out = m.client_tick(id, &inp);
             ag[id].ticked(&m.c[id], &d, &inp, &out);
             if id == 0 {

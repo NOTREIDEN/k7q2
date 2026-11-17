@@ -9,7 +9,7 @@
 //! the reward that agent earned since its previous action.
 use crate::aabb::{dist, V3};
 use crate::agent::{aim_error, clip, local, Agent, Duel};
-pub use crate::agent::{decode_action, ACT_DIMS, ACT_HEADS, FLICK_BINS, OBS_DIM, PITCH_BINS, YAW_BINS};
+pub use crate::agent::{decode_action, ACT_DIMS, ACT_HEADS, BAR_TURN, BAR_TURNS, FLICK_BINS, OBS_DIM, PITCH_BINS, YAW_BINS};
 use crate::bot::{self, BotParams, BotState};
 use crate::client::{ClientCfg, Edge, Input, TickOut, INV_SHUT, MAX_BACKTRACK};
 use crate::mth::Rng;
@@ -260,6 +260,9 @@ pub struct Params {
     /// Share of the duels in which the scripted bot is a runner (see
     /// `BotParams::runner`).
     pub bot_runner: f64,
+    /// Share of the duels without a runner in which the scripted bot
+    /// presses (see `BotParams::presser`).
+    pub bot_presser: f64,
     /// What it costs a player, in hits, to stand with no healing potion in
     /// the hotbar while the inventory has some, and the same for the
     /// potion of Speed once the Speed is over. A difference of state, like
@@ -427,6 +430,7 @@ impl Default for Params {
             refill_who: 0,
             bot_refill: 1.0,
             bot_runner: 0.0,
+            bot_presser: 0.0,
             extreme_share: -1.0,
             w_stock: 0.0,
             lesson_prob: 0.0,
@@ -562,6 +566,7 @@ impl Params {
             110 => self.w_miss = v as f32,
             111 => self.w_pot_time = v as f32,
             112 => self.bot_runner = v,
+            121 => self.bot_presser = v,
             113 => self.extreme_share = v,
             114 => self.w_shake = v as f32,
             115 => self.pot_strict_prob = v,
@@ -1221,6 +1226,9 @@ pub fn new_duel(p: &Params, rng: &mut Rng, mode: Mode) -> (Match, [f64; 2], BotP
     if p.bot_runner > 0.0 {
         bot.runner = rng.chance(p.bot_runner);
     }
+    if p.bot_presser > 0.0 {
+        bot.presser = !bot.runner && rng.chance(p.bot_presser);
+    }
     bot.circler = lesson == 5;
     (m, ping, bot, lesson)
 }
@@ -1581,6 +1589,9 @@ impl Env {
             self.since_block[id] += 1;
         }
         let off = ang > 12.0;
+        // The ticks a potion thrown with a turn keeps the view turned are the
+        // throw itself: what counts is the time to the crosshair after it.
+        let turned = self.ag[id].turned();
         if out.threw_potion {
             self.ep.potions[id] += 1.0;
             if self.pot_since[id] <= 3 {
@@ -1597,7 +1608,7 @@ impl Env {
             self.pot_since[id] = 0;
             self.pot_back[id] = false;
         }
-        if !self.pot_back[id] {
+        if !self.pot_back[id] && !turned {
             if off && self.pot_since[id] < 40 {
                 self.ep.pot_away[id] += 1.0;
                 self.ep.pot_after[id] += 1.0;
@@ -1608,7 +1619,7 @@ impl Env {
                 self.pot_back[id] = true;
             }
         }
-        self.off_run[id] = if off { self.off_run[id] + 1 } else { 0 };
+        self.off_run[id] = if off && !turned { self.off_run[id] + 1 } else { 0 };
         if off {
             self.ep.off[id] += 1.0;
         }
@@ -1683,7 +1694,7 @@ impl Env {
     pub fn step(&mut self, action: &[i32]) -> usize {
         let id = self.pending;
         let duel = self.duel();
-        let inp = self.ag[id].keys(&self.m.c[id], &duel, action, &mut self.rng);
+        let inp = self.ag[id].keys(&self.m.c[id], &self.m.world, &duel, action, &mut self.rng);
         let out = self.m.client_tick(id, &inp);
         self.account(id, &inp, &out);
         let mut round_done = id == 1;

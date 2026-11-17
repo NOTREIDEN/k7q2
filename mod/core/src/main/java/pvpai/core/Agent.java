@@ -16,7 +16,17 @@ import java.util.Random;
  */
 public final strictfp class Agent {
     /** Choices of each control: forward, strafe, jump, sprint key, attack, yaw, pitch, right button, pearl, the rest of the hotbar, and a flick of the mouse. */
-    public static final int[] ACT_DIMS = {3, 3, 2, 2, 2, 31, 29, 2, 2, 7, 6};
+    public static final int[] ACT_DIMS = {3, 3, 2, 2, 2, 31, 29, 2, 2, 10, 6};
+    /**
+     * The first of the choices of the hotbar control that throw a potion
+     * with a turn of the view, and the mouse counts of each one's turn:
+     * half a turn, a quarter to the right, a quarter to the left.
+     */
+    public static final int BAR_TURN = 7;
+    static final int[] BAR_TURNS = {1200, 600, -600};
+    /** Degrees of one mouse count, the ticks of its own run a potion thrown with a turn is aimed over, and the most the run goes on for. */
+    private static final float COUNT_DEG = 0.15f;
+    private static final int RUN_TICKS = 16, MOVE_TICKS = 14;
     /** Mouse counts a flick adds to the yaw of its tick: an eighth of a turn, a quarter either way, or half a turn. */
     public static final int[] FLICK_BINS = {0, -300, 300, -600, 600, 1200};
     /** Mouse counts per tick; the four large ones at the end are a quarter turn and a half turn each way. */
@@ -27,7 +37,7 @@ public final strictfp class Agent {
     public static final int[] PITCH_BINS = {
         -89, -55, -34, -21, -13, -8, -5, -3, -2, -1, 0, 1, 2, 3, 5, 8, 13, 21, 34, 55, 89, -377, -233, -144, 144, 233, 377, -600, 600,
     };
-    public static final int OBS_DIM = 152;
+    public static final int OBS_DIM = 153;
     private static final int TRAIL = 16;
     /**
      * A hurt of the other player counts as a hit of this one's for this
@@ -57,8 +67,13 @@ public final strictfp class Agent {
         double[][] trail;
         int back, on;
         boolean moving;
+        /** Where its own player will be after each tick of a run, in place of the rest, when there is one. */
+        double[][] run;
 
         double[] at(int j, int t) {
+            if (j == 0 && run != null) {
+                return run[Math.min(Math.max(t + 1, 0), RUN_TICKS - 1)];
+            }
             if (j == 1) {
                 double n = (double) (on + t);
                 return new double[] {there[0] + seen[0] * n, there[1], there[2] + seen[1] * n};
@@ -90,6 +105,15 @@ public final strictfp class Agent {
     /** The same for a potion throw, and what it asked for on its last tick. */
     private int potionStage;
     private boolean askedPotion;
+    /**
+     * A potion thrown with a turn: ticks since the turn, the tick of the
+     * turn being 1, and 0 when there is none; the last tick of the view
+     * turned and the last of the run; the mouse counts of the turn; the
+     * pitch before it; the way the player runs.
+     */
+    private int turned, viewUntil, moveUntil, turnedBy;
+    private float turnedPitch;
+    private double[] runDir = {0.0, 0.0};
     /** Own ticks since its last potion throw. */
     private int sinceThrow = 1000;
     /**
@@ -169,15 +193,45 @@ public final strictfp class Agent {
      * otherwise a drink or a meal, a potion and a pearl are laid over the
      * plain keys in that order, and the click rate comes last.
      */
-    public Keys keys(View v, Duel duel, int[] action, Random rng) {
+    public Keys keys(View v, Blocks blocks, Duel duel, int[] action, Random rng) {
         Keys inp = decode(action);
         int bar = action.length > 9 ? action[9] : 0;
+        if (turned > 0) {
+            // A potion thrown with a turn is on its way: the view stays
+            // turned for the click, then turns back, and the player keeps
+            // going the way it ran until the potion is down.
+            turned++;
+            boolean asked = bar == 1 || bar >= BAR_TURN;
+            if (turned == viewUntil + 1 && asked && viewUntil == 2) {
+                viewUntil++;
+                moveUntil = Math.min(moveUntil + 1, MOVE_TICKS);
+            }
+            if (turned <= viewUntil) {
+                inp.dx = 0;
+                inp.dy = 0;
+                runAhead(inp);
+                bar = asked ? 1 : 0;
+            } else {
+                if (turned == viewUntil + 1) {
+                    inp.dx = -turnedBy;
+                    inp.dy = counts(turnedPitch - v.pitch);
+                }
+                if (turned <= moveUntil) {
+                    float yaw = (float) ((double) v.yaw + (double) inp.dx * 0.15);
+                    runAway(inp, yaw, runDir);
+                } else {
+                    turned = 0;
+                }
+                bar = 0;
+            }
+        }
+        int turn = bar >= BAR_TURN ? BAR_TURNS[Math.min(bar - BAR_TURN, BAR_TURNS.length - 1)] : 0;
         Keys screen = refillKeys(v, bar);
         if (screen != null) {
             return screen;
         }
         consumeKeys(v, duel, bar, inp);
-        potionKeys(v, bar == 1, inp);
+        potionKeys(v, blocks, bar == 1 || turn != 0, turn, inp);
         pearlKeys(v, action.length > 8 && action[8] != 0, inp);
         limitClicks(inp, rng);
         return inp;
@@ -260,7 +314,7 @@ public final strictfp class Agent {
      * the number key of the sword pressed.
      */
     private void consumeKeys(View v, Duel duel, int choice, Keys inp) {
-        askedBar = Math.min(Math.max(choice, 0), 6);
+        askedBar = Math.min(Math.max(choice, 0), ACT_DIMS[9] - 1);
         if (consume == 0) {
             int slot;
             if (choice == 2 && v.drinks != 0 && drinkDue(v, duel)) {
@@ -360,7 +414,7 @@ public final strictfp class Agent {
                 inv = 1;
             }
         }
-        askedBar = Math.min(Math.max(choice, 0), 6);
+        askedBar = Math.min(Math.max(choice, 0), ACT_DIMS[9] - 1);
         askedPotion = false;
         askedPearl = false;
         if (pearlWait > 0) {
@@ -376,15 +430,31 @@ public final strictfp class Agent {
      * that holds a potion and a right click, which throws along the view
      * the server already has, then the number key of the sword. Asked for
      * again on the tick after a throw, it takes the next potion in hand and
-     * clicks again at once.
+     * clicks again at once. Thrown with a turn, the first tick turns the
+     * view and looks down at the pitch of {@link #runAim}, and the click is
+     * made on the second, along the view the server has by then.
      */
-    private void potionKeys(View v, boolean want, Keys inp) {
+    private void potionKeys(View v, Blocks blocks, boolean want, int turn, Keys inp) {
         askedPotion = want;
         if (potionStage == 0) {
             if (want && potionReady(v)) {
                 inp.slotKey = Integer.numberOfTrailingZeros(v.potions) + 1;
                 inp.attack = false;
-                if (prev.useItem) {
+                if (turn != 0 && turned == 0) {
+                    inp.dx += turn;
+                    float yaw = (float) ((double) v.yaw + (double) inp.dx * 0.15);
+                    float[] aim = runAim(v, blocks, yaw);
+                    inp.dy = counts(aim[0] - v.pitch);
+                    runAhead(inp);
+                    potionStage = 1;
+                    turned = 1;
+                    viewUntil = 2;
+                    moveUntil = Math.min(Math.max((int) aim[1] + 2, 3), MOVE_TICKS);
+                    turnedBy = turn;
+                    turnedPitch = v.pitch;
+                    float f = yaw * Geo.PI_F / 180.0f;
+                    runDir = new double[] {(double) -Geo.sin(f), (double) Geo.cos(f)};
+                } else if (prev.useItem) {
                     inp.useItem = false;
                     potionStage = 1;
                 } else {
@@ -406,6 +476,126 @@ public final strictfp class Agent {
             inp.useItem = false;
             potionStage = 0;
         }
+    }
+
+    /** The mouse counts of a turn by deg degrees, to the nearest. */
+    private static int counts(float deg) {
+        return (int) Math.floor(deg / COUNT_DEG + 0.5f);
+    }
+
+    /** The keys of a player that runs straight along its view with its right button up. */
+    private static void runAhead(Keys inp) {
+        inp.forward = 1;
+        inp.strafe = 0;
+        inp.jump = false;
+        inp.sprintKey = true;
+        inp.useItem = false;
+    }
+
+    /** The keys that take a player looking at yaw closest to the way dir: of W, S, A, D and their pairs, without sprint, jump or the right button. */
+    private static void runAway(Keys inp, float yaw, double[] dir) {
+        float f = yaw * Geo.PI_F / 180.0f;
+        double sn = (double) Geo.sin(f), cs = (double) Geo.cos(f);
+        double best = -Double.MAX_VALUE;
+        int bf = 0, bs = 0;
+        int[] fws = {1, 0, -1}, sts = {0, 1, -1};
+        for (int fw : fws) {
+            for (int st : sts) {
+                if (fw == 0 && st == 0) {
+                    continue;
+                }
+                double x = (double) st * cs - (double) fw * sn, z = (double) fw * cs + (double) st * sn;
+                double d = (x * dir[0] + z * dir[1]) / Math.sqrt(x * x + z * z);
+                if (d > best + 1e-9) {
+                    best = d;
+                    bf = fw;
+                    bs = st;
+                }
+            }
+        }
+        inp.forward = bf;
+        inp.strafe = bs;
+        inp.sprintKey = false;
+        inp.jump = false;
+        inp.useItem = false;
+    }
+
+    /**
+     * Where a player that turns its view to yaw on the tick to come will
+     * stand after that tick and after each of the next, as its own client
+     * can work out: sprinting along that view for two ticks, then walking on
+     * the same way.
+     */
+    private static double[][] runFeet(View v, Blocks blocks, float yaw) {
+        double[] pos = v.pos.clone(), m = v.motion.clone();
+        boolean onGround = v.onGround;
+        double[] h = blocks.rayTrace(new double[] {pos[0], pos[1] + 0.1, pos[2]}, new double[] {pos[0], pos[1] - 6.0, pos[2]});
+        double floor = h != null ? h[1] : pos[1] - 6.0;
+        boolean sprint = v.food > 6;
+        double run = v.speed * (sprint == v.sprinting ? 1.0 : sprint ? 1.3 : 1.0 / 1.3);
+        double walk = sprint ? run / 1.3 : run;
+        float f = yaw * Geo.PI_F / 180.0f;
+        double[] dir = {(double) -Geo.sin(f), (double) Geo.cos(f)};
+        double[][] out = new double[RUN_TICKS][];
+        for (int q = 0; q < RUN_TICKS; q++) {
+            boolean sprinting = sprint && q < 2;
+            double a = onGround ? (q < 2 ? run : walk) * 0.98 : sprinting ? 0.026 * 0.98 : 0.02 * 0.98;
+            m[0] += dir[0] * a;
+            m[2] += dir[1] * a;
+            double step = Math.sqrt(m[0] * m[0] + m[2] * m[2]);
+            if (step > 1e-9) {
+                double reach = 1.0 + 0.3 / step;
+                double[] from = {pos[0], pos[1] + 0.5, pos[2]}, to = {pos[0] + m[0] * reach, pos[1] + 0.5, pos[2] + m[2] * reach};
+                if (blocks.rayTrace(from, to) == null) {
+                    pos[0] += m[0];
+                    pos[2] += m[2];
+                } else {
+                    m[0] = 0.0;
+                    m[2] = 0.0;
+                }
+            }
+            double fr = onGround ? 0.546 : 0.91;
+            pos[1] += m[1];
+            onGround = pos[1] <= floor;
+            if (onGround) {
+                pos[1] = floor;
+                m[1] = 0.0;
+            }
+            m[1] = (m[1] - 0.08) * 0.98;
+            m[0] *= fr;
+            m[2] *= fr;
+            out[q] = pos.clone();
+        }
+        return out;
+    }
+
+    /**
+     * The pitch for a potion thrown on the tick after next by a player that
+     * turns its view to yaw on the next and runs along it, and the ticks the
+     * potion flies: of the pitches from straight down to a little under
+     * level, the one whose potion gives this player the most health, breaks
+     * soonest, and gives the opponent the least, in that order.
+     */
+    private float[] runAim(View v, Blocks blocks, float yaw) {
+        double[][] run = runFeet(v, blocks, yaw);
+        Feet feet = potionFeet(v, -1, lag + 2, true);
+        feet.run = run;
+        double sp = Geo.speed(Inv.KIND_POTION);
+        float bestPitch = 90.0f, bestHeal = -1.0f, bestGift = 0.0f;
+        int bestTicks = 0;
+        for (int k = 0; k <= 14; k++) {
+            float pitch = 90.0f - 5.0f * (float) k;
+            double[] hd = Geo.throwHeading(Inv.KIND_POTION, run[0], yaw, pitch);
+            double[] from = {hd[0], hd[1], hd[2]}, m = {hd[3] * sp, hd[4] * sp, hd[5] * sp};
+            Fate f = potionOutcome(blocks, from, m, 0, 0, feet);
+            if (f.heal[0] > bestHeal || (f.heal[0] == bestHeal && (f.ticks < bestTicks || (f.ticks == bestTicks && f.heal[1] < bestGift)))) {
+                bestPitch = pitch;
+                bestTicks = f.ticks;
+                bestHeal = f.heal[0];
+                bestGift = f.heal[1];
+            }
+        }
+        return new float[] {bestPitch, (float) bestTicks};
     }
 
     /**
@@ -890,5 +1080,7 @@ public final strictfp class Agent {
         // How much of the server's wait between pearls the opponent still
         // has in front of it, counted from when its last pearl was seen.
         o[151] = Math.min((float) Math.max(duel.pearlCooldown - oppPearlAge, 0) / cd, 1.0f);
+        // A potion thrown with a turn: the ticks left until the run with it is over.
+        o[152] = turned > 0 ? (float) (moveUntil - turned + 1) / 8.0f : 0.0f;
     }
 }

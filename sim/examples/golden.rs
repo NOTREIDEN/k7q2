@@ -2,7 +2,11 @@
 //! the settings the training machines use and random actions. It has to
 //! stay the same through any change that is not meant to change what an
 //! agent sees or is paid: `cargo run --release --example golden`.
-use pvpsim::env::{Mode, VecEnv, ACT_DIMS, ACT_HEADS, OBS_DIM, PRIV_DIM, STATS_DIM};
+use pvpsim::env::{Mode, VecEnv, ACT_HEADS, OBS_DIM, PRIV_DIM, STATS_DIM};
+
+/// How many choices of each control the reference fingerprint was drawn from.
+const SEEN: usize = 152;
+const DRAWN: [u64; 10] = [3, 3, 2, 2, 2, 31, 29, 2, 2, 7];
 use pvpsim::mth::Rng;
 
 /// Parameter numbers of `Params::set` and the values of the training runs.
@@ -60,15 +64,18 @@ fn main() {
         for call in 0..6000 {
             let wild = (call / 200) % 2 == 1;
             for i in 0..n {
-                // The controls the reference was made with; one added since stays at nothing.
+                // The controls and the choices the reference was made with; what was added since is not drawn.
                 for k in 0..10 {
                     let r = rng.next_u64();
-                    act[i * ACT_HEADS + k] = if wild || r % 8 == 0 { ((r >> 8) % ACT_DIMS[k] as u64) as i32 } else { [1, 0, 0, 1, 1, 13, 10, 0, 0, 0][k] };
+                    act[i * ACT_HEADS + k] = if wild || r % 8 == 0 { ((r >> 8) % DRAWN[k]) as i32 } else { [1, 0, 0, 1, 1, 13, 10, 0, 0, 0][k] };
                 }
             }
             v.step(&act, &mut obs, &mut pv, &mut rew, &mut done, &mut fobs, &mut fpv);
-            for x in &obs {
-                mix(&mut h_obs, x.to_bits());
+            // Of the observations, what the reference was made with.
+            for row in obs.chunks(OBS_DIM) {
+                for x in &row[..SEEN] {
+                    mix(&mut h_obs, x.to_bits());
+                }
             }
             for x in pv.iter().chain(&fpv) {
                 mix(&mut h_priv, x.to_bits());
@@ -77,7 +84,7 @@ fn main() {
                 mix(&mut h_rew, x.to_bits());
                 mix(&mut h_rew, done[i] as u32);
                 if done[i] != 0 {
-                    for x in &fobs[i * OBS_DIM..(i + 1) * OBS_DIM] {
+                    for x in &fobs[i * OBS_DIM..i * OBS_DIM + SEEN] {
                         mix(&mut h_obs, x.to_bits());
                     }
                 }

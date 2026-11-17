@@ -36,8 +36,8 @@ on:
           --param agent_ping_min_ms=0 --param agent_ping_max_ms=220
           --param lessons=511 --param extreme_share=0.75 --param bot_runner=0.15
           --param w_shake=0.1 --param w_waste=2.5 --param pot_strict_prob=0.3
-          --param w_gift=2 --param w_hungry=0.05 --param w_slow=0.05
-          --param drinks_stowed=0.6
+          --param w_gift=3 --param w_hungry=0.05 --param w_slow=0.05
+          --param drinks_stowed=0.6 --param bot_presser=0.5
       previous:
         description: Id of the run to continue from (empty starts from seed/stage1.pt)
         default: ""

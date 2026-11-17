@@ -28,6 +28,28 @@ final class Hands {
         return f * f * f * 8.0F;
     }
 
+    /**
+     * The same at the sensitivity the agent was trained with, the game's
+     * default (shown as 100 %): the agent's mouse counts are counted there.
+     */
+    static final float TRAINED_FACTOR = 1.0F;
+
+    /** The part of a count each way that the sensitivity that is set could not make yet. */
+    private double carryX, carryY;
+
+    /**
+     * The agent's counts as counts of a mouse at the sensitivity that is
+     * set, which turn the view as far: whole counts, as a mouse makes them,
+     * and what is left over goes with the next.
+     */
+    private int[] userCounts(int dx, int dy, float f1) {
+        double x = (double) dx * TRAINED_FACTOR / f1 + carryX, y = (double) dy * TRAINED_FACTOR / f1 + carryY;
+        int nx = (int) Math.round(x), ny = (int) Math.round(y);
+        carryX = x - nx;
+        carryY = y - ny;
+        return new int[] {nx, ny};
+    }
+
     /** Whether a tick with these keys belongs to the inventory screen, on which the game reads nothing else. */
     boolean screenTick(Keys k) {
         return mc.currentScreen instanceof GuiInventory || k.inv != 0;
@@ -90,7 +112,10 @@ final class Hands {
         useDown = k.useItem;
         if (k.dx != 0 || k.dy != 0) {
             float f1 = mouseFactor(gs);
-            mc.thePlayer.setAngles((float) k.dx * f1, -((float) k.dy * f1));
+            int[] n = userCounts(k.dx, k.dy, f1);
+            if (n[0] != 0 || n[1] != 0) {
+                mc.thePlayer.setAngles((float) n[0] * f1, -((float) n[1] * f1));
+            }
         }
     }
 

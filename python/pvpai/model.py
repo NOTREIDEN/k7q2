@@ -39,7 +39,11 @@ NEW_CHOICE_BIAS = -5.0
 # own starting preference, by control: the quarter and half turns of the
 # view start as the largest turn there was the same way, one time in twenty
 # of those on which that one is asked for.
-COPY_OF = {5: {27: (0, -3.0), 28: (26, -3.0), 29: (0, -3.0), 30: (26, -3.0)}}
+# And the potions thrown with a turn, behind and to either side, start as
+# the plain throw, the three together in its place a little more than one
+# time in three: tried in the very states in which potions are thrown, and
+# kept where they heal better.
+COPY_OF = {5: {27: (0, -3.0), 28: (26, -3.0), 29: (0, -3.0), 30: (26, -3.0)}, 9: {7: (1, -2.0), 8: (1, -2.0), 9: (1, -2.0)}}
 # When the potion control is added, the pearl control starts over. With
 # infinite health the agent had learnt never to throw a pearl; with health
 # to lose, and an opponent that can be knocked away from its own potion, a
@@ -181,7 +185,8 @@ def fit_state(sd, policy, still=False):
     them. A control listed in `RESTART` for a
     control that is being added starts over as well. With `still`, for a
     version that is not trained any more, a new control stays at its first
-    choice instead. Returns the weights and whether anything was added."""
+    choice instead and new choices are never asked for. Returns the weights
+    and whether anything was added."""
     out, grown = {}, False
     again = {h for new, hs in RESTART.items() if f"heads.{new}.bias" not in sd for h in hs}
     for k, ref in policy.state_dict().items():
@@ -196,7 +201,11 @@ def fit_state(sd, policy, still=False):
         elif sd[k].shape != ref.shape:
             w = torch.zeros_like(ref)
             old = sd[k].float()
-            if head is not None and old.shape[0] < ref.shape[0]:
+            if head is not None and old.shape[0] < ref.shape[0] and still:
+                # A version that is not trained any more never asks for them.
+                if part[2] == "bias":
+                    w.fill_(NEVER)
+            elif head is not None and old.shape[0] < ref.shape[0]:
                 # New choices of an old control: copies of its first choice,
                 # rarer by their starting preference.
                 if part[2] == "bias":

@@ -701,7 +701,7 @@ fn replay_client(lines: &[Line], world: &World, speed: i8, sens: f32, o: &Option
                 if let (Some(a), Some((d, _, _))) = (ag.as_mut(), duel.as_ref()) {
                     let action: Vec<i32> = l.s("a").split(',').map(|s| s.parse().unwrap()).collect();
                     assert!(action.len() <= ACT_HEADS);
-                    asked = Some(a.keys(&c, d, &action, &mut rng));
+                    asked = Some(a.keys(&c, world, d, &action, &mut rng));
                 }
             }
             "CI" => {

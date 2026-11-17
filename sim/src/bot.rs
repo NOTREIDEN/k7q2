@@ -63,6 +63,13 @@ pub struct BotParams {
     /// It runs rings round the opponent: sideways one way for seconds on
     /// end, just inside its reach.
     pub circler: bool,
+    /// It presses: it heals itself late, at four to six points of health,
+    /// and while the opponent is hurt, or has a potion in hand or in the
+    /// air, it goes straight at it, jumping to be faster, and throws its
+    /// pearl at it as soon as it may. A potion thrown ahead with it that
+    /// near heals both, and its hits knock the thrower away from where the
+    /// potion breaks.
+    pub presser: bool,
 }
 
 impl BotParams {
@@ -87,6 +94,7 @@ impl BotParams {
                 refill: 0.0,
                 runner: false,
                 circler: false,
+                presser: false,
             },
             2 => BotParams {
                 level,
@@ -107,6 +115,7 @@ impl BotParams {
                 refill: 0.4,
                 runner: false,
                 circler: false,
+                presser: false,
             },
             3 => BotParams {
                 level,
@@ -127,6 +136,7 @@ impl BotParams {
                 refill: 0.7,
                 runner: false,
                 circler: false,
+                presser: false,
             },
             _ => BotParams {
                 level: 4,
@@ -147,6 +157,7 @@ impl BotParams {
                 refill: 1.0,
                 runner: false,
                 circler: false,
+                presser: false,
             },
         }
     }
@@ -360,7 +371,8 @@ fn pearl_target(c: &Client, world: &World, p: &BotParams, st: &BotState, hdist: 
             || c.thrown.iter().any(|e| e.kind == Kind::Potion && !e.mine)
             || (c.rp.using && matches!(c.rp.item, Item::Drink | Item::Food));
         let low = c.rp.health <= 10.0;
-        if hdist > 2.8 && ((potting && rng.chance(0.6 * p.pearl_attack)) || (low && rng.chance(0.25 * p.pearl_attack))) {
+        let keen = if p.presser && p.pearl_attack > 0.0 { 1.0 } else { 0.6 * p.pearl_attack };
+        if hdist > 2.8 && ((potting && rng.chance(keen)) || (low && rng.chance(0.25 * p.pearl_attack))) {
             kind = 4;
         } else {
             // Towards the opponent: often from far away, now and then in a
@@ -607,6 +619,14 @@ pub fn act(c: &Client, world: &World, cfg: &ClientCfg, p: &BotParams, st: &mut B
     if p.jump_reset && lp.hurt_time == 10 && lp.l.body.on_ground {
         inp.jump = true;
     }
+    // A presser on an opponent that is hurt or healing itself: straight
+    // at it, in jumps while it is out of reach.
+    if p.presser && (rp.health <= 12.0 || rp.item == Item::Potion || c.thrown.iter().any(|e| e.kind == Kind::Potion && !e.mine)) {
+        inp.strafe = 0;
+        if hdist > 3.2 && lp.l.body.on_ground {
+            inp.jump = true;
+        }
+    }
 
     // A runner that is hurt runs from the opponent until it is healed or
     // out of potions, which it throws ahead of itself as it goes (below).
@@ -746,7 +766,8 @@ pub fn act(c: &Client, world: &World, cfg: &ClientCfg, p: &BotParams, st: &mut B
         st.potion_wait -= 1;
     }
     if st.potion_at == 0.0 && p.potion > 0.0 && lp.potions != 0 {
-        st.potion_at = rng.range(7.0, 12.0) as f32;
+        let (lo, hi) = if p.presser { (4.0, 6.0) } else { (7.0, 12.0) };
+        st.potion_at = rng.range(lo, hi) as f32;
     }
     match st.potion_stage {
         0 => {
