@@ -33,7 +33,7 @@ on:
           --param refill_prob=0.5 --param w_stock=2 --param lesson_prob=0.5
           --param lesson_dist_min=12 --param lesson_dist_max=28
           --param w_miss=1.5 --param w_pot_time=0.1
-          --param agent_ping_min_ms=190 --param agent_ping_max_ms=210
+          --param agent_ping_min_ms=0 --param agent_ping_max_ms=220
           --param lessons=511 --param extreme_share=0.75 --param bot_runner=0.15
           --param w_shake=0.1 --param w_waste=2.5 --param pot_strict_prob=0.3
           --param w_gift=2 --param w_hungry=0.015 --param w_slow=0.02

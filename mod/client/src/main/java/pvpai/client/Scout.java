@@ -1,5 +1,8 @@
 package pvpai.client;
 
+import java.net.InetAddress;
+import java.net.InetSocketAddress;
+import java.net.SocketAddress;
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.entity.EntityOtherPlayerMP;
 import net.minecraft.client.entity.EntityPlayerSP;
@@ -116,11 +119,35 @@ final class Scout {
         return damage * (float) (25 - armor) / 25.0F * (25.0F - k) / 25.0F;
     }
 
-    /** The ping of a player as the player list has it, in milliseconds; less than zero if it does not say. */
+    /**
+     * The ping of a player as the player list has it, in milliseconds; less
+     * than zero if it does not say. The list holds a zero for a player the
+     * server has no ping of yet, so a zero is taken as said only from a
+     * server on this machine or in this network, where it is the ping.
+     */
     static double ping(Minecraft mc, EntityPlayer p) {
         NetHandlerPlayClient net = mc.getNetHandler();
         NetworkPlayerInfo info = net == null ? null : net.getPlayerInfo(p.getUniqueID());
-        int ms = info == null ? 0 : info.getResponseTime();
-        return ms > 0 ? (double) ms : -1.0;
+        if (info == null) {
+            return -1.0;
+        }
+        int ms = info.getResponseTime();
+        if (ms > 0) {
+            return (double) ms;
+        }
+        return ms == 0 && near(mc, net) ? 0.0 : -1.0;
+    }
+
+    /** Whether the server is on this machine or in this network. */
+    private static boolean near(Minecraft mc, NetHandlerPlayClient net) {
+        if (mc.isIntegratedServerRunning() || net.getNetworkManager().isLocalChannel()) {
+            return true;
+        }
+        SocketAddress a = net.getNetworkManager().getRemoteAddress();
+        if (!(a instanceof InetSocketAddress)) {
+            return false;
+        }
+        InetAddress host = ((InetSocketAddress) a).getAddress();
+        return host != null && (host.isLoopbackAddress() || host.isSiteLocalAddress() || host.isLinkLocalAddress());
     }
 }
