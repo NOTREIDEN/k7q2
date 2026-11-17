@@ -71,7 +71,7 @@ def main():
         thrown, broke, theirs = max(st["potions0"], 1), max(st["splashes0"], 1), max(st["splashes1"], 1)
         print(f"\n{name}")
         print(f"  {duels:.0f} duels, {st['ticks0']/20/duels:.1f} s each; the agent won {st['deaths1']:.0f}, lost {st['deaths0']:.0f}"
-              f" ({100*st['deaths1']/max(deaths,1):.0f} % of those that ended), {duels-deaths:.0f} ran out of time")
+              f" ({100*st['deaths1']/max(deaths,1):.0f} % of those that ended), {max(duels-deaths, 0):.0f} ran out of time")
         print(f"  agent: {st['potions0']/duels:.1f} potions a duel, thrown at {st['pot_health0']/thrown:.1f} health, "
               f"{st['heal_self0']/broke:.1f} of 8 healed each ({st['pot_offer0']/broke:.1f} offered, all 8 by {100*st['pot_perfect0']/broke:.0f} %), "
               f"{st['heal_gift0']/broke:.1f} given to the opponent")
