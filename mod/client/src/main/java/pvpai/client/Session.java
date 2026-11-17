@@ -21,7 +21,7 @@ import pvpai.core.Policy;
  */
 public final class Session {
     /** Seconds of Speed left at which the agents of training take a drink. */
-    private static final double DRINK_WINDOW_S = 15.0;
+    private static final double DRINK_WINDOW_S = 30.0;
     /** What stands in for a ping the player list does not say. */
     private static final double PING = 200.0, OTHER_PING = 60.0;
 

@@ -283,6 +283,37 @@ fn staying_slow_with_a_potion_of_speed_at_hand_costs_until_it_is_drunk() {
     assert_eq!(run(&mut e, 10, |_| IDLE), 0.0);
 }
 
+#[test]
+fn getting_potions_down_with_the_opponent_close_costs_and_far_does_not() {
+    let w = 0.3f32;
+    let mut paid = Vec::new();
+    for dist in [12.0, 2.5] {
+        let mut p = params();
+        p.refill_prob = 1.0;
+        p.w_inv_near = w;
+        p.start_dist_min = dist;
+        p.start_dist_max = dist;
+        let mut e = Env::new(Mode::SelfPlay, p, 4);
+        let apart = {
+            let (a, b) = (e.m.s.p[0].l.body.pos, e.m.s.p[1].l.body.pos);
+            (a[0] - b[0]).hypot(a[2] - b[2])
+        };
+        assert!(e.m.c[0].lp.rows.count(pvpsim::net::Item::Potion) > 0);
+        run(&mut e, 3, |_| IDLE);
+        let mut open = 0;
+        let mut got = 0.0;
+        for _ in 0..6 {
+            got += run(&mut e, 1, |_| with(9, 5));
+            open += e.m.c[0].lp.inv_open as i32;
+        }
+        paid.push((apart, got, open));
+    }
+    let (far, near) = (paid[0], paid[1]);
+    assert!(far.0 > 4.5 && near.0 < 4.5, "{paid:?}");
+    assert!(far.2 >= 1 && near.2 >= 1, "{paid:?}");
+    assert!((near.1 - far.1 + w * near.2 as f32).abs() < 1e-4, "{paid:?}");
+}
+
 fn lesson(mode: Mode, lessons: u32, seed: u64) -> Env {
     let mut p = Params::default();
     p.lesson_prob = 1.0;

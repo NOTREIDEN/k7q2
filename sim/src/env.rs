@@ -333,6 +333,13 @@ pub struct Params {
     /// Cost per tick of being without Speed while carrying a potion of it,
     /// in the hotbar or in the inventory.
     pub w_slow: f32,
+    /// Cost per tick of having the inventory open with the opponent closer
+    /// than `inv_near_dist` blocks (across the ground): potions are got
+    /// down when the opponent cannot be at them, not in the middle of a
+    /// trade, where the ticks of the screen are ticks without a hit, a
+    /// block or a sprint.
+    pub w_inv_near: f32,
+    pub inv_near_dist: f64,
     /// Share of the players that start with potions of Speed at hand whose
     /// potions of it are in the inventory instead, as most players carry
     /// them: to drink one it has to be brought down first.
@@ -443,6 +450,8 @@ impl Default for Params {
             w_gift: 0.0,
             w_hungry: 0.0,
             w_slow: 0.0,
+            w_inv_near: 0.0,
+            inv_near_dist: 4.5,
             drinks_stowed: 0.0,
         }
     }
@@ -567,6 +576,8 @@ impl Params {
             111 => self.w_pot_time = v as f32,
             112 => self.bot_runner = v,
             121 => self.bot_presser = v,
+            122 => self.w_inv_near = v as f32,
+            123 => self.inv_near_dist = v,
             113 => self.extreme_share = v,
             114 => self.w_shake = v as f32,
             115 => self.pot_strict_prob = v,
@@ -1551,6 +1562,12 @@ impl Env {
         }
         if p.w_slow != 0.0 && sp.speed_ticks <= 0 && (sp.drinks != 0 || sp.rows.count(Item::Drink) > 0) {
             r -= p.w_slow;
+        }
+        if p.w_inv_near != 0.0 && self.m.c[id].lp.inv_open {
+            let (a, b) = (&self.m.s.p[id].l.body.pos, &self.m.s.p[1 - id].l.body.pos);
+            if (a[0] - b[0]).hypot(a[2] - b[2]) < p.inv_near_dist {
+                r -= p.w_inv_near;
+            }
         }
         // A turn of the view that takes back the one before it.
         let view = [self.m.c[id].lp.l.yaw, self.m.c[id].lp.l.pitch];
