@@ -5,8 +5,8 @@ print how each one went.
     python cases.py latest.pt --level 3 --duels 128
 
 Each case fixes who starts hurt, how far apart the players start, who has
-pearls, whose Speed is running out and who is hungry; everything else is
-drawn as in training. A duel runs until a
+pearls, whose Speed is running out, who is hungry and who has potions in the
+inventory; everything else is drawn as in training. A duel runs until a
 player dies or the time is up."""
 import argparse
 
@@ -51,6 +51,22 @@ CASES += [
      dict(FULL, start_hurt=0, hunger_prob=1, start_food_min=6, start_food_max=6, start_dist_min=8, start_dist_max=12)),
     ("both too hungry to sprint, 3 blocks apart",
      dict(FULL, start_hurt=0, hunger_prob=1, start_food_min=6, start_food_max=6, start_dist_min=2.5, start_dist_max=4)),
+]
+# The inventory. Nobody has a healing potion at hand and both have ten in
+# the rows, or only the agent has (refill_who=1) and the opponent has none.
+STOCK = dict(FULL, potions_min=0, potions_max=0, refill_prob=1, inv_potions_min=10, inv_potions_max=10, start_hurt=0)
+CASES += [
+    ("no healing potion at hand and ten in the inventory for both, 10 blocks apart",
+     dict(STOCK, start_dist_min=8, start_dist_max=12)),
+    ("the same, 3 blocks apart",
+     dict(STOCK, start_dist_min=2.5, start_dist_max=4)),
+    ("agent at 8 health, none at hand and ten in the inventory, opponent without any 10 blocks away",
+     dict(STOCK, refill_who=1, start_hurt=1, hurt_who=1, start_health_min=8, start_health_max=8, start_dist_min=8, start_dist_max=12)),
+    ("the same with the opponent on top of it",
+     dict(STOCK, refill_who=1, start_hurt=1, hurt_who=1, start_health_min=8, start_health_max=8, start_dist_min=2.5, start_dist_max=4)),
+    ("agent without Speed, its potion of it in the inventory, opponent with Speed 10 blocks away",
+     dict(NONE, speed_who=1, potions_min=5, potions_max=5, drinks_min=0, drinks_max=0, refill_prob=1, refill_who=1,
+          inv_potions_min=0, inv_potions_max=0, inv_drinks_min=1, inv_drinks_max=1, start_dist_min=8, start_dist_max=12)),
 ]
 
 
@@ -114,6 +130,11 @@ def main():
                   f"Speed {100*st['speed_on0']/st['ticks0']:.0f} % of the time, able to sprint {100*st['fed0']/st['ticks0']:.0f} %")
             print(f"  bot:   {st['drinks1']/duels:.2f} drinks and {st['meals1']/duels:.2f} meals a duel, {st['sip_hit1']/max(st['sips1'],1):.2f} hits taken "
                   f"during one; Speed {100*st['speed_on1']/max(st['ticks1'],1):.0f} % of the time, able to sprint {100*st['fed1']/max(st['ticks1'],1):.0f} %")
+        if "refill_prob" in params:
+            for who, k in (("agent", "0"), ("bot:  ", "1")):
+                visits = max(st["inv_opens" + k], 1)
+                print(f"  {who} {st['refills' + k]/duels:.2f} potions a duel from the inventory in {st['inv_opens' + k]/duels:.2f} visits: "
+                      f"{st['refills' + k]/visits:.1f} a visit, {st['inv_ticks' + k]/visits:.1f} ticks each, {st['inv_hit' + k]/visits:.2f} hits taken meanwhile")
 
 
 if __name__ == "__main__":

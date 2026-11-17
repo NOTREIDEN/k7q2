@@ -5,8 +5,13 @@
 use crate::aabb::{dist, Aabb, V3, EYE_HEIGHT};
 use crate::living::Living;
 use crate::mth;
-use crate::net::{Bar, Item, Kind, ThrownEv, BLOCK_TICKS, C2S, S2C, SLOT_SWORD, STEAK_FOOD, STEAK_SATURATION, USE_TICKS};
+use crate::net::{
+    shift_click, Bar, Item, Kind, Rows, ThrownEv, BLOCK_TICKS, C2S, S2C, SLOT_SWORD, STEAK_FOOD, STEAK_SATURATION, USE_TICKS,
+};
 use crate::world::{RayHit, World};
+
+/// Added to a slot in `Input::inv`: shift-click it and shut the screen.
+pub const INV_SHUT: u8 = 64;
 
 /// Keys and mouse for one client tick.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
@@ -37,6 +42,14 @@ pub struct Input {
     /// A number key pressed on this tick, 1 to 9 (0: none): the hotbar slot
     /// to take in hand. The sword is on 1 and the pearls on 2.
     pub slot_key: u8,
+    /// The inventory screen. With the screen shut, anything but 0 opens
+    /// it (the inventory key). With it open: 0 shuts it, 1 leaves it open,
+    /// 9 to 44 shift-clicks that slot of the window, and 64 more than a
+    /// slot shift-clicks it and shuts the screen in the same tick. On every
+    /// tick the screen is open at some point, the tick it opens and the tick
+    /// it shuts too, the game takes no other key, no button and no mouse
+    /// movement, so everything else here is left out.
+    pub inv: u8,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -378,6 +391,11 @@ pub struct LocalPlayer {
     pub drinks: u16,
     pub bottles: u16,
     pub steak: u8,
+    /// The three rows of the inventory, whether its screen is open, and the
+    /// number of the last click in it (`Container.transactionID`).
+    pub rows: Rows,
+    pub inv_open: bool,
+    pub action: u16,
     /// The Speed effect as this client has it: its amplifier and the ticks
     /// left, counted down here and set again whenever the server says
     /// (-1: no effect), and whether particles show around this player.
@@ -439,6 +457,9 @@ impl LocalPlayer {
             drinks: 0,
             bottles: 0,
             steak: 0,
+            rows: Rows::default(),
+            inv_open: false,
+            action: 0,
             speed_amp: speed_amp,
             speed_ticks: if speed_amp >= 0 { crate::server::FOR_GOOD } else { -1 },
             fx: false,
@@ -568,6 +589,8 @@ pub struct TickOut {
     pub threw_potion: bool,
     /// Left clicks that were swallowed because the client was blocking.
     pub swallowed: u8,
+    /// A shift click in the inventory moved a stack: what it was.
+    pub moved: Option<Item>,
 }
 
 /// Ways a client can depart from the plain game. They stand for what some
@@ -914,24 +937,35 @@ impl Client {
                 lp.food = food;
                 lp.saturation = saturation;
             }
-            // handleSetSlot puts a new stack object into the hotbar.
+            // handleSetSlot puts a new stack object into the slot.
             S2C::SetSlot { slot, item, count } => {
+                let lp = &mut self.lp;
                 if slot < 9 {
-                    let lp = &mut self.lp;
                     lp.gens[slot as usize] = lp.gens[slot as usize].wrapping_add(1);
                     if slot != SLOT_SWORD {
                         let mut b = lp.bar();
                         b.put(slot, item, count);
                         lp.set_bar(b);
                     }
+                } else if slot < 36 {
+                    lp.rows.put(slot as usize - 9, item, count);
                 }
             }
             // handleWindowItems puts new stack objects into every slot.
-            S2C::WindowItems(b) => {
+            S2C::WindowItems(b, rows) => {
                 for g in self.lp.gens.iter_mut() {
                     *g = g.wrapping_add(1);
                 }
                 self.lp.set_bar(b);
+                self.lp.rows = rows;
+            }
+            // handleConfirmTransaction: a click the server did not take as
+            // the client said is answered, and the inventory it sends
+            // along puts things right.
+            S2C::Confirm { action, ok } => {
+                if !ok {
+                    out.push(C2S::Confirm { action });
+                }
             }
             // handleEntityStatus 9 -> EntityPlayer.onItemUseFinish, for the
             // stack this client has in use: the drink leaves a bottle, a
@@ -1035,12 +1069,54 @@ impl Client {
     pub fn tick(&mut self, world: &World, inp: &Input, cfg: &ClientCfg, out: &mut Vec<C2S>) -> TickOut {
         let mut t = TickOut::default();
 
+        // The inventory screen. `GuiInventory` lets the part of `runTick`
+        // that reads keys and buttons run, but the screen has taken every
+        // event before it, and opening the screen let every key go
+        // (`setIngameNotInFocus`), so a tick with the screen open is a tick
+        // with no key, no button and no mouse movement. The tick on which
+        // it shuts is one too: the key that shuts it is read by the screen.
+        let was_open = self.lp.inv_open;
+        let (click, shut) = match inp.inv {
+            _ if !was_open => (0, false),
+            0 => (0, true),
+            s @ 9..=44 => (s, false),
+            s @ 73..=108 => (s - INV_SHUT, true),
+            _ => (0, false),
+        };
+        let opens = !was_open && inp.inv != 0;
+        let idle = Input::default();
+        let inp = if was_open || opens { &idle } else { inp };
+
         if self.lp.right_click_delay > 0 {
             self.lp.right_click_delay -= 1;
         }
         // playerController.updateController: a slot taken in hand on the
         // previous tick is reported now, unless a click already did.
         self.lp.sync_slot(out);
+
+        // GuiScreen.handleInput, the mouse first and then the keys. A shift
+        // click is `PlayerControllerMP.windowClick`: the next number, the
+        // move made here at once, and both sent. The key that shuts the
+        // screen is `EntityPlayerSP.closeScreen`.
+        if click != 0 {
+            let lp = &mut self.lp;
+            lp.action = lp.action.wrapping_add(1);
+            let (mut bar, before) = (lp.bar(), lp.bar());
+            let said = shift_click(&mut bar, &mut lp.rows, click);
+            // A stack that moved is a new stack where it lands.
+            for k in 1..9u8 {
+                if bar.stack(k) != before.stack(k) {
+                    lp.gens[k as usize] = lp.gens[k as usize].wrapping_add(1);
+                }
+            }
+            lp.set_bar(bar);
+            out.push(C2S::Click { slot: click, said, action: lp.action });
+            t.moved = said.map(|s| s.0);
+        }
+        if shut {
+            out.push(C2S::CloseInv);
+            self.lp.inv_open = false;
+        }
 
         // Mouse movement accumulated since the previous tick.
         if inp.dx != 0 || inp.dy != 0 {
@@ -1057,6 +1133,12 @@ impl Client {
         // The number keys.
         if (1..=9).contains(&inp.slot_key) {
             lp.held = inp.slot_key - 1;
+        }
+        // The inventory key: C16, then the screen. What follows in this
+        // tick finds every key let go, so an item in use is let go of.
+        if opens {
+            out.push(C2S::OpenInv);
+            lp.inv_open = true;
         }
 
         // clickMouse. The button is released again inside the same tick, so

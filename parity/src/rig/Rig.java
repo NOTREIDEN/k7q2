@@ -17,6 +17,7 @@ import net.minecraft.client.Minecraft;
 import net.minecraft.client.entity.EntityOtherPlayerMP;
 import net.minecraft.client.entity.EntityPlayerSP;
 import net.minecraft.client.gui.GuiMainMenu;
+import net.minecraft.client.gui.inventory.GuiInventory;
 import net.minecraft.client.network.NetHandlerPlayClient;
 import net.minecraft.client.settings.GameSettings;
 import net.minecraft.client.settings.KeyBinding;
@@ -42,6 +43,10 @@ import net.minecraft.network.play.client.C08PacketPlayerBlockPlacement;
 import net.minecraft.network.play.client.C09PacketHeldItemChange;
 import net.minecraft.network.play.client.C0APacketAnimation;
 import net.minecraft.network.play.client.C0BPacketEntityAction;
+import net.minecraft.network.play.client.C0DPacketCloseWindow;
+import net.minecraft.network.play.client.C0EPacketClickWindow;
+import net.minecraft.network.play.client.C0FPacketConfirmTransaction;
+import net.minecraft.network.play.client.C16PacketClientStatus;
 import net.minecraft.network.play.server.S08PacketPlayerPosLook;
 import net.minecraft.network.play.server.S0EPacketSpawnObject;
 import net.minecraft.network.play.server.S1CPacketEntityMetadata;
@@ -99,6 +104,9 @@ public final class Rig {
     static final int SPEED_II = 8226;
     /** Steaks in the last hotbar slot. */
     static int steak = 0;
+    /** What the three rows of the inventory hold: slot of the window (9 to 35), kind (1 a splash
+        potion, 2 a potion to drink, 3 empty bottles) and how many. */
+    static final List<int[]> rows = new ArrayList<int[]>();
     /** How long the Speed of the start lasts, in ticks; below zero, for good and without particles. */
     static int speedTicks = -1;
     // The kit. With health on, hits cost health: no Resistance and no Saturation.
@@ -151,9 +159,12 @@ public final class Rig {
             if (line.isEmpty() || line.startsWith("#")) continue;
             String[] p = line.split("\\s+");
             if (p[0].equals("C")) {
-                // forward strafe jump sprint attack dx dy [use [hotbar key, 1 to 9]]
-                int[] in = new int[9];
-                for (int i = 0; i < 9 && 1 + i < p.length; i++) in[i] = Integer.parseInt(p[1 + i]);
+                // forward strafe jump sprint attack dx dy [use [hotbar key, 1 to 9 [inventory]]]
+                // The inventory: with it shut, anything but 0 opens it; with it open, 0 shuts
+                // it, 1 leaves it open, 9 to 44 shift-clicks that slot, and 64 more than a slot
+                // clicks it and shuts the screen. Nothing else is done on such a tick.
+                int[] in = new int[10];
+                for (int i = 0; i < 10 && 1 + i < p.length; i++) in[i] = Integer.parseInt(p[1 + i]);
                 inputs.add(in);
             } else if (p[0].equals("F")) {
                 int t = Integer.parseInt(p[1]);
@@ -184,6 +195,9 @@ public final class Rig {
                 drinks = Integer.parseInt(p[1]);
             } else if (p[0].equals("steak")) {
                 steak = Integer.parseInt(p[1]);
+            } else if (p[0].equals("row")) {
+                String kinds = "PDB";
+                rows.add(new int[] {Integer.parseInt(p[1]), 1 + kinds.indexOf(p[2]), p.length > 3 ? Integer.parseInt(p[3]) : 1});
             } else if (p[0].equals("speedticks")) {
                 speedTicks = Integer.parseInt(p[1]);
             } else if (p[0].equals("health")) {
@@ -302,6 +316,35 @@ public final class Rig {
                 return;
             }
             int[] in = inputs.get(ctick);
+            boolean open = mc.currentScreen instanceof GuiInventory;
+            if (open || in[9] != 0) {
+                // A tick with the inventory screen: every key is up, as the game leaves
+                // them when a screen opens, and whatever else the script asks is left out.
+                KeyBinding.unPressAllKeys();
+                useDown = false;
+                int did = in[9], slot = 0;
+                boolean shut = false;
+                if (open) {
+                    slot = in[9] >= 73 ? in[9] - 64 : in[9] >= 9 && in[9] <= 44 ? in[9] : 0;
+                    shut = in[9] == 0 || in[9] >= 73;
+                    if (slot != 0 && !clickable(mc.thePlayer, slot)) {
+                        slot = 0;
+                        did = shut ? 0 : 1;
+                    }
+                }
+                log("CI " + ctick + " " + in[0] + " " + in[1] + " " + in[2] + " " + in[3] + " " + in[4] + " " + in[5] + " " + in[6] + " " + in[7] + " " + in[8] + " " + did);
+                // The inventory key, read by the game later in this tick.
+                if (!open) KeyBinding.onTick(gs.keyBindInventory.getKeyCode());
+                // What GuiContainer.handleMouseClick does for a shift click.
+                if (slot != 0) mc.playerController.windowClick(mc.thePlayer.openContainer.windowId, slot, 0, 1, mc.thePlayer);
+                if (shut) {
+                    mc.thePlayer.closeScreen();
+                    if (mc.inGameHasFocus) mc.mouseHelper.ungrabMouseCursor();
+                    mc.inGameHasFocus = false;
+                }
+                inClientTick = true;
+                return;
+            }
             key(gs.keyBindForward, in[0] > 0);
             key(gs.keyBindBack, in[0] < 0);
             key(gs.keyBindLeft, in[1] > 0);
@@ -322,7 +365,7 @@ public final class Rig {
                 float f1 = f * f * f * 8.0F;
                 mc.thePlayer.setAngles((float) in[5] * f1, (float) in[6] * f1);
             }
-            log("CI " + ctick + " " + in[0] + " " + in[1] + " " + in[2] + " " + in[3] + " " + in[4] + " " + in[5] + " " + in[6] + " " + in[7] + " " + in[8]);
+            log("CI " + ctick + " " + in[0] + " " + in[1] + " " + in[2] + " " + in[3] + " " + in[4] + " " + in[5] + " " + in[6] + " " + in[7] + " " + in[8] + " 0");
             inClientTick = true;
             return;
         }
@@ -330,6 +373,46 @@ public final class Rig {
             out.close();
             Runtime.getRuntime().halt(0);
         }
+    }
+
+    /** A shift click the simulator knows: on a potion anywhere, on empty bottles in the
+        hotbar, or on a slot with nothing in it. Slots 9 to 35 are the rows, 37 to 44 the hotbar
+        after the sword. */
+    static boolean clickable(EntityPlayer p, int slot) {
+        if (slot < 9 || slot > 44 || slot == 36) return false;
+        ItemStack s = p.inventoryContainer.getSlot(slot).getStack();
+        return s == null || s.getItem() == Items.potionitem || (s.getItem() == Items.glass_bottle && slot > 36);
+    }
+
+    /** What a client says a shift click on this slot returns: a copy of the stack if it has
+        somewhere to go, nothing if not. */
+    static ItemStack honest(EntityPlayer p, int slot) {
+        ItemStack s = p.inventoryContainer.getSlot(slot).getStack();
+        if (s == null) return null;
+        int lo = slot < 36 ? 36 : 9, hi = slot < 36 ? 45 : 36;
+        for (int i = lo; i < hi; i++) {
+            ItemStack o = p.inventoryContainer.getSlot(i).getStack();
+            if (o == null) return s.copy();
+            if (s.isStackable() && o.getItem() == s.getItem() && o.stackSize < o.getMaxStackSize()) return s.copy();
+        }
+        return null;
+    }
+
+    /** The three rows, a number for each slot: 0 nothing, 1 a splash potion, 2 a potion to
+        drink, 2 + n a stack of n empty bottles. */
+    static String rows(EntityPlayer p) {
+        StringBuilder sb = new StringBuilder();
+        for (int i = 9; i < 36; i++) {
+            ItemStack s = p.inventory.mainInventory[i];
+            int v = 0;
+            if (s != null && s.stackSize > 0) {
+                if (s.getItem() == Items.potionitem) v = net.minecraft.item.ItemPotion.isSplash(s.getMetadata()) ? 1 : 2;
+                else if (s.getItem() == Items.glass_bottle) v = 2 + s.stackSize;
+                else v = 255;
+            }
+            sb.append(i > 9 ? "," : "").append(v);
+        }
+        return sb.toString();
     }
 
     static void key(KeyBinding k, boolean down) {
@@ -384,13 +467,15 @@ public final class Rig {
             + " sd=" + wear(p) + " held=" + p.inventory.currentItem
             + " cpi=" + get(Minecraft.getMinecraft().playerController, net.minecraft.client.multiplayer.PlayerControllerMP.class, "currentPlayerItem")
             + " pc=" + count(p) + " pots=" + pots(p) + " pe=" + clientPearls(Minecraft.getMinecraft())
-            + " hp=" + hf(p.getHealth()) + " sat=" + hf(p.getFoodStats().getSaturationLevel()) + more(p);
+            + " hp=" + hf(p.getHealth()) + " sat=" + hf(p.getFoodStats().getSaturationLevel()) + more(p)
+            + " open=" + (Minecraft.getMinecraft().currentScreen instanceof GuiInventory ? 1 : 0)
+            + " tid=" + get(p.inventoryContainer, net.minecraft.inventory.Container.class, "transactionID");
     }
 
     /** Pearls in the second hotbar slot. */
     static int count(EntityPlayer p) {
         ItemStack s = p.inventory.mainInventory[1];
-        return s == null ? 0 : s.stackSize;
+        return s == null || s.getItem() != Items.ender_pearl ? 0 : s.stackSize;
     }
 
     /** The hotbar slots that hold a potion, one bit each. */
@@ -418,7 +503,7 @@ public final class Rig {
         PotionEffect e = p.getActivePotionEffect(Potion.moveSpeed);
         return " dr=" + dr + " bt=" + bt + " fd=" + (f != null && f.getItem() == Items.cooked_beef ? f.stackSize : 0)
             + " iuc=" + p.getItemInUseCount() + " spt=" + (e == null ? -1 : e.getDuration()) + " spa=" + (e == null ? -1 : e.getAmplifier())
-            + " fx=" + p.getDataWatcher().getWatchableObjectInt(7);
+            + " fx=" + p.getDataWatcher().getWatchableObjectInt(7) + " rows=" + rows(p);
     }
 
     /** The pearls and potions in flight as this client has them. */
@@ -507,6 +592,8 @@ public final class Rig {
         "S1DPacketEntityEffect", "S1EPacketRemoveEntityEffect", "S06PacketUpdateHealth", "S0CPacketSpawnPlayer",
         "S13PacketDestroyEntities", "S27PacketExplosion",
         "S0EPacketSpawnObject", "S30PacketWindowItems", "S04PacketEntityEquipment",
+        "C0EPacketClickWindow", "C0DPacketCloseWindow", "C16PacketClientStatus", "C0FPacketConfirmTransaction",
+        "S32PacketConfirmTransaction",
     };
 
     static boolean wanted(Packet p) {
@@ -543,10 +630,10 @@ public final class Rig {
                         sb.append(b.getX()).append(',').append(b.getY()).append(',').append(b.getZ());
                     }
                     else if (v instanceof ItemStack[]) {
-                        // Only the hotbar matters here: slots 36 to 44 of the player's own window.
+                        // The three rows and the hotbar: slots 9 to 44 of the player's own window.
                         ItemStack[] a = (ItemStack[]) v;
-                        for (int i = 36; i < a.length && i < 45; i++) {
-                            sb.append(i > 36 ? "," : "");
+                        for (int i = 9; i < a.length && i < 45; i++) {
+                            sb.append(i > 9 ? "," : "");
                             if (a[i] == null) sb.append('-');
                             else sb.append(net.minecraft.item.Item.getIdFromItem(a[i].getItem())).append('/').append(a[i].getItemDamage()).append('/').append(a[i].stackSize);
                         }
@@ -657,6 +744,10 @@ public final class Rig {
         for (int i = 0; i < potions; i++) p.inventory.mainInventory[2 + i] = new ItemStack(Items.potionitem, 1, HEAL_II);
         for (int i = 0; i < drinks && 2 + potions + i < 9; i++) p.inventory.mainInventory[2 + potions + i] = new ItemStack(Items.potionitem, 1, SPEED_II);
         if (steak > 0) p.inventory.mainInventory[8] = new ItemStack(Items.cooked_beef, steak);
+        for (int[] r : rows) {
+            p.inventory.mainInventory[r[0]] = r[1] == 1 ? new ItemStack(Items.potionitem, 1, HEAL_II)
+                : r[1] == 2 ? new ItemStack(Items.potionitem, 1, SPEED_II) : new ItemStack(Items.glass_bottle, r[2]);
+        }
         p.inventory.currentItem = 0;
         p.setHealth(p.getMaxHealth());
     }
@@ -718,6 +809,7 @@ public final class Rig {
             + " lhp=" + hf((Float) get(p, EntityPlayerMP.class, "lastHealth"))
             + " lfood=" + get(p, EntityPlayerMP.class, "lastFoodLevel")
             + " wh=" + (((Boolean) get(p, EntityPlayerMP.class, "wasHungry")) ? 1 : 0) + more(p)
+            + " cc=" + (p.inventoryContainer.getCanCraft(p) ? 1 : 0)
             + net(p.playerNetServerHandler)
             + " ccx=" + p.chunkCoordX + " ccy=" + p.chunkCoordY + " ccz=" + p.chunkCoordZ + " atc=" + (p.addedToChunk ? 1 : 0)
             + tracker(p);
@@ -818,7 +910,27 @@ public final class Rig {
     static void fakeAct(String[] a) {
         Packet p;
         String k = a[2];
-        if (k.equals("POS")) {
+        // RCLICK is a click the server gets in the name of the real player.
+        EntityPlayerMP by = k.equals("RCLICK") ? real : fake;
+        if (k.equals("CLICK") || k.equals("RCLICK")) {
+            // F tick CLICK slot what number: a shift click on a slot of the own window, with
+            // what a client would say came of it (auto) or with the opposite (wrong).
+            int slot = Integer.parseInt(a[3]);
+            if (!clickable(by, slot)) return;
+            ItemStack said = honest(by, slot);
+            if (a[4].equals("wrong")) said = said == null ? new ItemStack(Items.potionitem, 1, HEAL_II) : null;
+            p = new C0EPacketClickWindow(0, slot, 0, 1, said, Short.parseShort(a[5]));
+            log("SP " + stick + " " + who(by) + " " + dump(p));
+            by.playerNetServerHandler.processClickWindow((C0EPacketClickWindow) p);
+            return;
+        }
+        if (k.equals("OPEN")) {
+            p = new C16PacketClientStatus(C16PacketClientStatus.EnumState.OPEN_INVENTORY_ACHIEVEMENT);
+        } else if (k.equals("CLOSE")) {
+            p = new C0DPacketCloseWindow(0);
+        } else if (k.equals("CONFIRM")) {
+            p = new C0FPacketConfirmTransaction(0, Short.parseShort(a[3]), true);
+        } else if (k.equals("POS")) {
             p = new C03PacketPlayer.C06PacketPlayerPosLook(Double.parseDouble(a[3]), Double.parseDouble(a[4]), Double.parseDouble(a[5]),
                 Float.parseFloat(a[6]), Float.parseFloat(a[7]), !a[8].equals("0"));
         } else if (k.equals("FRONT")) {
@@ -867,6 +979,9 @@ public final class Rig {
         else if (p instanceof C08PacketPlayerBlockPlacement) fakeNet.processPlayerBlockPlacement((C08PacketPlayerBlockPlacement) p);
         else if (p instanceof C07PacketPlayerDigging) fakeNet.processPlayerDigging((C07PacketPlayerDigging) p);
         else if (p instanceof C09PacketHeldItemChange) fakeNet.processHeldItemChange((C09PacketHeldItemChange) p);
+        else if (p instanceof C16PacketClientStatus) fakeNet.processClientStatus((C16PacketClientStatus) p);
+        else if (p instanceof C0DPacketCloseWindow) fakeNet.processCloseWindow((C0DPacketCloseWindow) p);
+        else if (p instanceof C0FPacketConfirmTransaction) fakeNet.processConfirmTransaction((C0FPacketConfirmTransaction) p);
         else fakeNet.processUseEntity((C02PacketUseEntity) p);
     }
 

@@ -50,14 +50,14 @@ class DirBackend:
         os.replace(tmp, os.path.join(self.path, "round.txt"))
 
 
-def pack(policy, vs, samples, iters, round_id=0, score=0.0, generation=0.0, fresh=False, origin=0.0):
+def pack(policy, vs, samples, iters, round_id=0, score=0.0, generation=0.0, fresh=False, origin=0.0, marks=()):
     """What a member publishes. It is also a checkpoint that `load_policy`
     reads, with the weights stored in half precision."""
     sd = {k: v.detach().to(torch.float16) for k, v in policy.state_dict().items()}
     return {"policy": sd, "vs": (vs.var, vs.count), "samples": samples, "iters": iters, "time": time.time(),
             "round": round_id, "origin": origin, "score": score, "generation": generation, "fresh": fresh,
             "obs_dim": policy.enc[0].in_features, "priv_dim": policy.penc[0].in_features,
-            "act_dims": list(policy.act_dims)}
+            "act_dims": list(policy.act_dims), "marks": list(marks)}
 
 
 class Syncer:
@@ -93,6 +93,8 @@ class Syncer:
         self.round = self.clock_round()
         self.first_round = self.round
         self.generation, self.fresh = 0.0, False
+        # The one-time restarts the weights have had (see `model.RESTART_CHOICES`).
+        self.marks = []
         self.adopted_score = 0.0
         self.seen = {}
         self.tmp = tempfile.mkdtemp(prefix="pvpsync")
@@ -108,7 +110,7 @@ class Syncer:
     def publish(self, policy, vs, samples, iters, score=0.0):
         """Write this member's weights without waiting for anybody."""
         own_path = os.path.join(self.tmp, "own.pt")
-        torch.save(pack(policy, vs, samples, iters, self.round, score, self.generation, self.fresh, self.origin),
+        torch.save(pack(policy, vs, samples, iters, self.round, score, self.generation, self.fresh, self.origin, self.marks),
                    own_path)
         self.b.put(self.name(self.id), own_path)
 
@@ -153,6 +155,8 @@ class Syncer:
             src = src or [max(cks, key=lambda c: c.get("time", 0))]
         self._load_mean(policy, vs, src)
         self.generation = max(c.get("generation", 0.0) for c in src)
+        # A restart every one of them has had is not made again.
+        self.marks = sorted(set.intersection(*[set(c.get("marks", ())) for c in src]))
         return samples, iters, True
 
     @staticmethod

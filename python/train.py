@@ -15,7 +15,7 @@ import numpy as np
 import torch
 
 from pvpai.env import BOT, SELF_PLAY, VecEnv
-from pvpai.model import Policy, load_policy
+from pvpai.model import Policy, load_policy, restart_choices
 from pvpai.ppo import RunningScale, Stream, ppo_update
 
 
@@ -106,8 +106,10 @@ def main():
             remote = group
             print(f"start: {'continuing from the weights of the last run' if loaded else 'no earlier weights'}, "
                   f"{total_samples/1e6:.1f}M samples so far", flush=True)
+    marks = list(group.marks) if loaded else []
     if args.init and not loaded:
         old, ck, grown = load_policy(args.init, (any_env.obs_dim, any_env.priv_dim, any_env.act_dims))
+        marks = list(ck.get("marks", []))
         policy.load_state_dict(old.state_dict())
         if not grown and "opt" in ck:
             opt.load_state_dict(ck["opt"])
@@ -116,6 +118,15 @@ def main():
         # the checkpoint's count plus what is trained from here on.
         total_samples = ck["samples"] // (max(args.workers, 1) * max(args.machines, 1))
         iters = ck["iters"]
+
+    # Choices that an earlier run let die start over, once: the weights say
+    # which of these restarts they have had.
+    fresh = restart_choices(policy, marks)
+    if fresh and args.worker_id == 0:
+        print("start: choices started over:", ", ".join(fresh), flush=True)
+    for sy in (local, remote):
+        if sy is not None:
+            sy.marks = list(marks)
 
     cfg = dict(gamma=args.gamma, lam=0.95, clip=0.2, epochs=args.epochs, minibatches=args.minibatches, vf_coef=0.5,
                ent_coef=args.ent_coef, max_grad_norm=0.5)
@@ -141,7 +152,7 @@ def main():
         # The count is that of everybody training this network, as far as this process knows.
         everybody = remote.total_samples(machine_samples()) if remote is not None else machine_samples()
         torch.save({"policy": policy.state_dict(), "opt": opt.state_dict(), "vs": (vs.var, vs.count),
-                    "samples": everybody, "iters": iters, "args": vars(args),
+                    "samples": everybody, "iters": iters, "args": vars(args), "marks": list(marks),
                     "obs_dim": any_env.obs_dim, "priv_dim": any_env.priv_dim,
                     "act_dims": any_env.act_dims}, path)
 
@@ -280,6 +291,13 @@ def main():
                         speed_frac=st["speed_on0"] / st["ticks0"],
                         opp_speed_frac=st["speed_on1"] / max(st["ticks1"], 1.0),
                         fed_frac=st["fed0"] / st["ticks0"],
+                        # The inventory: potions got down from its rows per duel by each
+                        # side, per visit, and the hits taken per visit.
+                        refills_per_duel=st["refills0"] / st["episodes"],
+                        opp_refills_per_duel=st["refills1"] / st["episodes"],
+                        refills_per_visit=st["refills0"] / max(st["inv_opens0"], 1.0),
+                        inv_ticks_per_visit=st["inv_ticks0"] / max(st["inv_opens0"], 1.0),
+                        inv_hits_taken=st["inv_hit0"] / max(st["inv_opens0"], 1.0),
                     )
             window.clear()
         log.write(json.dumps(row) + "\n")
@@ -306,6 +324,9 @@ def main():
                   f"eat {b.get('meals_per_duel', 0):.2f}/{b.get('opp_meals_per_duel', 0):.2f} "
                   f"done {b.get('sip_done', 0):.2f} sip-hit {b.get('sip_hits_taken', 0):.2f} "
                   f"speed {b.get('speed_frac', 0):.2f}/{b.get('opp_speed_frac', 0):.2f} fed {b.get('fed_frac', 0):.2f} "
+                  f"refill {b.get('refills_per_duel', 0):.2f}/{b.get('opp_refills_per_duel', 0):.2f} "
+                  f"visit {b.get('refills_per_visit', 0):.1f} in {b.get('inv_ticks_per_visit', 0):.1f} "
+                  f"inv-hit {b.get('inv_hits_taken', 0):.2f} "
                   f"| self: hit/min {s.get('hits_per_min', 0):5.1f} combo {s.get('max_combo', 0):.1f} "
                   f"aim {s.get('aim_err_deg', 0):5.1f} pot {s.get('potions_per_min', 0):.1f} "
                   f"heal {s.get('potion_heal', 0):.1f}", flush=True)

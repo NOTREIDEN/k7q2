@@ -7,7 +7,8 @@ use crate::aabb::{dist_sq, Aabb, V3, EYE_HEIGHT};
 use crate::living::Living;
 use crate::mth::{self, JavaRandom, Rng};
 use crate::net::{
-    Bar, Item, Kind, ThrownEv, BLOCK_TICKS, C2S, DRINK_AMP, DRINK_TICKS, S2C, SLOT_SWORD, STEAK_FOOD, STEAK_SATURATION, USE_TICKS,
+    shift_click, Bar, Item, Kind, Rows, ThrownEv, BLOCK_TICKS, C2S, DRINK_AMP, DRINK_TICKS, S2C, SLOT_SWORD, STEAK_FOOD,
+    STEAK_SATURATION, USE_TICKS,
 };
 use crate::world::{RayHit, World};
 use std::collections::VecDeque;
@@ -400,10 +401,14 @@ pub struct ServerPlayer {
     /// until the drink or the meal is finished.
     pub use_slot: u8,
     pub use_count: i32,
-    /// The hotbar slots whose stack is not what the player was last sent:
-    /// a sword that lost durability, the bottle a drink left, a steak less.
-    /// They are sent on the next tick.
-    pub dirty: u16,
+    /// The slots whose stack is not what the player was last sent: a sword
+    /// that lost durability, the bottle a drink left, a steak less. They
+    /// are sent on the next tick. Bits 0 to 8 are the hotbar, 9 to 35 the
+    /// rows above it.
+    pub dirty: u64,
+    /// The stack in use was moved by a click in the inventory, so it is no
+    /// longer the stack in hand.
+    pub use_moved: bool,
     /// Stands for a client that blocks around every hit it takes, without
     /// slowing down or giving up its own hits: the server always has it
     /// blocking.
@@ -430,6 +435,15 @@ pub struct ServerPlayer {
     pub drinks: u16,
     pub bottles: u16,
     pub steak: u8,
+    /// The three rows of the inventory. `can_click` is false from a click
+    /// the server did not take as the client said until the client has
+    /// answered (`Container.getCanCraft`); `refused` is the number of that
+    /// click. `clicks_done` counts the clicks that moved a stack since the
+    /// caller last cleared it.
+    pub rows: Rows,
+    pub can_click: bool,
+    pub refused: u16,
+    pub clicks_done: u32,
     /// Ticks of Speed left (0: none; its amplifier is in the attributes)
     /// and whether the effect shows particles.
     pub speed_ticks: i32,
@@ -494,6 +508,7 @@ impl ServerPlayer {
             use_slot: SLOT_SWORD,
             use_count: 0,
             dirty: 0,
+            use_moved: false,
             autoblock: false,
             damage_taken: 0.0,
             health_lost: 0.0,
@@ -508,6 +523,10 @@ impl ServerPlayer {
             drinks: 0,
             bottles: 0,
             steak: 0,
+            rows: Rows::default(),
+            can_click: true,
+            refused: 0,
+            clicks_done: 0,
             speed_ticks: if speed_amp >= 0 { FOR_GOOD } else { 0 },
             speed_shown: false,
             fx: false,
@@ -560,14 +579,18 @@ impl ServerPlayer {
             self.using_item = u;
             self.meta_dirty = true;
         }
+        if !u {
+            self.use_moved = false;
+        }
     }
 
     /// `setItemInUse(stack, duration)` for the stack in hand: nothing
     /// changes when that very stack is in use already.
     fn start_use(&mut self, ticks: i32) {
-        if !(self.using_item && self.use_slot == self.held && self.use_count > 0) {
+        if !(self.using_item && self.use_slot == self.held && self.use_count > 0 && !self.use_moved) {
             self.use_slot = self.held;
             self.use_count = ticks;
+            self.use_moved = false;
         }
         self.set_using(true);
     }
@@ -790,6 +813,60 @@ impl Server {
                     self.p[from].held = slot;
                 }
             }
+            // processClientStatus OPEN_INVENTORY_ACHIEVEMENT counts an
+            // achievement, and processCloseWindow on the player's own
+            // window drops what is on the cursor, which is nothing.
+            C2S::OpenInv | C2S::CloseInv => {}
+            C2S::Click { slot, said, action } => self.click(from, slot, said, action, out),
+            // processConfirmTransaction
+            C2S::Confirm { action } => {
+                let p = &mut self.p[from];
+                if !p.can_click && p.refused == action {
+                    p.can_click = true;
+                }
+            }
+        }
+    }
+
+    /// `processClickWindow` for a shift click. The move is made, and if it
+    /// came out as the client said it is confirmed and the server's copy
+    /// of the inventory brought up to date without sending anything, which
+    /// loses whatever was about to be sent again. If not, the client is
+    /// told so and sent the whole inventory, and no click counts until it
+    /// has answered.
+    fn click(&mut self, i: usize, slot: u8, said: Option<(Item, u8)>, action: u16, out: &mut Outbox) {
+        let p = &mut self.p[i];
+        if !p.can_click {
+            return;
+        }
+        let (mut bar, before, rows) = (p.bar(), p.bar(), p.rows);
+        let got = shift_click(&mut bar, &mut p.rows, slot);
+        p.set_bar(bar);
+        if got.is_some() {
+            p.clicks_done += 1;
+            if p.using_item && bar.stack(p.use_slot) != before.stack(p.use_slot) {
+                p.use_moved = true;
+            }
+        }
+        if got == said {
+            out.push((i, S2C::Confirm { action, ok: true }));
+            p.dirty = 0;
+        } else {
+            for k in 1..9u8 {
+                if bar.stack(k) != before.stack(k) {
+                    p.dirty |= 1 << k;
+                }
+            }
+            for k in 0..27 {
+                if p.rows.0[k] != rows.0[k] {
+                    p.dirty |= 1 << (9 + k);
+                }
+            }
+            p.refused = action;
+            p.can_click = false;
+            out.push((i, S2C::Confirm { action, ok: false }));
+            out.push((i, S2C::WindowItems(p.bar(), p.rows)));
+            out.push((i, S2C::Cursor));
         }
     }
 
@@ -828,7 +905,7 @@ impl Server {
                 if self.p[i].food.level < 20 {
                     self.p[i].start_use(USE_TICKS);
                 } else if !self.p[i].using_item {
-                    out.push((i, S2C::WindowItems(self.p[i].bar())));
+                    out.push((i, S2C::WindowItems(self.p[i].bar(), self.p[i].rows)));
                     out.push((i, S2C::Cursor));
                 }
             }
@@ -836,7 +913,7 @@ impl Server {
                 if self.cfg.pearl_cooldown > 0 && self.p[i].pearl_wait > 0 {
                     // The plugin cancels the click and sends the inventory
                     // again, so that the client gets its pearl back.
-                    out.push((i, S2C::WindowItems(self.p[i].bar())));
+                    out.push((i, S2C::WindowItems(self.p[i].bar(), self.p[i].rows)));
                     out.push((i, S2C::Cursor));
                     return;
                 }
@@ -849,7 +926,7 @@ impl Server {
                 // sent, unless the server still has the player using an
                 // item.
                 if !self.p[i].using_item {
-                    out.push((i, S2C::WindowItems(self.p[i].bar())));
+                    out.push((i, S2C::WindowItems(self.p[i].bar(), self.p[i].rows)));
                     out.push((i, S2C::Cursor));
                 }
             }
@@ -860,7 +937,7 @@ impl Server {
                 self.potion_throws[i] += 1;
                 self.spawn_thrown(i, Kind::Potion, rng, out);
                 if !self.p[i].using_item {
-                    out.push((i, S2C::WindowItems(self.p[i].bar())));
+                    out.push((i, S2C::WindowItems(self.p[i].bar(), self.p[i].rows)));
                     out.push((i, S2C::Cursor));
                 }
             }
@@ -1255,7 +1332,7 @@ impl Server {
         // EntityPlayer.onUpdate: an item is in use only while it is the one
         // in hand, and a drink or a meal is finished when its time is up.
         if self.p[i].using_item {
-            if self.p[i].held == self.p[i].use_slot {
+            if self.p[i].held == self.p[i].use_slot && !self.p[i].use_moved {
                 self.p[i].use_count -= 1;
                 if self.p[i].use_count == 0 {
                     self.finish_use(i, out);
@@ -1656,7 +1733,16 @@ impl Server {
             if p.hurt_resistant_time > 0 {
                 p.hurt_resistant_time -= 1;
             }
-            // openContainer.detectAndSendChanges
+            // openContainer.detectAndSendChanges, in the order of the
+            // window's slots: the rows, then the hotbar.
+            let mut rows = p.dirty >> 9;
+            while rows != 0 {
+                let k = rows.trailing_zeros() as usize;
+                rows &= rows - 1;
+                let (item, n) = p.rows.stack(k);
+                out.push((i, S2C::SetSlot { slot: 9 + k as u8, item, count: n as u8 }));
+            }
+            p.dirty &= 0x1ff;
             while p.dirty != 0 {
                 let slot = p.dirty.trailing_zeros() as u8;
                 p.dirty &= p.dirty - 1;

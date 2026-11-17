@@ -22,12 +22,14 @@ fn traces() -> Vec<String> {
 #[test]
 fn the_real_game_is_reproduced_bit_for_bit() {
     let files = traces();
-    assert!(files.len() >= 47, "expected the recordings in tests/traces, found {}", files.len());
+    assert!(files.len() >= 51, "expected the recordings in tests/traces, found {}", files.len());
     let (mut ticks, mut hits, mut sprint_hits, mut crits, mut attacks, mut teleports, mut kb) = (0, 0, 0, 0, 0, 0, 0);
     let (mut blocked, mut right_clicks, mut lost, mut silent, mut swords) = (0, 0, 0, 0, 0);
     let (mut thrown, mut landed, mut on_player, mut slots, mut bare, mut seen, mut flying, mut outside) = (0, 0, 0, 0, 0, 0, 0, 0);
     let (mut potions, mut broken, mut direct, mut both, mut healed, mut health_lost) = (0, 0, 0, 0, 0, 0);
     let (mut drinks, mut steak, mut bottle) = (0, 0, 0);
+    let (mut opened, mut inv_ticks, mut let_go, mut clicks, mut moved, mut answered) = (0, 0, 0, 0, 0, 0);
+    let (mut taken, mut put_away, mut nothing, mut refused, mut unseen, mut in_use) = (0, 0, 0, 0, 0, 0);
     for f in &files {
         let r = replay(&read_trace(f).unwrap(), &Options::default()).unwrap_or_else(|e| panic!("{f}: {e}"));
         assert!(r.identical(), "{f}\n{}", r.describe());
@@ -60,6 +62,18 @@ fn the_real_game_is_reproduced_bit_for_bit() {
         drinks += r.server.get("drinks begun");
         steak += r.server.get("clicks with steak");
         bottle += r.server.get("clicks with a bottle");
+        opened += r.client.get("inventories opened");
+        inv_ticks += r.client.get("ticks with the inventory open");
+        let_go += r.client.get("uses ended by the inventory");
+        clicks += r.client.get("inventory clicks");
+        moved += r.client.get("clicks that moved a stack");
+        answered += r.client.get("refused clicks answered");
+        taken += r.server.get("potions taken from the rows");
+        put_away += r.server.get("stacks put away");
+        nothing += r.server.get("clicks that moved nothing");
+        refused += r.server.get("clicks refused");
+        unseen += r.server.get("clicks not looked at");
+        in_use += r.server.get("clicks on the item in use");
     }
     // The recordings have to keep covering what a duel is made of.
     assert!(ticks > 15000, "ticks {ticks}");
@@ -90,6 +104,16 @@ fn the_real_game_is_reproduced_bit_for_bit() {
     // Potions of Speed drunk and steak eaten, to the end and cut short, and
     // right clicks with the bottle a drink leaves.
     assert!(drinks >= 15 && steak > 150 && bottle > 60, "drinks begun {drinks}, clicks with steak {steak}, with a bottle {bottle}");
+    // The inventory: its screen opened in the middle of a fight, of a block,
+    // a drink and a meal, the ticks it stays open, potions shift-clicked
+    // down from its rows and bottles put away by both players, clicks that
+    // find nothing to move, clicks the server refuses (and the client's
+    // answer to them), clicks it does not look at until that answer has
+    // come, and clicks on the item in use.
+    assert!(opened >= 90 && inv_ticks > 600 && let_go >= 25, "inventories opened {opened}, ticks open {inv_ticks}, uses ended {let_go}");
+    assert!(clicks > 150 && moved > 80 && answered >= 10, "clicks {clicks}, that moved a stack {moved}, refusals answered {answered}");
+    assert!(taken > 140 && put_away > 80 && nothing > 180, "potions taken {taken}, stacks put away {put_away}, clicks on nothing {nothing}");
+    assert!(refused > 50 && unseen >= 20 && in_use >= 3, "clicks refused {refused}, not looked at {unseen}, on the item in use {in_use}");
 }
 
 #[test]

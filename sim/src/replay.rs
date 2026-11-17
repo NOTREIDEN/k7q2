@@ -11,7 +11,7 @@
 use crate::aabb::Aabb;
 use crate::client::{Client, ClientCfg, Input};
 use crate::mth::{JavaRandom, Rng};
-use crate::net::{Bar, Item, Kind, ThrownEv, C2S, S2C, SLOT_SWORD};
+use crate::net::{Bar, Item, Kind, Rows, ThrownEv, C2S, S2C, SLOT_SWORD};
 use crate::server::{chunk_of, feather_points, prot_points, Food, KbProfile, Server, ServerCfg, ServerPlayer, MAX_HEALTH};
 use crate::world::World;
 use std::collections::HashMap;
@@ -108,6 +108,31 @@ fn bar_of(hotbar: &str) -> Bar {
     b
 }
 
+/// The three rows above the hotbar, as the rig writes them in a state
+/// line: for each slot what `Rows` holds for it.
+fn rows_of(codes: &str) -> Rows {
+    let mut r = Rows::default();
+    for (k, e) in codes.split(',').enumerate().take(27) {
+        r.0[k] = e.parse().unwrap();
+    }
+    r
+}
+
+/// The whole of the player's own window as an S30 is written: the nine
+/// stacks of the hotbar, or the three rows and then the hotbar.
+fn window_of(stacks: &str) -> (Bar, Rows) {
+    let all: Vec<&str> = stacks.split(',').collect();
+    if all.len() < 36 {
+        return (bar_of(stacks), Rows::default());
+    }
+    let mut r = Rows::default();
+    for k in 0..27 {
+        let (item, n) = stack(all[k]);
+        r.put(k, item, n as u8);
+    }
+    (bar_of(&all[27..36].join(",")), r)
+}
+
 /// The stack a client says it has in hand.
 fn said(s: &str) -> (Item, u8) {
     match stack(s) {
@@ -146,7 +171,8 @@ fn s2c(l: &Line, at: usize, own_id: i64, pearls: &mut PearlIds) -> Option<S2C> {
         if l.i("windowId") != 0 {
             return None;
         }
-        return Some(S2C::WindowItems(bar_of(l.s("itemStacks"))));
+        let (bar, rows) = window_of(l.s("itemStacks"));
+        return Some(S2C::WindowItems(bar, rows));
     }
     if class == "S04PacketEntityEquipment" {
         if id("entityID") || l.i("equipmentSlot") != 0 {
@@ -243,9 +269,20 @@ fn s2c(l: &Line, at: usize, own_id: i64, pearls: &mut PearlIds) -> Option<S2C> {
                 let (item, n) = stack(l.s("item"));
                 Some(S2C::SetSlot { slot: (k - 36) as u8, item, count: n as u8 })
             }
+            // The three rows above the hotbar.
+            (0, k @ 9..=35) => {
+                let (item, n) = stack(l.s("item"));
+                Some(S2C::SetSlot { slot: k as u8, item, count: n as u8 })
+            }
             (-1, _) => Some(S2C::Cursor),
             _ => None,
         };
+    }
+    if class == "S32PacketConfirmTransaction" {
+        if l.i("windowId") != 0 {
+            return None;
+        }
+        return Some(S2C::Confirm { action: l.i("actionNumber") as u16, ok: l.b("field_148893_c") });
     }
     if class == "S08PacketPlayerPosLook" {
         assert!(l.s("field_179835_f") == "[]", "a relative teleport is not modelled");
@@ -328,6 +365,17 @@ fn c2s(l: &Line, at: usize) -> Option<C2S> {
         // Starting and giving up on breaking a block is not modelled.
         "C07PacketPlayerDigging" => if l.s("status") == "RELEASE_USE_ITEM" { Some(C2S::ReleaseUse) } else { None },
         "C09PacketHeldItemChange" => Some(C2S::HeldItem(l.i("slotId") as u8)),
+        "C16PacketClientStatus" => if l.s("status") == "OPEN_INVENTORY_ACHIEVEMENT" { Some(C2S::OpenInv) } else { None },
+        "C0EPacketClickWindow" => {
+            assert!(l.i("windowId") == 0 && l.i("mode") == 1 && l.i("usedButton") == 0, "a click the simulator does not know");
+            let said = match stack(l.s("clickedItem")) {
+                (Item::Empty, _) => None,
+                (item, n) => Some((item, n as u8)),
+            };
+            Some(C2S::Click { slot: l.i("slotId") as u8, said, action: l.i("actionNumber") as u16 })
+        }
+        "C0DPacketCloseWindow" => Some(C2S::CloseInv),
+        "C0FPacketConfirmTransaction" => Some(C2S::Confirm { action: l.i("uid") as u16 }),
         "C0BPacketEntityAction" => match l.s("action") {
             "START_SPRINTING" => Some(C2S::Sprint(true)),
             "STOP_SPRINTING" => Some(C2S::Sprint(false)),
@@ -474,6 +522,11 @@ fn replay_client(lines: &[Line], world: &World, speed: i8, sens: f32, o: &Option
                 lp.speed_amp = l.i("spa") as i8;
                 lp.fx = l.i("fx") != 0;
             }
+            if l.has("rows") {
+                lp.rows = rows_of(l.s("rows"));
+                lp.inv_open = l.b("open");
+                lp.action = l.i("tid") as u16;
+            }
         }
         if l.has("hp") {
             lp.health = l.f("hp");
@@ -553,6 +606,9 @@ fn replay_client(lines: &[Line], world: &World, speed: i8, sens: f32, o: &Option
             "CS" => {
                 if let Some(p) = c2s(l, 1) {
                     rep.count("packets sent", 1);
+                    if let C2S::Confirm { .. } = p {
+                        rep.count("refused clicks answered", 1);
+                    }
                     sent.push(p);
                 }
             }
@@ -571,8 +627,9 @@ fn replay_client(lines: &[Line], world: &World, speed: i8, sens: f32, o: &Option
                     use_item: w.len() > 8 && n(8) != 0,
                     use_again: w.len() > 8 && n(8) == 2,
                     slot_key: if w.len() > 9 { n(9) as u8 } else { 0 },
+                    inv: if w.len() > 10 { n(10) as u8 } else { 0 },
                 };
-                let was_using = c.lp.using_item;
+                let (was_using, was_open) = (c.lp.using_item, c.lp.inv_open);
                 let t = c.tick(world, &inp, &cfg, &mut out);
                 rep.count("clicks", inp.attack as usize);
                 rep.count("ticks on target", t.pick.entity as usize);
@@ -585,7 +642,9 @@ fn replay_client(lines: &[Line], world: &World, speed: i8, sens: f32, o: &Option
                 rep.count("clicks lost to a block", t.swallowed as usize);
                 // A block that ended without the button being let go: the
                 // server was not told.
-                rep.count("blocks dropped silently", (was_using && !c.lp.using_item && inp.use_item) as usize);
+                rep.count("blocks dropped silently", (was_using && !c.lp.using_item && inp.use_item && inp.inv == 0 && !was_open) as usize);
+                rep.count("ticks with the inventory open", (inp.inv != 0 || was_open) as usize);
+                rep.count("uses ended by the inventory", (was_using && !c.lp.using_item && inp.inv != 0 && !was_open) as usize);
                 // Gather what the real client sent and its state after the tick.
                 let mut state = None;
                 while i < lines.len() {
@@ -599,6 +658,11 @@ fn replay_client(lines: &[Line], world: &World, speed: i8, sens: f32, o: &Option
                             if let C2S::HeldItem(_) = p {
                                 rep.count("slot changes", 1);
                             }
+                            if let C2S::Click { said, .. } = p {
+                                rep.count("inventory clicks", 1);
+                                rep.count("clicks that moved a stack", said.is_some() as usize);
+                            }
+                            rep.count("inventories opened", (p == C2S::OpenInv) as usize);
                             sent.push(p);
                         }
                     } else if m.tag == "CT" {
@@ -673,6 +737,14 @@ fn replay_client(lines: &[Line], world: &World, speed: i8, sens: f32, o: &Option
                         ok &= fi("effect particles", lp.fx as i64, (st.i("fx") != 0) as i64, &mut rep);
                         ok &= fi("food", lp.food as i64, st.i("food"), &mut rep);
                         ok &= fd("saturation", lp.saturation as f64, st.f("sat") as f64, &mut rep);
+                    }
+                    if st.has("rows") {
+                        let want = rows_of(st.s("rows"));
+                        for k in 0..27 {
+                            ok &= fi("inventory rows", lp.rows.0[k] as i64, want.0[k] as i64, &mut rep);
+                        }
+                        ok &= fi("inventory open", lp.inv_open as i64, st.i("open"), &mut rep);
+                        ok &= fi("click number", lp.action as i64, st.i("tid"), &mut rep);
                     }
                     // The pearls and potions in flight, as the game client
                     // has them.
@@ -777,6 +849,7 @@ fn about(p: &S2C) -> u8 {
     match p {
         S2C::Velocity { own, .. } | S2C::Hurt { own } | S2C::Meta { own, .. } | S2C::Props { own, .. } => !*own as u8,
         S2C::PosLook { .. } | S2C::SetSlot { .. } | S2C::WindowItems { .. } | S2C::Cursor | S2C::Destroy { .. } | S2C::Health { .. } => 0,
+        S2C::Confirm { .. } => 0,
         S2C::UseDone | S2C::Effect { .. } | S2C::EffectEnd => 0,
         S2C::Thrown { .. } => 2,
         _ => 1,
@@ -823,6 +896,9 @@ fn load_server(p: &mut ServerPlayer, l: &Line) {
             p.speed_ticks = (l.i("spt") as i32).max(0);
             p.fx = l.i("fx") != 0;
             p.speed_shown = p.fx;
+        }
+        if l.has("rows") {
+            p.rows = rows_of(l.s("rows"));
         }
         // The wear is recorded for the stack in hand only.
         if p.held == SLOT_SWORD && l.i("sd") >= 0 {
@@ -1147,6 +1223,13 @@ fn replay_server(lines: &[Line], world: &World, speed: i8, o: &Options, wear: f3
                         ok &= fi("ticks of speed left", if p.speed_ticks > 0 { p.speed_ticks as i64 } else { -1 }, st.i("spt"), &mut rep);
                         ok &= fi("effect particles", p.fx as i64, (st.i("fx") != 0) as i64, &mut rep);
                     }
+                    if st.has("rows") {
+                        let want = rows_of(st.s("rows"));
+                        for k in 0..27 {
+                            ok &= fi("inventory rows", p.rows.0[k] as i64, want.0[k] as i64, &mut rep);
+                        }
+                        ok &= fi("clicks count", p.can_click as i64, st.i("cc"), &mut rep);
+                    }
                     if p.held == SLOT_SWORD {
                         ok &= fi("sword wear", p.sword_wear as i64, st.i("sd"), &mut rep);
                     }
@@ -1238,7 +1321,20 @@ fn replay_server(lines: &[Line], world: &World, speed: i8, o: &Options, wear: f3
                     if let C2S::HeldItem(_) = p {
                         rep.count("slot changes", 1);
                     }
+                    rep.count("inventories opened", (p == C2S::OpenInv) as usize);
+                    let click = if let C2S::Click { slot, .. } = p { Some(slot) } else { None };
+                    let (moved, could, using) = (sv.p[who].clicks_done, sv.p[who].can_click, sv.p[who].using_item);
                     sv.handle(who, p, world, &mut rng, &mut out);
+                    if let Some(slot) = click {
+                        let did = sv.p[who].clicks_done > moved;
+                        rep.count("inventory clicks", 1);
+                        rep.count("potions taken from the rows", (did && slot < 36) as usize);
+                        rep.count("stacks put away", (did && slot >= 36) as usize);
+                        rep.count("clicks that moved nothing", (could && !did) as usize);
+                        rep.count("clicks refused", (could && !sv.p[who].can_click) as usize);
+                        rep.count("clicks not looked at", !could as usize);
+                        rep.count("clicks on the item in use", (did && using && sv.p[who].use_moved) as usize);
+                    }
                     handled_any = true;
                 }
             }

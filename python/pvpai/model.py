@@ -12,18 +12,32 @@ USE_BIAS = [0.0, -3.5]
 # with the wait between pearls is a throw every quarter of a minute or so.
 PEARL_BIAS = [0.0, -4.5]
 # And of the potion throw: about as often, which uses up seven potions
-# within a duel, so that some are thrown while hurt and pay off.
-POTION_BIAS = [0.0, -4.5]
+# within a duel, so that some are thrown while hurt and pay off. The same
+# control later gained a drink, a meal and a stop, and then a healing
+# potion and a potion of Speed from the inventory.
+POTION_BIAS = [0.0, -4.5, -5.0, -5.0, -5.0, -4.0, -4.0]
 # Controls that do not start evenly, by their position among the controls.
 START_BIAS = {7: USE_BIAS, 8: PEARL_BIAS, 9: POTION_BIAS}
-# Where a choice added to a control that already exists starts: rare, so
-# that the policy plays as before until it finds a use for it.
+# Where a choice added to a control that already exists starts: as a copy
+# of the control's first choice (in every one of these controls, doing
+# nothing) made rarer by this much, so that the policy plays as before
+# until it finds a use for it. A choice with weights of zero would not do:
+# the first choice's own preference grows with training, by five and more
+# in states the policy is sure of, and beside it a choice that hangs on
+# nothing is asked for on one tick in thousands and never tried.
 NEW_CHOICE_BIAS = -5.0
 # When the potion control is added, the pearl control starts over. With
 # infinite health the agent had learnt never to throw a pearl; with health
 # to lose, and an opponent that can be knocked away from its own potion, a
 # pearl is worth something else, and it has to try them again to find out.
 RESTART = {9: (8,)}
+# Choices that start over once, by the name of the restart: the choice
+# becomes a copy of the control's first choice, rarer by the value given
+# (-4 is one tick in fifty-five of those on which nothing is asked). The
+# first run with drinks and meals paid for Speed and food only when the
+# drink or the meal was finished, and within half an hour the agent had
+# stopped trying either.
+RESTART_CHOICES = {"drink-eat": ((9, 2, -4.0), (9, 3, -4.0))}
 
 
 def start_bias(head, n):
@@ -31,6 +45,23 @@ def start_bias(head, n):
     they start evenly. Choices a control has gained since start rare."""
     b = START_BIAS.get(head)
     return None if b is None else (b + [NEW_CHOICE_BIAS] * n)[:n]
+
+
+def restart_choices(policy, marks):
+    """Start over the choices in `RESTART_CHOICES` that `marks` does not
+    list yet, and list them. Returns the names of the restarts made."""
+    made = []
+    with torch.no_grad():
+        for name, choices in RESTART_CHOICES.items():
+            if name in marks:
+                continue
+            for head, choice, bias in choices:
+                if len(policy.act_dims) > head and policy.act_dims[head] > choice:
+                    policy.heads[head].weight[choice] = policy.heads[head].weight[0]
+                    policy.heads[head].bias[choice] = policy.heads[head].bias[0] + bias
+            marks.append(name)
+            made.append(name)
+    return made
 
 
 def _init(layer, gain):
@@ -131,8 +162,9 @@ def fit_state(sd, policy):
     """Stored weights made to fit a policy that has since gained inputs,
     controls or choices of a control. New inputs get zero weight, a new
     control depends on nothing yet and has its starting preference, and a
-    new choice of an old control starts rare, so the policy plays as before
-    until it learns to use them. A control listed in `RESTART` for a
+    new choice of an old control starts as a rare copy of the control's
+    first choice, so the policy plays as before until it learns to use
+    them. A control listed in `RESTART` for a
     control that is being added starts over as well. Returns the weights
     and whether anything was added."""
     out, grown = {}, False
@@ -146,9 +178,15 @@ def fit_state(sd, policy):
             grown = True
         elif sd[k].shape != ref.shape:
             w = torch.zeros_like(ref)
-            if head is not None and part[2] == "bias":
-                w.fill_(NEW_CHOICE_BIAS)
             old = sd[k].float()
+            if head is not None and old.shape[0] < ref.shape[0]:
+                # New choices of an old control: copies of its first choice,
+                # rarer by their starting preference.
+                if part[2] == "bias":
+                    start = start_bias(head, ref.shape[0]) or [0.0] + [NEW_CHOICE_BIAS] * (ref.shape[0] - 1)
+                    w.copy_(old[0] + torch.tensor(start, dtype=ref.dtype) - start[0])
+                else:
+                    w[:, : old.shape[1]] = old[0]
             w[tuple(slice(0, n) for n in old.shape)] = old
             out[k] = w
             grown = True

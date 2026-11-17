@@ -49,7 +49,7 @@ pub struct Bar {
     /// Ender pearls in the second slot.
     pub pearls: u8,
     /// The slots that hold a splash potion, a potion to drink and an empty
-    /// bottle, one bit each.
+    /// bottle, one bit each. Any slot but the sword's can.
     pub potions: u16,
     pub drinks: u16,
     pub bottles: u16,
@@ -63,12 +63,11 @@ impl Bar {
     pub fn stack(&self, slot: u8) -> (Item, u32) {
         let bit = |m: u16| m >> slot & 1 != 0;
         match slot {
-            SLOT_PEARL if self.pearls > 0 => (Item::Pearl, self.pearls as u32),
-            SLOT_PEARL => (Item::Empty, 0),
-            s if s > 8 => (Item::Empty, 0),
+            s if s > 8 || s == SLOT_SWORD => (Item::Empty, 0),
             _ if bit(self.potions) => (Item::Potion, 1),
             _ if bit(self.drinks) => (Item::Drink, 1),
             _ if bit(self.bottles) => (Item::Bottle, 1),
+            SLOT_PEARL if self.pearls > 0 => (Item::Pearl, self.pearls as u32),
             SLOT_FOOD if self.steak > 0 => (Item::Food, self.steak as u32),
             _ => (Item::Empty, 0),
         }
@@ -77,10 +76,6 @@ impl Bar {
     /// Put a stack into a slot other than the sword's.
     #[inline]
     pub fn put(&mut self, slot: u8, item: Item, count: u8) {
-        if slot == SLOT_PEARL {
-            self.pearls = if item == Item::Pearl { count } else { 0 };
-            return;
-        }
         if slot == SLOT_SWORD || slot > 8 {
             return;
         }
@@ -88,6 +83,9 @@ impl Bar {
         self.potions &= !bit;
         self.drinks &= !bit;
         self.bottles &= !bit;
+        if slot == SLOT_PEARL {
+            self.pearls = 0;
+        }
         if slot == SLOT_FOOD {
             self.steak = 0;
         }
@@ -98,9 +96,137 @@ impl Bar {
             Item::Potion => self.potions |= bit,
             Item::Drink => self.drinks |= bit,
             Item::Bottle => self.bottles |= bit,
+            Item::Pearl if slot == SLOT_PEARL => self.pearls = count,
             Item::Food if slot == SLOT_FOOD => self.steak = count,
             _ => {}
         }
+    }
+
+    /// The first hotbar slot with nothing in it, as a shift click looks
+    /// for one: from the left, the sword's slot never being free.
+    #[inline]
+    pub fn free_slot(&self) -> Option<u8> {
+        (1..9u8).find(|&s| self.stack(s).0 == Item::Empty)
+    }
+}
+
+/// The three rows of the inventory above the hotbar, 27 slots from the top
+/// left. A slot holds one splash potion, one potion to drink, a stack of
+/// empty bottles, or nothing: 0 nothing, 1 a splash potion, 2 a potion to
+/// drink, 2 + n a stack of n bottles.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Rows(pub [u8; 27]);
+
+impl Default for Rows {
+    fn default() -> Self {
+        Rows([0; 27])
+    }
+}
+
+/// `getMaxStackSize` of a glass bottle.
+pub const BOTTLE_STACK: u8 = 64;
+
+impl Rows {
+    #[inline]
+    pub fn stack(&self, i: usize) -> (Item, u32) {
+        match self.0[i] {
+            0 => (Item::Empty, 0),
+            1 => (Item::Potion, 1),
+            2 => (Item::Drink, 1),
+            n => (Item::Bottle, n as u32 - 2),
+        }
+    }
+
+    #[inline]
+    pub fn put(&mut self, i: usize, item: Item, count: u8) {
+        self.0[i] = match item {
+            _ if count == 0 => 0,
+            Item::Potion => 1,
+            Item::Drink => 2,
+            Item::Bottle => 2 + count.min(BOTTLE_STACK),
+            _ => 0,
+        };
+    }
+
+    /// How many slots hold this item.
+    #[inline]
+    pub fn count(&self, item: Item) -> u32 {
+        (0..27).filter(|&i| self.stack(i).0 == item).count() as u32
+    }
+
+    /// The first slot that holds this item, as a slot of the window (9 on).
+    #[inline]
+    pub fn first(&self, item: Item) -> Option<u8> {
+        (0..27).find(|&i| self.stack(i).0 == item).map(|i| i as u8 + 9)
+    }
+}
+
+/// Slots of the player's own window: 9 to 35 are the three rows, 36 to 44
+/// the hotbar.
+pub const WINDOW_ROWS: u8 = 9;
+pub const WINDOW_BAR: u8 = 36;
+
+/// The shift click that gets a potion of this kind down to the hotbar, as
+/// a slot of the window: on the first one in the rows if the hotbar has a
+/// free slot, and if it has none, on the first empty bottle in the hotbar,
+/// to put that away first. None when the rows hold no such potion or there
+/// is no way to make room for it.
+pub fn refill_click(bar: &Bar, rows: &Rows, kind: Item) -> Option<u8> {
+    let from = rows.first(kind)?;
+    if bar.free_slot().is_some() {
+        return Some(from);
+    }
+    (1..9u8).find(|&s| bar.stack(s).0 == Item::Bottle).map(|s| WINDOW_BAR + s)
+}
+
+/// A shift click on a slot of the player's own window: `Container.slotClick`
+/// with mode 1, which is `ContainerPlayer.transferStackInSlot`. A stack in
+/// the rows goes to the hotbar and a stack in the hotbar to the rows
+/// (`mergeItemStack`: onto stacks of the same kind first if it stacks,
+/// then into the first free slot from the left). Returns what the click
+/// returns, the stack as it was before, or nothing when nothing moved. Both
+/// sides run this, the client to show the result at once and the server
+/// for real, and the server compares what the client says came of it.
+///
+/// Potions do not stack, so one goes to the first free slot. A bottle from
+/// the hotbar joins the first stack of bottles in the rows with room.
+/// Clicks the kit has no use for do nothing here: on the sword, the
+/// pearls, the steak, and on bottles in the rows.
+pub fn shift_click(bar: &mut Bar, rows: &mut Rows, slot: u8) -> Option<(Item, u8)> {
+    if (WINDOW_ROWS..WINDOW_BAR).contains(&slot) {
+        let i = (slot - WINDOW_ROWS) as usize;
+        let (item, _) = rows.stack(i);
+        if !matches!(item, Item::Potion | Item::Drink) {
+            return None;
+        }
+        let to = bar.free_slot()?;
+        bar.put(to, item, 1);
+        rows.put(i, Item::Empty, 0);
+        Some((item, 1))
+    } else if (WINDOW_BAR + 1..WINDOW_BAR + 9).contains(&slot) {
+        let s = slot - WINDOW_BAR;
+        let (item, _) = bar.stack(s);
+        match item {
+            Item::Potion | Item::Drink => {
+                let to = (0..27).find(|&i| rows.0[i] == 0)?;
+                rows.put(to, item, 1);
+            }
+            Item::Bottle => {
+                let room = (0..27).find(|&i| matches!(rows.stack(i), (Item::Bottle, n) if n < BOTTLE_STACK as u32));
+                match room {
+                    Some(i) => rows.0[i] += 1,
+                    None => {
+                        let to = (0..27).find(|&i| rows.0[i] == 0)?;
+                        rows.put(to, Item::Bottle, 1);
+                    }
+                }
+            }
+            _ => return None,
+        }
+        bar.put(s, Item::Empty, 0);
+        Some((item, 1))
+    } else {
+        None
     }
 }
 /// The hotbar slots that can hold a potion, as bits of the masks that say
@@ -177,6 +303,18 @@ pub enum C2S {
     ReleaseUse,
     /// C09 held item change: the hotbar slot now in hand, 0 to 8.
     HeldItem(u8),
+    /// C16 client status OPEN_INVENTORY_ACHIEVEMENT: what the key that
+    /// opens the inventory sends. The server does nothing a duel shows.
+    OpenInv,
+    /// C0E click window, mode 1 (shift click) with the left button on a
+    /// slot of the player's own window: the stack the client says the
+    /// click returned, and the number the client gave the click.
+    Click { slot: u8, said: Option<(Item, u8)>, action: u16 },
+    /// C0D close window.
+    CloseInv,
+    /// C0F confirm transaction: the client's answer to a click the server
+    /// did not accept.
+    Confirm { action: u16 },
 }
 
 /// What the server tells a client about a pearl or a potion in flight.
@@ -220,15 +358,19 @@ pub enum S2C {
     Meta { own: bool, flags: Option<(bool, bool)>, health: Option<f32>, fx: Option<bool> },
     /// S06 update health, to the player itself: health, food and saturation.
     Health { health: f32, food: i32, saturation: f32 },
-    /// S2F set slot for a hotbar slot of the receiving player: a new stack
-    /// of `count` items (0 empties the slot). The server sends it for the
-    /// sword when a hit has cost it durability, for the pearls or the
-    /// potion after a throw, and for the bottle or the steak after a drink
-    /// or a meal.
+    /// S2F set slot for a slot of the receiving player: a new stack of
+    /// `count` items (0 empties the slot). Slots 0 to 8 are the hotbar and
+    /// 9 to 35 the rows above it. The server sends it for the sword when a
+    /// hit has cost it durability, for the pearls or the potion after a
+    /// throw, and for the bottle or the steak after a drink or a meal.
     SetSlot { slot: u8, item: Item, count: u8 },
     /// S30 window items: the whole inventory again, every stack a new one.
-    /// The server sends it after a throw.
-    WindowItems(Bar),
+    /// The server sends it after a throw, and after a click it did not
+    /// accept.
+    WindowItems(Bar, Rows),
+    /// S32 confirm transaction: the server took the click with this number
+    /// as the client said, or did not.
+    Confirm { action: u16, ok: bool },
     /// S19 entity status 9, to the player itself: the drink or the meal is
     /// finished.
     UseDone,

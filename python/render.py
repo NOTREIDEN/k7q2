@@ -288,6 +288,9 @@ class Segment:
         self.timed = "speed_s" in self.pi and any(
             self.col(p, "speed_s").min() < 1000 or self.col(p, "drinks").max() > 0 for p in (0, 1))
         self.hungry = "food" in self.pi and min(self.col(0, "food").min(), self.col(1, "food").min()) < 18
+        # Potions in the rows of the inventory, anywhere in the duel.
+        self.stocked = "inv_potions" in self.pi and any(
+            self.col(p, "inv_potions").max() + self.col(p, "inv_drinks").max() > 0 for p in (0, 1))
 
     def col(self, p, name):
         return self.v[:, p * self.np + self.pi[name]]
@@ -449,6 +452,8 @@ def hud(img, seg, t, fonts, inset_box):
             if doing:
                 line.append("BEBIENDO" if doing == 1 else "COMIENDO")
             box_w = max(box_w, int(d.textlength("   ".join(line), font=small)) + 28)
+        if seg.real and seg.stocked:
+            box_w = max(box_w, 560)
         d.rectangle([x - 14 if p == 0 else x - box_w, 16, x + box_w if p == 0 else x + 14,
                      low + (40 if edge else 10) + (62 if seg.real else 0) + (30 if more else 0)], fill=(0, 0, 0, 96))
         if seg.real:
@@ -461,7 +466,14 @@ def hud(img, seg, t, fonts, inset_box):
             side = x + 240 if p == 0 else x - 240
             text(d, (side, y - 2), f"{hp / 2:.1f}" + (f"  +{got / 2:.1f}" if got else ""), small,
                  (130, 255, 150) if got else (255, 255, 255), anchor)
-            text(d, (x, y + 28), f"Pociones: {int(seg.col(p, 'potions')[tick])}", small, (255, 170, 190), anchor)
+            pots = f"Pociones: {int(seg.col(p, 'potions')[tick])}"
+            if seg.stocked:
+                # What is left in the inventory, and the screen while it is open.
+                pots += f"   Inventario: {int(seg.col(p, 'inv_potions')[tick])}"
+                cups = int(seg.col(p, "inv_drinks")[tick])
+                pots += f" + {cups} de velocidad" if cups else ""
+                pots += "   ABIERTO" if seg.col(p, "inv_open")[tick] > 0 else ""
+            text(d, (x, y + 28), pots, small, (255, 170, 190), anchor)
             if more:
                 slow = (seg.timed and left < 0) or (seg.hungry and seg.col(p, "food")[tick] <= 6)
                 text(d, (x, y + 58), "   ".join(line), small, (255, 150, 110) if slow else (150, 205, 235), anchor)
@@ -501,6 +513,8 @@ def hud(img, seg, t, fonts, inset_box):
         wide.append(("BEBER", seg.col(0, "consuming")[tick] == 1))
     if seg.real and seg.hungry:
         wide.append(("COMER", seg.col(0, "consuming")[tick] == 2))
+    if seg.real and seg.stocked:
+        wide.append(("INVENT.", seg.col(0, "inv_open")[tick] > 0))
     for i, (label, on) in enumerate(wide):
         bx, by = x0 + i * 112, y0 + 2 * (sz + 6)
         d.rectangle([bx, by, bx + 106, by + 40], fill=(255, 255, 255, 215) if on else (0, 0, 0, 110))

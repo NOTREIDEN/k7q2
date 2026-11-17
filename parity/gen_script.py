@@ -274,6 +274,132 @@ def with_pearls(rng, seq, per_count, gap=(25, 80), blocking=False, solo=False, p
         t = back + rng.randint(*gap)
     return [tuple(o) for o in out]
 
+def with_inventory(rng, seq, stocked, gap=(30, 110), cups=(), steak=False):
+    """Add turns in the inventory screen to the inputs (a tenth value): the screen opens,
+    stays open for a few ticks with shift clicks on some of them, and shuts, on a tick of its
+    own or together with the last click. The clicks are on the potions in the rows, on any
+    slot of the rows, or on a slot of the hotbar, which puts a potion or an empty bottle
+    away. Whatever else the script says on those ticks stays where it is: the game is to
+    take none of it. Before the screen opens a number key is pressed now and then, or the
+    right button is down: on the sword, which is a block, or on a potion to drink or the
+    steak, so that the screen opens in the middle of a drink or a meal. After it shuts, a slot
+    is taken in hand and used."""
+    n = len(seq)
+    out = [list(s) + [0] * (10 - len(s)) for s in seq]
+    left = list(stocked)
+    rng.shuffle(left)
+
+    def pick():
+        r = rng.random()
+        if r < 0.55 and left:
+            return left.pop()
+        if r < 0.70:
+            return rng.randint(9, 35)
+        return rng.randint(37, 44)
+
+    t = rng.randint(20, 60)
+    while t < n - 80:
+        r = rng.random()
+        if r < 0.2:
+            out[t - 1][8] = rng.randint(1, 9)
+        elif r < 0.6:
+            # The button down from a little before until the screen opens, or beyond.
+            d = rng.choice([2, 4, 9, 20, 30])
+            keys = [1, 1] + list(cups) * 2 + ([9, 9] if steak else [])
+            for k in range(t - d - 1, t):
+                out[k][8] = 0
+            out[t - d - 1][8] = rng.choice(keys)
+            out[t - d - 1][7] = 0
+            for k in range(t - d, t + rng.choice([0, 0, 3])):
+                out[k][7] = 1
+        out[t][9] = rng.choice([1, 1, 1, 20])
+        k = t + 1
+        clicks = rng.choice([0, 1, 1, 1, 2, 2, 3, 5])
+        shut = False
+        for c in range(clicks):
+            if rng.random() < 0.25:
+                out[k][9] = 1
+                k += 1
+            slot = pick()
+            if c == clicks - 1 and rng.random() < 0.4:
+                out[k][9] = 64 + slot
+                shut = True
+            else:
+                out[k][9] = slot
+            k += 1
+        if not shut:
+            for _ in range(rng.choice([0, 0, 0, 1, 2, 6, 25])):
+                out[k][9] = 1
+                k += 1
+            # The tick on which it shuts, and whatever the script has there is left out too.
+            out[k][9] = 0
+            k += 1
+        if rng.random() < 0.6:
+            # Take a slot in hand and use what is there, at once or held for a drink.
+            u = k + rng.choice([0, 0, 1, 2])
+            out[u][8] = rng.randint(2, 9)
+            for j in range(u, u + rng.choice([1, 1, 2, 36, 40])):
+                out[j][7] = 1
+            k = u + 1
+        t = k + rng.randint(*gap)
+    return [tuple(o) for o in out]
+
+def fake_inventory(rng, n, lines, stocked, rate=0.02, forged=0.004, cups=()):
+    """Clicks in the inventory by the scripted player, as packets: the screen opened (which
+    the server takes no notice of), shift clicks that say what came of them or say the
+    opposite, the answer a client gives when the server says no, sooner or later or with the
+    wrong number first, and the screen shut. Now and then the server gets a click in the
+    name of the real player, and now and then the scripted player clicks away the very
+    potion it is drinking."""
+    left = list(stocked)
+    rng.shuffle(left)
+    number, owed = 1, None
+    t = 30
+    while t < n - 20:
+        if rng.random() < forged / rate:
+            lines.append("F %d RCLICK %d %s %d" % (t, rng.choice(stocked + [rng.randint(37, 44)]) if stocked else rng.randint(37, 44),
+                                                   rng.choice(["wrong", "wrong", "auto"]), 900 + number))
+            number += 1
+        if cups and rng.random() < 0.3:
+            c = rng.choice(cups)
+            lines.append("F %d SLOT %d" % (t, c))
+            lines.append("F %d USE" % t)
+            t += rng.choice([1, 4, 10, 25])
+            lines.append("F %d CLICK %d auto %d" % (t, 36 + c, number))
+            number += 1
+            lines.append("F %d SLOT 0" % (t + rng.choice([1, 3, 8])))
+        lines.append("F %d OPEN" % t)
+        k = t + 1
+        for _ in range(rng.choice([1, 1, 2, 3, 4])):
+            r = rng.random()
+            slot = left.pop() if r < 0.5 and left else rng.randint(9, 35) if r < 0.65 else rng.randint(37, 44)
+            what = "wrong" if rng.random() < 0.2 else "auto"
+            lines.append("F %d CLICK %d %s %d" % (k, slot, what, number))
+            if what == "wrong" and owed is None:
+                owed = number
+                if rng.random() < 0.3:
+                    lines.append("F %d CONFIRM %d" % (k + rng.randint(1, 3), number + 7))
+                lines.append("F %d CONFIRM %d" % (k + rng.choice([1, 2, 2, 4, 9]), number))
+                owed = None
+            number += 1
+            k += rng.choice([1, 1, 1, 2, 3])
+        lines.append("F %d CLOSE" % k)
+        t = k + int(rng.expovariate(rate)) + 5
+
+def stock(rng, lines, opts):
+    """Fill the rows of the inventory: invpots splash potions, invdrinks potions to drink,
+    invbottles stacks of empty bottles (one of them full). Returns the slots with a potion."""
+    n_p, n_d, n_b = int(opts.get("invpots", "0")), int(opts.get("invdrinks", "0")), int(opts.get("invbottles", "0"))
+    slots = rng.sample(range(9, 36), min(27, n_p + n_d + n_b))
+    for i, slot in enumerate(slots):
+        if i < n_p:
+            lines.append("row %d P" % slot)
+        elif i < n_p + n_d:
+            lines.append("row %d D" % slot)
+        else:
+            lines.append("row %d B %d" % (slot, 64 if i == n_p + n_d else rng.choice([1, 3, 63])))
+    return slots[:n_p + n_d]
+
 def fight_fake(rng, n, lines, hops=True, attacks=True, blocks=False, pearls=0.0, potions=0, potion_rate=0.0,
                drinks=0, steak=False, drink_rate=0.0):
     """What the scripted player does on each server tick."""
@@ -462,6 +588,13 @@ def main():
         gap = (8, 30) if opts.get("many", "0") != "0" else (25, 80)
         seq = [(0,) * 9] * 12 + with_pearls(rng, seq, per_count, gap=gap, blocking=blocking, potions=n_pots, pearls=n_pearls > 0,
                                             again=opts.get("again", "0") != "0", drinks=n_drinks, steak=n_steak > 0)
+        if "inv" in opts:
+            # The inventory: its rows stocked, and turns in its screen on both sides.
+            stocked = stock(rng, lines, opts)
+            seq = with_inventory(rng, seq, stocked, gap=(15, 60) if opts["inv"] == "2" else (30, 110),
+                                 cups=range(3 + n_pots, min(9, 3 + n_pots + n_drinks)), steak=n_steak > 0)
+            fake_inventory(rng, len(seq) + 60, lines, stocked, rate=float(opts.get("fakeinv", "0.02")),
+                           cups=range(2 + n_pots, min(8, 2 + n_pots + n_drinks)))
         fight_fake(rng, len(seq) + 60, lines, blocks=blocking, pearls=float(opts.get("fake", "0.02")) if n_pearls else 0.0,
                    potions=n_pots, potion_rate=float(opts.get("fakepot", "0.02")),
                    drinks=n_drinks, steak=n_steak > 0, drink_rate=float(opts.get("fakedrink", "0.015")) if n_drinks or n_steak else 0.0)

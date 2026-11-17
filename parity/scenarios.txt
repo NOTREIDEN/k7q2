@@ -44,3 +44,7 @@ pot8 pot 108 health=1 armor=1 prot=3 sharp=1 potions=7 many=1 again=1 refill=6 s
 drink1 pot 121 health=1 armor=1 prot=2 sharp=2 potions=3 drinks=3 steak=64 speedticks=300 food=14,2 refill=6 many=1
 drink2 pot 122 health=1 armor=1 prot=1 sharp=1 potions=2 drinks=2 steak=5 pearls=16 speedticks=700 food=17,0 many=1 refill=6 sensitivity=0.83
 drink3 pot 123 health=1 armor=1 potions=0 drinks=4 steak=64 speed=-1 food=6,0 many=1 refill=8 ticks=2400
+inv1 pot 131 health=1 armor=1 prot=2 sharp=2 potions=3 drinks=1 steak=64 pearls=16 inv=1 invpots=10 invdrinks=4 invbottles=3 many=1 refill=6 speedticks=600 food=17,0
+inv2 pot 135 health=1 armor=1 prot=2 sharp=2 potions=7 pearls=16 steak=64 inv=2 invpots=16 invdrinks=2 invbottles=2 blocks=1 many=1 refill=6 fakeinv=0.04
+inv3 pot 133 health=1 armor=1 potions=1 drinks=3 steak=64 speed=-1 food=7,0 inv=2 invpots=6 invdrinks=12 invbottles=4 many=1 refill=8 sensitivity=0.83 fakeinv=0.05 fakedrink=0.03
+inv4 pot 134 health=1 armor=1 prot=1 sharp=1 potions=4 drinks=2 pearls=16 inv=2 invpots=18 invdrinks=6 invbottles=3 many=1 again=1 refill=6 speedticks=400 food=14,1 ticks=2400 fakeinv=0.03

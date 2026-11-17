@@ -31,7 +31,8 @@ def main():
     policy.load_state_dict({k: torch.stack([sd[k] for sd in sds]).mean(0) for k in sds[0]})
     vs = SimpleNamespace(var=sum(ck["vs"][0] for _, ck in keep) / len(keep), count=max(ck["vs"][1] for _, ck in keep))
     samples = sum(ck.get("samples", 0) for _, ck in keep)
-    torch.save(pack(policy, vs, samples, max(ck.get("iters", 0) for _, ck in keep)), args.out)
+    marks = sorted(set.intersection(*[set(ck.get("marks", ())) for _, ck in keep]))
+    torch.save(pack(policy, vs, samples, max(ck.get("iters", 0) for _, ck in keep), marks=marks), args.out)
     print(f"{len(keep)} of {len(loaded)} checkpoints averaged, {samples/1e6:.1f}M samples, written to {args.out}")
 
 

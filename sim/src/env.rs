@@ -9,9 +9,9 @@
 //! the reward that agent earned since its previous action.
 use crate::aabb::{dist, dist_sq, Aabb, V3};
 use crate::bot::{self, BotParams, BotState};
-use crate::client::{pearl_landing, pearl_preview, ClientCfg, Edge, Input, TickOut, MAX_BACKTRACK};
+use crate::client::{pearl_landing, pearl_preview, ClientCfg, Edge, Input, TickOut, INV_SHUT, MAX_BACKTRACK};
 use crate::mth::{self, Rng};
-use crate::net::{potion_mask, Item, Kind, SLOT_FOOD, SLOT_PEARL, SLOT_SWORD, USE_TICKS};
+use crate::net::{potion_mask, refill_click, shift_click, Item, Kind, Rows, SLOT_FOOD, SLOT_PEARL, SLOT_SWORD, USE_TICKS, WINDOW_BAR};
 use crate::server::{
     feather_points, prot_points, splash_heal, throw_heading, Food, KbPlugin, KbProfile, ServerCfg, DRINK_SHOWN, MAX_HEALTH, PEARL_DAMAGE,
     POTION_HEAL,
@@ -23,7 +23,8 @@ pub const ACT_HEADS: usize = 10;
 /// forward, strafe, jump, sprint key, attack, yaw bin, pitch bin, right
 /// mouse button (block with the sword), throw a pearl, and what to do with
 /// the rest of the hotbar: nothing, throw a healing potion, drink the
-/// potion of Speed, eat, or stop drinking or eating.
+/// potion of Speed, eat, stop drinking or eating, or get a healing potion
+/// or a potion of Speed down from the inventory.
 ///
 /// A pearl and a potion throw each stand for three key presses a player
 /// makes in a row: the number key of the pearls or of a potion with a right
@@ -32,8 +33,11 @@ pub const ACT_HEADS: usize = 10;
 /// the server's cooldown runs or when no pearl is left, the potion when no
 /// potion is left. A drink or a meal is asked for once: the number key and
 /// the right button, which then stays down until the server says it is
-/// done or the player stops (see `Env::consume_keys`).
-pub const ACT_DIMS: [i32; ACT_HEADS] = [3, 3, 2, 2, 2, 27, 29, 2, 2, 5];
+/// done or the player stops (see `Env::consume_keys`). A potion from the
+/// inventory is the inventory key, a shift click on the potion on the next
+/// tick, and the key again on the third; asked for on every tick, another
+/// potion comes down on each (see `Env::refill_keys`).
+pub const ACT_DIMS: [i32; ACT_HEADS] = [3, 3, 2, 2, 2, 27, 29, 2, 2, 7];
 /// Mouse counts per tick. One count is 0.15 degrees at sensitivity 0.5.
 pub const YAW_BINS: [i32; 27] = [
     -377, -233, -144, -89, -55, -34, -21, -13, -8, -5, -3, -2, -1, 0, 1, 2, 3, 5, 8, 13, 21, 34, 55, 89, 144, 233, 377,
@@ -45,11 +49,11 @@ pub const PITCH_BINS: [i32; 29] = [
     -89, -55, -34, -21, -13, -8, -5, -3, -2, -1, 0, 1, 2, 3, 5, 8, 13, 21, 34, 55, 89, -377, -233, -144, 144, 233, 377, -600, 600,
 ];
 
-pub const OBS_DIM: usize = 144;
-pub const PRIV_DIM: usize = 68;
-pub const STATS_DIM: usize = 78;
+pub const OBS_DIM: usize = 151;
+pub const PRIV_DIM: usize = 71;
+pub const STATS_DIM: usize = 86;
 /// Floats per player and in total written by `Env::write_view`.
-pub const VIEW_PLAYER: usize = 42;
+pub const VIEW_PLAYER: usize = 45;
 pub const VIEW_DIM: usize = 2 * VIEW_PLAYER + 24;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -240,6 +244,45 @@ pub struct Params {
     /// collected twice and drinking or eating by itself earns nothing.
     pub w_speed: f32,
     pub w_fed: f32,
+    /// Share of the duels with real health in which the rows of the
+    /// inventory hold more potions, to be got down to the hotbar.
+    pub refill_prob: f64,
+    /// The healing potions and the potions of Speed in those rows, drawn
+    /// per player (the latter only in a duel in which the Speed runs out).
+    pub inv_potions: [f64; 2],
+    pub inv_drinks: [f64; 2],
+    /// Stocked rows for one player only: 0 both, 1 only the first, 2 only
+    /// the second.
+    pub refill_who: u8,
+    /// Scales how readily scripted bots go to their inventory. 0 turns it
+    /// off.
+    pub bot_refill: f64,
+    /// What it costs a player, in hits, to stand with no healing potion in
+    /// the hotbar while the inventory has some, and the same for the
+    /// potion of Speed once the Speed is over. A difference of state, like
+    /// `w_speed`: taken when it gets there and given back when it leaves.
+    pub w_stock: f32,
+    /// Share of the duels that start as a lesson: a situation in which
+    /// one of the things to learn is plainly the thing to do, with the
+    /// opponent far away. `lessons` says which, one bit each: 1 the first
+    /// player has no Speed and a potion of it at hand, 2 it is too hungry
+    /// to sprint and has steak, 4 it is hurt with no healing potion at
+    /// hand and some in the inventory, 8 it has no Speed and its potion of
+    /// it is in the inventory. The rest of the duel is drawn as always.
+    pub lesson_prob: f64,
+    pub lessons: u32,
+    /// How far apart a lesson starts.
+    pub lesson_dist: [f64; 2],
+    /// The last seconds of Speed, in which a potion of it is worth
+    /// drinking. An agent's drink is taken only with this much Speed left
+    /// or less (or none): a potion drunk with a minute of Speed still to
+    /// go is a potion thrown away, and an agent that tries the choice at
+    /// random would have none left by the time one is needed. And `w_speed`
+    /// counts the Speed a player has left up to this much, so it goes
+    /// little by little over these seconds and a drink gets back what is
+    /// gone. Less than zero: a drink at any time, and all of `w_speed` for
+    /// any Speed at all.
+    pub drink_window_s: f64,
 }
 
 impl Default for Params {
@@ -325,6 +368,16 @@ impl Default for Params {
             bot_drink: 1.0,
             w_speed: 0.0,
             w_fed: 0.0,
+            refill_prob: 0.0,
+            inv_potions: [3.0, 12.0],
+            inv_drinks: [0.0, 2.0],
+            refill_who: 0,
+            bot_refill: 1.0,
+            w_stock: 0.0,
+            lesson_prob: 0.0,
+            lessons: 15,
+            lesson_dist: [10.0, 20.0],
+            drink_window_s: 15.0,
         }
     }
 }
@@ -431,6 +484,19 @@ impl Params {
             94 => self.bot_drink = v,
             95 => self.w_speed = v as f32,
             96 => self.w_fed = v as f32,
+            97 => self.refill_prob = v,
+            98 => self.inv_potions[0] = v,
+            99 => self.inv_potions[1] = v,
+            100 => self.inv_drinks[0] = v,
+            101 => self.inv_drinks[1] = v,
+            102 => self.refill_who = v as u8,
+            103 => self.bot_refill = v,
+            104 => self.w_stock = v as f32,
+            105 => self.lesson_prob = v,
+            106 => self.lessons = v as u32,
+            107 => self.lesson_dist[0] = v,
+            108 => self.lesson_dist[1] = v,
+            109 => self.drink_window_s = v,
             _ => return false,
         }
         true
@@ -451,6 +517,7 @@ pub fn decode_action(a: &[i32]) -> Input {
         use_item: a.len() > 7 && a[7] != 0,
         use_again: false,
         slot_key: 0,
+        inv: 0,
     }
 }
 
@@ -616,6 +683,13 @@ pub struct Stats {
     /// compare with.
     pub pot_after: [f64; 2],
     pub off: [f64; 2],
+    /// The inventory: potions a player got down from its rows, the times
+    /// it opened the screen, the ticks it had it open and the hits it took
+    /// meanwhile.
+    pub refills: [f64; 2],
+    pub inv_opens: [f64; 2],
+    pub inv_ticks: [f64; 2],
+    pub inv_hit: [f64; 2],
 }
 
 impl Stats {
@@ -662,6 +736,10 @@ impl Stats {
             self.fed[a] += o.fed[a];
             self.pot_after[a] += o.pot_after[a];
             self.off[a] += o.off[a];
+            self.refills[a] += o.refills[a];
+            self.inv_opens[a] += o.inv_opens[a];
+            self.inv_ticks[a] += o.inv_ticks[a];
+            self.inv_hit[a] += o.inv_hit[a];
         }
     }
     pub fn write(&self, out: &mut [f64]) {
@@ -744,6 +822,14 @@ impl Stats {
             self.pot_after[1],
             self.off[0],
             self.off[1],
+            self.refills[0],
+            self.refills[1],
+            self.inv_opens[0],
+            self.inv_opens[1],
+            self.inv_ticks[0],
+            self.inv_ticks[1],
+            self.inv_hit[0],
+            self.inv_hit[1],
         ];
         for (o, x) in out.iter_mut().zip(v.iter()) {
             *o = *x;
@@ -808,19 +894,44 @@ pub struct Env {
     /// for how many ticks in a row it has seen the other player do so.
     was_consuming: [bool; 2],
     opp_use_ticks: [i32; 2],
+    /// Where each player is with its inventory: 0 the screen is shut, 1
+    /// it is open and the click that gets the potion it was opened for is
+    /// still to come, 2 it is open and that click is made. And the kind of
+    /// potion it was opened for, and whether it was open on the last tick.
+    refill: [u8; 2],
+    refill_kind: [Item; 2],
+    was_open: [bool; 2],
+    /// The lesson this duel started as (0: none).
+    pub lesson: u8,
     /// A player has died: the duel ends when both have made their tick.
     over: bool,
 }
 
 pub fn new_match(p: &Params, rng: &mut Rng, mode: Mode) -> (Match, [f64; 2], BotParams) {
+    let (m, ping, bot, _) = new_duel(p, rng, mode);
+    (m, ping, bot)
+}
+
+/// A duel with newly drawn conditions, and the lesson it starts as (0:
+/// none; see `Params::lessons`).
+pub fn new_duel(p: &Params, rng: &mut Rng, mode: Mode) -> (Match, [f64; 2], BotParams, u8) {
     let world = World::arena(p.floor_y, p.arena_half, p.walls);
     let lim = (p.arena_half - 2.0).max(1.0);
+    // Drawn only when lessons are on, so that duels without them come out
+    // as they always did.
+    let lesson = if p.lesson_prob > 0.0 && p.lessons & 15 != 0 && rng.chance(p.lesson_prob) {
+        let on: Vec<u8> = (0..4u8).filter(|k| p.lessons >> k & 1 != 0).collect();
+        1 + on[(rng.next_u64() % on.len() as u64) as usize]
+    } else {
+        0
+    };
+    let (d_lo, d_hi) = if lesson != 0 { (p.lesson_dist[0], p.lesson_dist[1]) } else { (p.start_dist_min, p.start_dist_max) };
     let mut a;
     let mut b;
     let mut tries = 0;
     loop {
         a = [rng.range(-lim, lim), p.floor_y, rng.range(-lim, lim)];
-        let d = rng.range(p.start_dist_min, p.start_dist_max.max(p.start_dist_min));
+        let d = rng.range(d_lo, d_hi.max(d_lo));
         let ang = rng.range(0.0, std::f64::consts::TAU);
         b = [a[0] + d * ang.cos(), p.floor_y, a[2] + d * ang.sin()];
         tries += 1;
@@ -898,6 +1009,7 @@ pub fn new_match(p: &Params, rng: &mut Rng, mode: Mode) -> (Match, [f64; 2], Bot
     ccfg.kb_ench = p.kb_ench;
     // Real health: a diamond set with Protection, a sword with Sharpness.
     let real = !p.infinite_health || (p.health_prob > 0.0 && rng.chance(p.health_prob));
+    let real = real || lesson != 0;
     let level = |r: [f64; 2], rng: &mut Rng| -> i32 {
         let (lo, hi) = (r[0].round() as i64, (r[1].round() as i64).max(r[0].round() as i64));
         (lo + (rng.next_u64() % (hi - lo + 1) as u64) as i64) as i32
@@ -921,8 +1033,9 @@ pub fn new_match(p: &Params, rng: &mut Rng, mode: Mode) -> (Match, [f64; 2], Bot
     let pearls = if rng.chance(p.pearl_prob) { p.pearls.clamp(0.0, 64.0) as u8 } else { 0 };
     // The later draws are made only for what is switched on, so that duels
     // without it come out as they always did.
-    let timed = real && p.speed_end_prob > 0.0 && rng.chance(p.speed_end_prob);
-    let hungry = real && p.hunger_prob > 0.0 && rng.chance(p.hunger_prob);
+    let timed = (real && p.speed_end_prob > 0.0 && rng.chance(p.speed_end_prob)) || lesson == 1 || lesson == 4;
+    let hungry = (real && p.hunger_prob > 0.0 && rng.chance(p.hunger_prob)) || lesson == 2;
+    let stocked = (real && p.refill_prob > 0.0 && rng.chance(p.refill_prob)) || lesson >= 3;
     let mut scfg = scfg;
     scfg.hunger |= hungry;
     let seed = rng.next_u64();
@@ -935,11 +1048,21 @@ pub fn new_match(p: &Params, rng: &mut Rng, mode: Mode) -> (Match, [f64; 2], Bot
         m.c[i].lp.pearls = pearls;
         if real {
             let mut n = level(p.potions, rng).clamp(0, 7) as u8;
-            if timed && (p.speed_who == 0 || p.speed_who as usize == i + 1) {
+            // The first player is the one a lesson is for.
+            let lesson = if i == 0 { lesson } else { 0 };
+            let timed_i = timed && (p.speed_who == 0 || p.speed_who as usize == i + 1 || lesson == 1 || lesson == 4);
+            if timed_i {
                 // Speed as after a potion drunk some time ago, and potions
                 // of it in the slots after the healing ones.
-                let left = (rng.range(p.speed_left_s[0], p.speed_left_s[1].max(p.speed_left_s[0])) * 20.0).round() as i32;
-                let cups = level(p.drinks, rng).clamp(0, 2) as u8;
+                let mut left = (rng.range(p.speed_left_s[0], p.speed_left_s[1].max(p.speed_left_s[0])) * 20.0).round() as i32;
+                let mut cups = level(p.drinks, rng).clamp(0, 2) as u8;
+                if lesson == 1 {
+                    left = 0;
+                    cups = cups.max(1);
+                } else if lesson == 4 {
+                    left = 0;
+                    cups = 0;
+                }
                 n = n.min(7 - cups - hungry as u8);
                 let (sp, lp) = (&mut m.s.p[i], &mut m.c[i].lp);
                 sp.drinks = potion_mask(n + cups) & !potion_mask(n);
@@ -961,7 +1084,10 @@ pub fn new_match(p: &Params, rng: &mut Rng, mode: Mode) -> (Match, [f64; 2], Bot
             }
             if hungry {
                 n = n.min(6);
-                let food = level(p.start_food, rng).clamp(0, 20);
+                let mut food = level(p.start_food, rng).clamp(0, 20);
+                if lesson == 2 {
+                    food = (rng.next_u64() % 7) as i32;
+                }
                 let sat = if food >= 20 { 5.0f32 } else { 0.0f32 };
                 let (sp, lp) = (&mut m.s.p[i], &mut m.c[i].lp);
                 sp.steak = 64;
@@ -972,9 +1098,33 @@ pub fn new_match(p: &Params, rng: &mut Rng, mode: Mode) -> (Match, [f64; 2], Bot
                 lp.food = food;
                 lp.saturation = sat;
             }
+            if stocked && (p.refill_who == 0 || p.refill_who as usize == i + 1 || lesson >= 3) {
+                // More potions in the rows of the inventory, the healing
+                // ones first.
+                let mut pots = level(p.inv_potions, rng).clamp(0, 27) as usize;
+                let mut cups = if timed_i { level(p.inv_drinks, rng).clamp(0, 2) as usize } else { 0 };
+                if lesson == 3 {
+                    pots = pots.max(3);
+                    n = 0;
+                } else if lesson == 4 {
+                    cups = cups.max(1);
+                }
+                let mut rows = Rows::default();
+                for k in 0..(pots + cups).min(27) {
+                    rows.0[k] = if k < pots { 1 } else { 2 };
+                }
+                m.s.p[i].rows = rows;
+                m.c[i].lp.rows = rows;
+            }
             m.s.p[i].potions = potion_mask(n);
             m.c[i].lp.potions = potion_mask(n);
-            if (p.hurt_who == 0 || p.hurt_who as usize == i + 1) && rng.chance(p.start_hurt) {
+            if lesson == 3 {
+                let h = (rng.range(6.0, 12.0) * 2.0).round() as f32 / 2.0;
+                m.s.p[i].health = h;
+                m.s.p[i].last_health = h;
+                m.c[i].lp.health = h;
+                m.c[1 - i].rp.health = h;
+            } else if (p.hurt_who == 0 || p.hurt_who as usize == i + 1) && rng.chance(p.start_hurt) {
                 // Both sides start out knowing it.
                 let h = (rng.range(p.start_health[0], p.start_health[1].max(p.start_health[0])) * 2.0).round() as f32 / 2.0;
                 let h = h.clamp(1.0, MAX_HEALTH);
@@ -1015,13 +1165,14 @@ pub fn new_match(p: &Params, rng: &mut Rng, mode: Mode) -> (Match, [f64; 2], Bot
     bot.pearl_lead = p.bot_pearl_lead;
     bot.potion *= p.bot_potion;
     bot.drink *= p.bot_drink;
-    (m, ping, bot)
+    bot.refill *= p.bot_refill;
+    (m, ping, bot, lesson)
 }
 
 impl Env {
     pub fn new(mode: Mode, params: Params, seed: u64) -> Env {
         let mut rng = Rng::new(seed);
-        let (m, ping, bot) = new_match(&params, &mut rng, mode);
+        let (m, ping, bot, lesson) = new_duel(&params, &mut rng, mode);
         let mut e = Env {
             m,
             params,
@@ -1058,6 +1209,10 @@ impl Env {
             asked_bar: [0; 2],
             was_consuming: [false; 2],
             opp_use_ticks: [0; 2],
+            refill: [0; 2],
+            refill_kind: [Item::Potion; 2],
+            was_open: [false; 2],
+            lesson,
             pot_back: [true; 2],
             off_run: [0; 2],
             over: false,
@@ -1088,6 +1243,8 @@ impl Env {
         self.asked_bar = [0; 2];
         self.was_consuming = [false; 2];
         self.opp_use_ticks = [0; 2];
+        self.refill = [0; 2];
+        self.was_open = [false; 2];
         self.pot_back = [true; 2];
         self.off_run = [0; 2];
         self.over = false;
@@ -1107,10 +1264,11 @@ impl Env {
 
     /// Start a fresh episode with newly drawn conditions.
     pub fn reset(&mut self) {
-        let (m, ping, bot) = new_match(&self.params, &mut self.rng, self.mode);
+        let (m, ping, bot, lesson) = new_duel(&self.params, &mut self.rng, self.mode);
         self.m = m;
         self.ping_ms = ping;
         self.bot = bot;
+        self.lesson = lesson;
         self.done_flag = [0; 2];
         self.begin();
     }
@@ -1202,6 +1360,9 @@ impl Env {
             if self.m.c[h.victim].lp.consuming() {
                 self.ep.sip_hit[h.victim] += 1.0;
             }
+            if self.m.c[h.victim].lp.inv_open {
+                self.ep.inv_hit[h.victim] += 1.0;
+            }
             self.ep.damage[h.attacker] += h.damage as f64;
             if h.blocked {
                 self.ep.blocked[h.victim] += 1.0;
@@ -1243,10 +1404,32 @@ impl Env {
         let reach = dist(eye, ebb.closest_point(eye));
         let aim = 1.0 - ang / 180.0;
         let range = 1.0 - (reach - 3.0).clamp(0.0, 12.0) / 12.0;
-        // As the player's own client has them.
-        let fast = if c.lp.speed_amp >= 0 { p.w_speed } else { 0.0 };
-        let fed = if c.lp.food > 6 { p.w_fed } else { 0.0 };
-        (p.w_aim * aim as f32 + p.w_range * range as f32 + fast + fed, ang)
+        // Speed and food as the server has them: the Speed left, counted up
+        // to the last seconds in which a drink is worth it, and all of it
+        // with food enough to sprint; and of what is missing, the part of
+        // a drink or a meal under way that is done. So Speed goes little by
+        // little as it runs out, a drink pays as it goes, giving it up
+        // takes back what it paid, and with plenty of Speed left, or once
+        // fed, there is nothing more in it.
+        let sp = &self.m.s.p[id];
+        let done = |item: Item| -> f32 {
+            if sp.using_item && sp.use_slot == sp.held && sp.in_hand().0 == item {
+                ((USE_TICKS - sp.use_count) as f32 / USE_TICKS as f32).clamp(0.0, 1.0)
+            } else {
+                0.0
+            }
+        };
+        let have = (sp.speed_ticks.max(0) as f32 / self.drink_window().max(1) as f32).min(1.0);
+        let fast = p.w_speed * (have + (1.0 - have) * done(Item::Drink));
+        let fed = p.w_fed * if sp.food.level > 6 { 1.0 } else { done(Item::Food) };
+        // The hotbar as the player's own client has it: out of healing
+        // potions with some in the inventory, and out of Speed and of
+        // potions of it with one in the inventory.
+        let lp = &c.lp;
+        let dry = (lp.potions == 0 && lp.rows.count(Item::Potion) > 0) as u8
+            + (lp.drinks == 0 && lp.speed_amp < 0 && lp.rows.count(Item::Drink) > 0) as u8;
+        let stock = -p.w_stock * dry as f32;
+        (p.w_aim * aim as f32 + p.w_range * range as f32 + fast + fed + stock, ang)
     }
 
     /// Is the other player within attack reach of `id`, in `id`'s own view?
@@ -1313,10 +1496,26 @@ impl Env {
             }
     }
 
+    /// The last ticks of Speed in which a drink is taken, see
+    /// `Params::drink_window_s`.
+    fn drink_window(&self) -> i32 {
+        (self.params.drink_window_s * 20.0).round() as i32
+    }
+
+    /// Is player `id`, as far as its own client knows, without Speed or in
+    /// the last seconds of it?
+    fn drink_due(&self, id: usize) -> bool {
+        self.params.drink_window_s < 0.0 || self.m.c[id].lp.speed_ticks <= self.drink_window()
+    }
+
     /// The key presses of a drink or a meal, laid over what player `id`
     /// asked for on this tick. `choice` is what it asked of the rest of the
-    /// hotbar: 2 to drink, 3 to eat, 4 to stop, 1 to throw a healing
-    /// potion, which stops as well. Asked with the sword in hand, the
+    /// hotbar: 2 to drink (taken only when due, see `drink_due`), 3 to
+    /// eat, 4 to stop. Only stopping stops: a
+    /// healing potion asked for meanwhile is not thrown and does not end
+    /// the drink (an agent that asks for one on a tick in fifty, as it does
+    /// at any time, would otherwise never finish half of its drinks). To
+    /// heal, stop first. Asked with the sword in hand, the
     /// number key of the potion of Speed or of the steak is pressed with a
     /// right click, and the button stays down on the ticks that follow, on
     /// which nothing else is asked, until the client is no longer using the
@@ -1326,11 +1525,11 @@ impl Env {
     /// meal is one steak. No left click is made meanwhile: the game throws
     /// them away while an item is in use.
     fn consume_keys(&mut self, id: usize, choice: i32, inp: &mut Input) {
-        self.asked_bar[id] = choice.clamp(0, 4) as u8;
+        self.asked_bar[id] = choice.clamp(0, 6) as u8;
         let lp = &self.m.c[id].lp;
         if self.consume[id] == 0 {
             let slot = match choice {
-                2 if lp.drinks != 0 => lp.drinks.trailing_zeros() as u8,
+                2 if lp.drinks != 0 && self.drink_due(id) => lp.drinks.trailing_zeros() as u8,
                 3 if lp.steak > 0 && lp.food < 20 => SLOT_FOOD,
                 _ => return,
             };
@@ -1343,7 +1542,7 @@ impl Env {
             inp.use_again = self.prev_inp[id].use_item;
             self.consume[id] = (choice - 1) as u8;
             self.was_consuming[id] = false;
-        } else if (self.was_consuming[id] && !lp.consuming()) || choice == 4 || choice == 1 || lp.held == SLOT_SWORD {
+        } else if (self.was_consuming[id] && !lp.consuming()) || choice == 4 || lp.held == SLOT_SWORD {
             inp.slot_key = SLOT_SWORD + 1;
             inp.use_item = false;
             self.consume[id] = 0;
@@ -1358,6 +1557,90 @@ impl Env {
                 self.consume[id] = 0;
             }
         }
+    }
+
+    /// One click of the mouse on a slot of the inventory. It comes out of
+    /// the same budget as the clicks with the sword.
+    fn take_click(&mut self, id: usize) -> bool {
+        if self.cps[id] >= 20.0 {
+            return true;
+        }
+        let t = self.clicks_available(id);
+        let can = t >= 1.0 - 1e-9;
+        self.click_tokens[id] = if can { t - 1.0 } else { t };
+        can
+    }
+
+    /// The inventory, for player `id`: `choice` 5 asks for a healing potion
+    /// from its rows and 6 for a potion of Speed. Asked with the screen
+    /// shut, the sword in hand and nothing else under way, the inventory
+    /// key is pressed, if there is such a potion and a way to make room
+    /// for it. On the next tick the potion is shift-clicked, whatever is
+    /// asked then (an empty bottle first, on a tick of its own, when the
+    /// hotbar is full). From then on every tick that asks for a potion
+    /// clicks another one down, and a tick that asks for anything else
+    /// shuts the screen. A click after which nothing more could come down
+    /// shuts it in the same tick. A click the click rate does not cover
+    /// waits a tick. Returns whether the tick belongs to the screen: the
+    /// game then takes no other key or button, and none is passed on.
+    fn refill_keys(&mut self, id: usize, choice: i32, inp: &mut Input) -> bool {
+        let want = match choice {
+            5 => Some(Item::Potion),
+            6 => Some(Item::Drink),
+            _ => None,
+        };
+        let lp = &self.m.c[id].lp;
+        let (bar, rows) = (lp.bar(), lp.rows);
+        let inv;
+        if self.refill[id] == 0 {
+            let Some(kind) = want else { return false };
+            if lp.held != SLOT_SWORD || self.pearl_stage[id] != 0 || self.potion_stage[id] != 0 || self.consume[id] != 0 {
+                return false;
+            }
+            if refill_click(&bar, &rows, kind).is_none() {
+                return false;
+            }
+            self.refill[id] = 1;
+            self.refill_kind[id] = kind;
+            self.click_tokens[id] = self.clicks_available(id);
+            inv = 1;
+        } else {
+            let kind = if self.refill[id] == 1 { Some(self.refill_kind[id]) } else { want };
+            match kind.and_then(|k| refill_click(&bar, &rows, k)) {
+                None => {
+                    self.refill[id] = 0;
+                    self.click_tokens[id] = self.clicks_available(id);
+                    inv = 0;
+                }
+                Some(slot) => {
+                    if self.take_click(id) {
+                        let (mut b, mut r) = (bar, rows);
+                        shift_click(&mut b, &mut r, slot);
+                        let more = refill_click(&b, &r, Item::Potion).is_some() || refill_click(&b, &r, Item::Drink).is_some();
+                        if !more {
+                            self.refill[id] = 0;
+                            inv = slot + INV_SHUT;
+                        } else {
+                            // A bottle put away is not yet the potion.
+                            if slot < WINDOW_BAR {
+                                self.refill[id] = 2;
+                            }
+                            inv = slot;
+                        }
+                    } else {
+                        inv = 1;
+                    }
+                }
+            }
+        }
+        self.asked_bar[id] = choice.clamp(0, 6) as u8;
+        self.asked_potion[id] = false;
+        self.asked_pearl[id] = false;
+        if self.pearl_wait[id] > 0 {
+            self.pearl_wait[id] -= 1;
+        }
+        *inp = Input { inv, ..Input::default() };
+        true
     }
 
     /// The key presses of a potion throw, as `pearl_keys`: the number key
@@ -1544,6 +1827,18 @@ impl Env {
         if sp.food.level > 6 {
             self.ep.fed[id] += 1.0;
         }
+        // The inventory.
+        let open = self.m.c[id].lp.inv_open;
+        if open || self.was_open[id] {
+            self.ep.inv_ticks[id] += 1.0;
+        }
+        if open && !self.was_open[id] {
+            self.ep.inv_opens[id] += 1.0;
+        }
+        if out.moved.is_some() && (9..36).contains(&(inp.inv % INV_SHUT)) {
+            self.ep.refills[id] += 1.0;
+        }
+        self.was_open[id] = open;
         if out.threw {
             self.ep.pearls[id] += 1.0;
             // The server starts its wait when the throw reaches it, a
@@ -1571,10 +1866,11 @@ impl Env {
         self.ep.episodes = 1.0;
         let ep = self.ep;
         self.total.add(&ep);
-        let (m, ping, bot) = new_match(&self.params, &mut self.rng, self.mode);
+        let (m, ping, bot, lesson) = new_duel(&self.params, &mut self.rng, self.mode);
         self.m = m;
         self.ping_ms = ping;
         self.bot = bot;
+        self.lesson = lesson;
         self.begin();
     }
 
@@ -1584,10 +1880,12 @@ impl Env {
         let id = self.pending;
         let mut inp = decode_action(action);
         let bar = if action.len() > 9 { action[9] } else { 0 };
-        self.consume_keys(id, bar, &mut inp);
-        self.potion_keys(id, bar == 1, &mut inp);
-        self.pearl_keys(id, action.len() > 8 && action[8] != 0, &mut inp);
-        self.limit_clicks(id, &mut inp);
+        if !self.refill_keys(id, bar, &mut inp) {
+            self.consume_keys(id, bar, &mut inp);
+            self.potion_keys(id, bar == 1, &mut inp);
+            self.pearl_keys(id, action.len() > 8 && action[8] != 0, &mut inp);
+            self.limit_clicks(id, &mut inp);
+        }
         let out = self.m.client_tick(id, &inp);
         self.account(id, &inp, &out);
         let mut round_done = id == 1;
@@ -1722,6 +2020,12 @@ impl Env {
             o[b + 39] = sp.food.level as f32;
             o[b + 40] = sp.drinks.count_ones() as f32;
             o[b + 41] = sp.fx as i32 as f32;
+            // The inventory: whether this player's client has its screen
+            // open, and the healing potions and the potions of Speed in
+            // its rows as the server has them.
+            o[b + 42] = lp.inv_open as i32 as f32;
+            o[b + 43] = sp.rows.count(Item::Potion) as f32;
+            o[b + 44] = sp.rows.count(Item::Drink) as f32;
         }
         let g = 2 * VIEW_PLAYER;
         o[g] = self.ticks_left as f32;
@@ -2026,6 +2330,24 @@ impl Env {
         o[141] = (rp.using && rp.item == Item::Drink) as u8 as f32;
         o[142] = (rp.using && rp.item == Item::Food) as u8 as f32;
         o[143] = self.opp_use_ticks[id].min(48) as f32 / USE_TICKS as f32;
+        // The inventory: whether its screen is open, the healing potions
+        // and the potions of Speed in its rows, the free slots and the
+        // empty bottles in the hotbar, and whether the screen was opened
+        // for a potion that has not come down yet.
+        let bar = lp.bar();
+        o[144] = lp.inv_open as u8 as f32;
+        o[145] = (lp.rows.count(Item::Potion) as f32 / 8.0).min(3.0);
+        o[146] = (lp.rows.count(Item::Drink) as f32 / 2.0).min(3.0);
+        o[147] = (1..9u8).filter(|&k| bar.stack(k).0 == Item::Empty).count() as f32 / 8.0;
+        o[148] = lp.bottles.count_ones() as f32 / 2.0;
+        o[149] = (self.refill[id] == 1) as u8 as f32;
+        // The Speed it has left out of the last seconds in which a drink
+        // is taken: 1 with more than that, when a drink would not be.
+        o[150] = if self.params.drink_window_s < 0.0 {
+            speed as u8 as f32
+        } else {
+            (lp.speed_ticks.max(0) as f32 / self.drink_window().max(1) as f32).min(1.0)
+        };
     }
 
     /// Extra inputs for the value function only: things a client cannot see.
@@ -2123,6 +2445,11 @@ impl Env {
             o[62 + 4 * k] = q.drinks.count_ones() as f32 / 2.0;
             o[63 + 4 * k] = if q.using_item && q.use_slot != SLOT_SWORD { q.use_count.clamp(0, USE_TICKS) as f32 / USE_TICKS as f32 } else { 0.0 };
         }
+        // The opponent's inventory: whether it has the screen open, and
+        // the potions in its rows.
+        o[68] = other.inv_open as u8 as f32;
+        o[69] = (s.p[1 - id].rows.count(Item::Potion) as f32 / 8.0).min(3.0);
+        o[70] = (s.p[1 - id].rows.count(Item::Drink) as f32 / 2.0).min(3.0);
     }
 }
 

@@ -243,8 +243,8 @@ fn server_echoes_sprint_metadata_to_the_player_itself() {
 fn deterministic() {
     let run = || {
         let mut m = duel([0.0, 0.0, 0.0], 10.0, [1.0, 0.0, 3.0], 170.0, 1, 60);
-        let a = Input { forward: 1, strafe: 1, sprint_key: true, attack: true, dx: 3, dy: -1, jump: true, extra_clicks: 0, use_item: false, use_again: false, slot_key: 0 };
-        let b = Input { forward: 1, strafe: -1, sprint_key: true, attack: true, dx: -2, dy: 1, jump: false, extra_clicks: 0, use_item: false, use_again: false, slot_key: 0 };
+        let a = Input { forward: 1, strafe: 1, sprint_key: true, attack: true, dx: 3, dy: -1, jump: true, extra_clicks: 0, use_item: false, use_again: false, slot_key: 0, inv: 0 };
+        let b = Input { forward: 1, strafe: -1, sprint_key: true, attack: true, dx: -2, dy: 1, jump: false, extra_clicks: 0, use_item: false, use_again: false, slot_key: 0, inv: 0 };
         for _ in 0..400 {
             step(&mut m, &a, &b);
         }

@@ -2,9 +2,9 @@
 //! produce the same kind of input as the learning agent. They give early
 //! training a target, and later serve as fixed yardsticks.
 use crate::aabb::{V3, EYE_HEIGHT};
-use crate::client::{Client, ClientCfg, Input};
+use crate::client::{Client, ClientCfg, Input, INV_SHUT};
 use crate::mth::{self, Rng};
-use crate::net::{Item, Kind, SLOT_FOOD, SLOT_SWORD};
+use crate::net::{refill_click, shift_click, Item, Kind, SLOT_FOOD, SLOT_SWORD, WINDOW_BAR};
 use crate::world::World;
 
 #[derive(Clone, Copy, Debug)]
@@ -51,6 +51,10 @@ pub struct BotParams {
     /// How readily it drinks its potion of Speed when the Speed is over or
     /// nearly, and eats when it is hungry (0 never).
     pub drink: f64,
+    /// How readily it goes to its inventory for more potions once it has
+    /// too few at hand (0 never). It stands still with the screen open,
+    /// so the better bots wait for room, as for a drink.
+    pub refill: f64,
 }
 
 impl BotParams {
@@ -72,6 +76,7 @@ impl BotParams {
                 pearl_lead: 3.0,
                 potion: 0.0,
                 drink: 0.0,
+                refill: 0.0,
             },
             2 => BotParams {
                 level,
@@ -89,6 +94,7 @@ impl BotParams {
                 pearl_lead: 3.0,
                 potion: 0.4,
                 drink: 0.4,
+                refill: 0.4,
             },
             3 => BotParams {
                 level,
@@ -106,6 +112,7 @@ impl BotParams {
                 pearl_lead: 3.0,
                 potion: 0.7,
                 drink: 0.7,
+                refill: 0.7,
             },
             _ => BotParams {
                 level: 4,
@@ -123,6 +130,7 @@ impl BotParams {
                 pearl_lead: 3.0,
                 potion: 1.0,
                 drink: 1.0,
+                refill: 1.0,
             },
         }
     }
@@ -184,6 +192,16 @@ pub struct BotState {
     use_drawn: bool,
     drink_at: i32,
     eat_at: i32,
+    /// The inventory: whether its screen is open, the potions it still
+    /// means to get down on this visit, the ticks until it may go again,
+    /// for how many ticks it has wanted to, and, once drawn, the number
+    /// of healing potions at hand at or below which it goes.
+    pub inv_open: bool,
+    inv_left: u8,
+    inv_wait: i32,
+    inv_need: i32,
+    inv_drawn: bool,
+    inv_keep: u32,
 }
 
 fn gauss(rng: &mut Rng) -> f64 {
@@ -450,6 +468,79 @@ pub fn act(c: &Client, world: &World, cfg: &ClientCfg, p: &BotParams, st: &mut B
     let dx = rp.pos[0] - lp.l.body.pos[0];
     let dz = rp.pos[2] - lp.l.body.pos[2];
     let hdist = (dx * dx + dz * dz).sqrt();
+
+    // The inventory. With the screen open the game takes no other key, so
+    // a tick of it is nothing but the click or the key that shuts it. It
+    // gets the potion of Speed down first if the Speed is over, then
+    // healing potions, one a tick, and shuts the screen with the last.
+    if st.inv_open {
+        let bar = lp.bar();
+        let cup = lp.drinks == 0 && lp.speed_ticks <= st.drink_at.max(0);
+        let pick = |b: &crate::net::Bar, r: &crate::net::Rows| {
+            refill_click(b, r, Item::Drink).filter(|_| cup).or_else(|| refill_click(b, r, Item::Potion))
+        };
+        let click = if st.inv_left > 0 { pick(&bar, &lp.rows) } else { None };
+        let mut screen = Input::default();
+        match click {
+            Some(slot) => {
+                if slot < WINDOW_BAR {
+                    st.inv_left -= 1;
+                }
+                let (mut b, mut r) = (bar, lp.rows);
+                shift_click(&mut b, &mut r, slot);
+                if st.inv_left > 0 && refill_click(&b, &r, Item::Potion).is_some() {
+                    screen.inv = slot;
+                } else if slot >= WINDOW_BAR {
+                    screen.inv = slot;
+                } else {
+                    screen.inv = slot + INV_SHUT;
+                    st.inv_open = false;
+                    st.inv_wait = 20;
+                }
+            }
+            None => {
+                st.inv_open = false;
+                st.inv_wait = 20;
+            }
+        }
+        return screen;
+    }
+    if st.inv_wait > 0 {
+        st.inv_wait -= 1;
+    }
+    // Nothing is drawn in a duel without potions in the rows, so that the
+    // others go as they always did.
+    let (more_p, more_d) = (lp.rows.count(Item::Potion) > 0, lp.rows.count(Item::Drink) > 0);
+    if p.refill > 0.0 && (more_p || more_d) {
+        if !st.inv_drawn {
+            st.inv_drawn = true;
+            st.inv_keep = (rng.next_u64() % 2) as u32;
+        }
+        let bar = lp.bar();
+        let pots = more_p && lp.potions.count_ones() <= st.inv_keep && refill_click(&bar, &lp.rows, Item::Potion).is_some();
+        let cups = more_d && lp.drinks == 0 && lp.speed_ticks <= st.drink_at.max(0) && refill_click(&bar, &lp.rows, Item::Drink).is_some();
+        let free = st.inv_wait == 0
+            && st.pearl_stage == 0
+            && st.potion_stage == 0
+            && st.use_stage == 0
+            && lp.held == SLOT_SWORD
+            && st.block_left == 0;
+        if (pots || cups) && free {
+            st.inv_need += 1;
+            let busy = rp.using && matches!(rp.item, Item::Drink | Item::Food);
+            let room = [0.0, 0.0, 3.0, 5.0, 7.0][p.level.min(4) as usize];
+            // Hurt with nothing to heal with, it cannot wait for long.
+            let urgent = (st.inv_need > 60 && hdist > 0.5 * room) || (pots && lp.potions == 0 && lp.health <= 9.0 && st.inv_need > 8);
+            if (hdist > room || busy || urgent) && rng.chance(0.3 * p.refill) {
+                st.inv_open = true;
+                st.inv_left = 1 + (rng.next_u64() % 5) as u8 + cups as u8;
+                st.inv_need = 0;
+                return Input { inv: 1, ..Input::default() };
+            }
+        } else {
+            st.inv_need = 0;
+        }
+    }
 
     inp.sprint_key = true;
     inp.forward = if hdist > 1.2 { 1 } else { 0 };

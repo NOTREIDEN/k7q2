@@ -162,22 +162,50 @@ fn a_drink_slows_the_player_down_and_shows() {
 
 #[test]
 fn a_drink_that_is_stopped_keeps_the_potion() {
-    for stop in [STOP, THROW] {
-        let mut e = Env::new(Mode::SelfPlay, params(), 4);
-        run(&mut e, 30, |_, k| match k {
-            0 => bar(DRINK),
-            15 => bar(stop),
-            _ => IDLE,
-        });
-        let (sp, lp) = (&e.m.s.p[0], &e.m.c[0].lp);
-        assert_eq!(sp.drinks.count_ones(), 2);
-        assert_eq!(sp.speed_ticks, 0);
-        assert!(!sp.using_item && !lp.using_item);
-        assert_eq!(lp.held, SLOT_SWORD);
-        assert_eq!(sp.potions.count_ones(), 5, "the tick that stops throws nothing");
-        assert_eq!(e.episode().sips, [1.0, 0.0]);
-        assert_eq!(e.episode().drinks, [0.0, 0.0]);
-    }
+    let mut e = Env::new(Mode::SelfPlay, params(), 4);
+    run(&mut e, 30, |_, k| match k {
+        0 => bar(DRINK),
+        15 => bar(STOP),
+        _ => IDLE,
+    });
+    let (sp, lp) = (&e.m.s.p[0], &e.m.c[0].lp);
+    assert_eq!(sp.drinks.count_ones(), 2);
+    assert_eq!(sp.speed_ticks, 0);
+    assert!(!sp.using_item && !lp.using_item);
+    assert_eq!(lp.held, SLOT_SWORD);
+    assert_eq!(sp.potions.count_ones(), 5, "the tick that stops throws nothing");
+    assert_eq!(e.episode().sips, [1.0, 0.0]);
+    assert_eq!(e.episode().drinks, [0.0, 0.0]);
+}
+
+#[test]
+fn a_healing_potion_asked_for_during_a_drink_waits_for_its_end() {
+    let mut e = Env::new(Mode::SelfPlay, params(), 4);
+    // Asked on five ticks of the drink: nothing is thrown and the drink goes on.
+    run(&mut e, 30, |_, k| match k {
+        0 => bar(DRINK),
+        5 | 12 | 13 | 20 | 28 => bar(THROW),
+        _ => IDLE,
+    });
+    let (sp, lp) = (&e.m.s.p[0], &e.m.c[0].lp);
+    assert!(sp.using_item && lp.using_item, "still drinking");
+    assert_eq!(sp.potions.count_ones(), 5);
+    run(&mut e, 12, |_, _| IDLE);
+    let sp = &e.m.s.p[0];
+    assert!(sp.speed_ticks > 0, "drunk to the end");
+    assert_eq!(e.episode().drinks, [1.0, 0.0]);
+    // Stopping and then asking is how a drink gives way to a potion.
+    let mut e = Env::new(Mode::SelfPlay, params(), 4);
+    run(&mut e, 24, |_, k| match k {
+        0 => bar(DRINK),
+        10 => bar(STOP),
+        11 | 12 => bar(THROW),
+        _ => IDLE,
+    });
+    let sp = &e.m.s.p[0];
+    assert_eq!(sp.speed_ticks, 0);
+    assert_eq!(sp.drinks.count_ones(), 2);
+    assert!(sp.potions.count_ones() < 5, "the potion asked for after the stop is thrown");
 }
 
 #[test]
@@ -314,8 +342,44 @@ fn duels_without_the_new_kit_are_as_before() {
     assert_eq!((o[128], o[129], o[130], o[131]), (1.0, 1.0, 0.0, 0.0));
 }
 
-/// How many of twenty bots of this level had done `what` after `ticks`
-/// ticks of standing `dist` blocks from an agent that does nothing.
+/// A potion of Speed is drunk in the last seconds of the Speed a player
+/// has, or without any, and `w_speed` counts the Speed left up to those
+/// seconds.
+#[test]
+fn a_drink_is_for_the_last_seconds_of_speed() {
+    let duel = |w: f32, left: f64, window: f64| {
+        let mut p = params();
+        p.w_speed = w;
+        p.speed_left_s = [left, left];
+        p.drink_window_s = window;
+        Env::new(Mode::SelfPlay, p, 23)
+    };
+    let drink = |_: &Env, k: usize| bar(if k == 0 { DRINK } else { 0 });
+    // Thirty seconds left, of which fifteen count: asked for, nothing happens.
+    let mut e = duel(3.0, 30.0, 15.0);
+    assert_eq!(obs(&e)[150], 1.0);
+    run(&mut e, 40, drink);
+    assert_eq!(e.m.s.p[0].drinks.count_ones(), 2, "no potion was drunk");
+    assert_eq!(e.episode().sips, [0.0, 0.0]);
+    // Ten seconds left: two thirds of `w_speed` are there, a hundred ticks
+    // take a third of it, and the drink brings back all that is missing.
+    let (mut a, mut b) = (duel(3.0, 10.0, 15.0), duel(0.0, 10.0, 15.0));
+    assert!((obs(&a)[150] - 2.0 / 3.0).abs() < 0.02);
+    let (ra, rb) = (paid(&mut a, 100, |_, _| IDLE), paid(&mut b, 100, |_, _| IDLE));
+    assert!((ra - rb + 1.0).abs() < 0.05, "paid {ra} with, {rb} without");
+    let (ra, rb) = (paid(&mut a, 60, drink), paid(&mut b, 60, drink));
+    assert_eq!(a.m.s.p[0].drinks.count_ones(), 1, "the potion was drunk");
+    assert!(a.m.s.p[0].speed_ticks > 1500);
+    assert!((ra - rb - 2.0).abs() < 0.05, "paid {ra} with, {rb} without");
+    assert_eq!(obs(&a)[150], 1.0);
+    // Without the window a drink is taken at any time, and pays nothing
+    // while there is any Speed.
+    let (mut a, mut b) = (duel(3.0, 30.0, -1.0), duel(0.0, 30.0, -1.0));
+    let (ra, rb) = (paid(&mut a, 60, drink), paid(&mut b, 60, drink));
+    assert_eq!(a.m.s.p[0].drinks.count_ones(), 1);
+    assert!((ra - rb).abs() < 1e-4, "paid {ra} with, {rb} without");
+}
+
 /// Having Speed and having food enough to sprint are paid as a difference
 /// of state: once when a player gets there, taken back when it loses it,
 /// and nothing for a drink that changes neither.
@@ -334,9 +398,10 @@ fn speed_and_food_are_paid_once_and_taken_back() {
     let (ra, rb) = (paid(&mut a, 60, drink), paid(&mut b, 60, drink));
     assert_eq!(a.m.c[0].lp.speed_amp, 1);
     assert!((ra - rb - 2.0).abs() < 1e-4, "paid {ra} with, {rb} without");
-    // A second drink with Speed on changes nothing.
+    // A second drink with all that Speed left is not taken, and nothing
+    // is paid.
     let (ra, rb) = (paid(&mut a, 60, drink), paid(&mut b, 60, drink));
-    assert_eq!(a.m.s.p[0].drinks, 0, "both potions are drunk");
+    assert_eq!(a.m.s.p[0].drinks.count_ones(), 1, "the second potion is kept");
     assert!((ra - rb).abs() < 1e-4, "paid {ra} with, {rb} without");
     // When it runs out it is taken back.
     let n = DRINK_TICKS as usize + 20;
