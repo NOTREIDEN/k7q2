@@ -73,6 +73,13 @@ Check a checkpoint against each scripted bot level:
 
     python evaluate.py runs/stage1/latest.pt
 
+Two more reports look at single habits of a checkpoint against one bot
+level: `python block_report.py latest.pt 4` (how long it holds a block,
+what its hits do right after one, how it is hit while blocking) and
+`python pearl_report.py latest.pt 4` (where the bot's pearls put the bot,
+how fast the agent has its crosshair on it again and who hits whom in the
+two seconds after).
+
 ## Train on several machines
 
 `.github/workflows/train.yml` starts a number of machines that all train
