@@ -4,7 +4,7 @@
 use crate::aabb::{V3, EYE_HEIGHT};
 use crate::client::{Client, ClientCfg, Input};
 use crate::mth::{self, Rng};
-use crate::net::{Item, Kind, SLOT_SWORD};
+use crate::net::{Item, Kind, SLOT_FOOD, SLOT_SWORD};
 use crate::world::World;
 
 #[derive(Clone, Copy, Debug)]
@@ -48,6 +48,9 @@ pub struct BotParams {
     /// moment in which the opponent is not on top of it, unless it is
     /// nearly dead.
     pub potion: f64,
+    /// How readily it drinks its potion of Speed when the Speed is over or
+    /// nearly, and eats when it is hungry (0 never).
+    pub drink: f64,
 }
 
 impl BotParams {
@@ -68,6 +71,7 @@ impl BotParams {
                 pearl_cd: 0,
                 pearl_lead: 3.0,
                 potion: 0.0,
+                drink: 0.0,
             },
             2 => BotParams {
                 level,
@@ -84,6 +88,7 @@ impl BotParams {
                 pearl_cd: 0,
                 pearl_lead: 3.0,
                 potion: 0.4,
+                drink: 0.4,
             },
             3 => BotParams {
                 level,
@@ -100,6 +105,7 @@ impl BotParams {
                 pearl_cd: 0,
                 pearl_lead: 3.0,
                 potion: 0.7,
+                drink: 0.7,
             },
             _ => BotParams {
                 level: 4,
@@ -116,6 +122,7 @@ impl BotParams {
                 pearl_cd: 0,
                 pearl_lead: 3.0,
                 potion: 1.0,
+                drink: 1.0,
             },
         }
     }
@@ -161,6 +168,22 @@ pub struct BotState {
     /// drawn yet), and whether the throw under way is made running away.
     potion_at: f32,
     potion_away: bool,
+    /// 0: neither drinking nor eating. 1: a potion of Speed in hand and
+    /// the right button down. 2: the same with steak.
+    pub use_stage: u8,
+    /// Whether the client has been using the item since the button went
+    /// down, and for how many ticks it has been down.
+    use_seen: bool,
+    use_ticks: i32,
+    /// Ticks until it may try again, and for how many ticks it has wanted
+    /// a drink or a meal without getting to it.
+    use_wait: i32,
+    use_need: i32,
+    /// The ticks of Speed left at which it drinks and the food at or below
+    /// which it eats in this duel, once drawn.
+    use_drawn: bool,
+    drink_at: i32,
+    eat_at: i32,
 }
 
 fn gauss(rng: &mut Rng) -> f64 {
@@ -297,7 +320,9 @@ fn pearl_target(c: &Client, world: &World, p: &BotParams, st: &BotState, hdist: 
         // where its potion breaks. A potion is in the air for a quarter of
         // a second, too short to answer, so the bot does not wait to see
         // one.
-        let potting = c.rp.item == Item::Potion || c.thrown.iter().any(|e| e.kind == Kind::Potion && !e.mine);
+        let potting = c.rp.item == Item::Potion
+            || c.thrown.iter().any(|e| e.kind == Kind::Potion && !e.mine)
+            || (c.rp.using && matches!(c.rp.item, Item::Drink | Item::Food));
         let low = c.rp.health <= 10.0;
         if hdist > 2.8 && ((potting && rng.chance(0.6 * p.pearl_attack)) || (low && rng.chance(0.25 * p.pearl_attack))) {
             kind = 4;
@@ -502,6 +527,7 @@ pub fn act(c: &Client, world: &World, cfg: &ClientCfg, p: &BotParams, st: &mut B
                 && st.pearl_wait == 0
                 && lp.held == SLOT_SWORD
                 && st.potion_stage == 0
+                && st.use_stage == 0
                 && st.block_left == 0;
             if ready {
                 if let Some((q, kind)) = pearl_target(c, world, p, st, hdist, rng) {
@@ -562,6 +588,7 @@ pub fn act(c: &Client, world: &World, cfg: &ClientCfg, p: &BotParams, st: &mut B
                 && lp.health <= st.potion_at
                 && st.potion_wait == 0
                 && st.pearl_stage == 0
+                && st.use_stage == 0
                 && lp.held == SLOT_SWORD
                 && st.block_left == 0;
             let good_moment = p.level < 4 || hdist > 3.5 || rp.ticks_since_hurt <= 8 || lp.health <= 6.0;
@@ -607,6 +634,77 @@ pub fn act(c: &Client, world: &World, cfg: &ClientCfg, p: &BotParams, st: &mut B
             inp.slot_key = 1;
             inp.use_item = false;
             st.potion_stage = 0;
+        }
+    }
+
+    // Drinks and meals. When its Speed is over, or nearly for the better
+    // bots, and it carries a potion of it, or when it is hungry, it takes
+    // the potion or the steak in hand and keeps the right button down
+    // until the server says it is done. The better the bot, the more room
+    // it wants for that, though not for ever; the best one backs off
+    // meanwhile and gives up when the opponent gets to it too early.
+    if st.use_wait > 0 {
+        st.use_wait -= 1;
+    }
+    // Drawn only in a duel that has something to drink or eat, so that
+    // the others go as they always did.
+    if !st.use_drawn && p.drink > 0.0 && (lp.drinks != 0 || lp.steak > 0) {
+        st.use_drawn = true;
+        let (lo, hi) = [(0.0, 0.0), (0.0, 0.0), (0.0, 40.0), (20.0, 100.0), (40.0, 160.0)][p.level.min(4) as usize];
+        st.drink_at = rng.range(lo, hi).round() as i32;
+        let (lo, hi) = [(6.0, 6.0), (6.0, 6.0), (6.0, 8.0), (6.0, 12.0), (8.0, 17.0)][p.level.min(4) as usize];
+        st.eat_at = rng.range(lo, hi).round() as i32;
+    }
+    match st.use_stage {
+        0 => {
+            let drink = lp.drinks != 0 && lp.speed_ticks <= st.drink_at;
+            let eat = lp.steak > 0 && lp.food <= st.eat_at && lp.food < 20;
+            let free = st.use_drawn
+                && st.use_wait == 0
+                && st.pearl_stage == 0
+                && st.potion_stage == 0
+                && lp.held == SLOT_SWORD
+                && st.block_left == 0;
+            if (drink || eat) && free {
+                st.use_need += 1;
+                let busy = rp.using && matches!(rp.item, Item::Drink | Item::Food);
+                let room = [0.0, 0.0, 3.0, 5.0, 7.0][p.level.min(4) as usize];
+                let urgent = st.use_need > 80 && hdist > 0.5 * room;
+                if (hdist > room || busy || urgent) && rng.chance(0.3 * p.drink) {
+                    // The drink first: without Speed it loses every race.
+                    let slot = if drink { lp.drinks.trailing_zeros() as u8 } else { SLOT_FOOD };
+                    inp.slot_key = slot + 1;
+                    inp.use_item = true;
+                    inp.attack = false;
+                    st.use_stage = if drink { 1 } else { 2 };
+                    st.use_seen = false;
+                    st.use_ticks = 0;
+                    st.use_need = 0;
+                }
+            } else if !(drink || eat) {
+                st.use_need = 0;
+            }
+        }
+        _ => {
+            st.use_ticks += 1;
+            let using = lp.consuming();
+            let done = st.use_seen && !using;
+            let never = !st.use_seen && !using && st.use_ticks > 3;
+            let caught = p.level >= 4 && hdist < 3.2 && using && lp.use_count > 12;
+            if done || never || caught {
+                inp.slot_key = SLOT_SWORD + 1;
+                inp.use_item = false;
+                st.use_stage = 0;
+                st.use_wait = if caught { 25 } else { 8 };
+            } else {
+                inp.use_item = true;
+                inp.attack = false;
+                if p.level >= 3 {
+                    inp.forward = -1;
+                    inp.sprint_key = false;
+                }
+            }
+            st.use_seen |= using;
         }
     }
     inp

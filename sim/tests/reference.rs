@@ -233,8 +233,8 @@ fn server_echoes_sprint_metadata_to_the_player_itself() {
     let world = m.world.clone();
     m.s.handle(0, C2S::Sprint(true), &world, &mut m.rng, &mut out);
     m.s.tick(&world, &mut m.rng, &mut out);
-    assert!(out.contains(&(0, S2C::Meta { own: true, flags: Some((true, false)), health: None })), "{out:?}");
-    assert!(out.contains(&(1, S2C::Meta { own: false, flags: Some((true, false)), health: None })), "{out:?}");
+    assert!(out.contains(&(0, S2C::Meta { own: true, flags: Some((true, false)), health: None, fx: None })), "{out:?}");
+    assert!(out.contains(&(1, S2C::Meta { own: false, flags: Some((true, false)), health: None, fx: None })), "{out:?}");
     let base = 0.1f32 as f64;
     assert!(out.contains(&(0, S2C::Props { own: true, base, speed_amp: 1, sprint: true })), "{out:?}");
 }

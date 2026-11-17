@@ -11,22 +11,29 @@ use crate::aabb::{dist, dist_sq, Aabb, V3};
 use crate::bot::{self, BotParams, BotState};
 use crate::client::{pearl_landing, pearl_preview, ClientCfg, Edge, Input, TickOut, MAX_BACKTRACK};
 use crate::mth::{self, Rng};
-use crate::net::{potion_mask, Item, Kind, SLOT_PEARL, SLOT_SWORD};
-use crate::server::{feather_points, prot_points, splash_heal, throw_heading, KbPlugin, KbProfile, ServerCfg, MAX_HEALTH, PEARL_DAMAGE, POTION_HEAL};
+use crate::net::{potion_mask, Item, Kind, SLOT_FOOD, SLOT_PEARL, SLOT_SWORD, USE_TICKS};
+use crate::server::{
+    feather_points, prot_points, splash_heal, throw_heading, Food, KbPlugin, KbProfile, ServerCfg, DRINK_SHOWN, MAX_HEALTH, PEARL_DAMAGE,
+    POTION_HEAL,
+};
 use crate::sim::{Match, NetCfg, Spawn, TICK_US};
 use crate::world::{RayHit, World};
 
 pub const ACT_HEADS: usize = 10;
 /// forward, strafe, jump, sprint key, attack, yaw bin, pitch bin, right
-/// mouse button (block with the sword), throw a pearl, throw a potion.
+/// mouse button (block with the sword), throw a pearl, and what to do with
+/// the rest of the hotbar: nothing, throw a healing potion, drink the
+/// potion of Speed, eat, or stop drinking or eating.
 ///
-/// Each of the last two stands for three key presses a player makes in a
-/// row: the number key of the pearls or of a potion with a right click,
-/// then the number key of the sword on the next tick (see
+/// A pearl and a potion throw each stand for three key presses a player
+/// makes in a row: the number key of the pearls or of a potion with a right
+/// click, then the number key of the sword on the next tick (see
 /// `Env::pearl_keys` and `Env::potion_keys`). The pearl does nothing while
 /// the server's cooldown runs or when no pearl is left, the potion when no
-/// potion is left.
-pub const ACT_DIMS: [i32; ACT_HEADS] = [3, 3, 2, 2, 2, 27, 29, 2, 2, 2];
+/// potion is left. A drink or a meal is asked for once: the number key and
+/// the right button, which then stays down until the server says it is
+/// done or the player stops (see `Env::consume_keys`).
+pub const ACT_DIMS: [i32; ACT_HEADS] = [3, 3, 2, 2, 2, 27, 29, 2, 2, 5];
 /// Mouse counts per tick. One count is 0.15 degrees at sensitivity 0.5.
 pub const YAW_BINS: [i32; 27] = [
     -377, -233, -144, -89, -55, -34, -21, -13, -8, -5, -3, -2, -1, 0, 1, 2, 3, 5, 8, 13, 21, 34, 55, 89, 144, 233, 377,
@@ -38,11 +45,11 @@ pub const PITCH_BINS: [i32; 29] = [
     -89, -55, -34, -21, -13, -8, -5, -3, -2, -1, 0, 1, 2, 3, 5, 8, 13, 21, 34, 55, 89, -377, -233, -144, 144, 233, 377, -600, 600,
 ];
 
-pub const OBS_DIM: usize = 128;
-pub const PRIV_DIM: usize = 60;
-pub const STATS_DIM: usize = 60;
+pub const OBS_DIM: usize = 144;
+pub const PRIV_DIM: usize = 68;
+pub const STATS_DIM: usize = 78;
 /// Floats per player and in total written by `Env::write_view`.
-pub const VIEW_PLAYER: usize = 36;
+pub const VIEW_PLAYER: usize = 42;
 pub const VIEW_DIM: usize = 2 * VIEW_PLAYER + 24;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -209,6 +216,30 @@ pub struct Params {
     /// Pearls for one player only: 0 both, 1 only the first, 2 only the
     /// second.
     pub pearls_who: u8,
+    /// Share of the duels with real health in which the Speed is that of a
+    /// potion: it runs out, and a player can carry potions of it to drink.
+    pub speed_end_prob: f64,
+    /// The seconds of Speed a player has left when such a duel starts,
+    /// drawn per player; none at all when the draw is not above zero.
+    pub speed_left_s: [f64; 2],
+    /// The potions of Speed it carries, drawn per player (0 to 2).
+    pub drinks: [f64; 2],
+    /// Share of the duels with real health in which running, jumping and
+    /// fighting use up food and both players carry steak.
+    pub hunger_prob: f64,
+    /// The food a player starts such a duel with, drawn per player.
+    pub start_food: [f64; 2],
+    /// Speed that runs out for one player only: 0 both, 1 only the first,
+    /// 2 only the second.
+    pub speed_who: u8,
+    /// Scales how readily scripted bots drink and eat. 0 turns it off.
+    pub bot_drink: f64,
+    /// What it is worth to a player, in hits, to have Speed and to have
+    /// food enough to sprint. Paid as a difference of state: once when it
+    /// gets there and taken back when it loses it, so that neither can be
+    /// collected twice and drinking or eating by itself earns nothing.
+    pub w_speed: f32,
+    pub w_fed: f32,
 }
 
 impl Default for Params {
@@ -285,6 +316,15 @@ impl Default for Params {
             hunger: false,
             hurt_who: 0,
             pearls_who: 0,
+            speed_end_prob: 0.0,
+            speed_left_s: [-10.0, 45.0],
+            drinks: [0.0, 2.0],
+            hunger_prob: 0.0,
+            start_food: [5.0, 20.0],
+            speed_who: 0,
+            bot_drink: 1.0,
+            w_speed: 0.0,
+            w_fed: 0.0,
         }
     }
 }
@@ -379,6 +419,18 @@ impl Params {
             82 => self.hunger = v != 0.0,
             83 => self.hurt_who = v as u8,
             84 => self.pearls_who = v as u8,
+            85 => self.speed_end_prob = v,
+            86 => self.speed_left_s[0] = v,
+            87 => self.speed_left_s[1] = v,
+            88 => self.drinks[0] = v,
+            89 => self.drinks[1] = v,
+            90 => self.hunger_prob = v,
+            91 => self.start_food[0] = v,
+            92 => self.start_food[1] = v,
+            93 => self.speed_who = v as u8,
+            94 => self.bot_drink = v,
+            95 => self.w_speed = v as f32,
+            96 => self.w_fed = v as f32,
             _ => return false,
         }
         true
@@ -547,6 +599,23 @@ pub struct Stats {
     pub pot_health: [f64; 2],
     pub pot_away: [f64; 2],
     pub pot_hit: [f64; 2],
+    /// Drinking and eating: the drinks and the meals a player finished and
+    /// the ones it began, the ticks it spent on them and the hits it took
+    /// meanwhile, the ticks it had Speed, and the ticks it had food enough
+    /// to sprint.
+    pub drinks: [f64; 2],
+    pub meals: [f64; 2],
+    pub sips: [f64; 2],
+    pub sip_ticks: [f64; 2],
+    pub sip_hit: [f64; 2],
+    pub speed_on: [f64; 2],
+    pub fed: [f64; 2],
+    /// The part of `pot_away` that came after the throw: the ticks until
+    /// the crosshair was back on the opponent. And all the ticks a player
+    /// had its crosshair that far off the opponent, potion or not, to
+    /// compare with.
+    pub pot_after: [f64; 2],
+    pub off: [f64; 2],
 }
 
 impl Stats {
@@ -584,6 +653,15 @@ impl Stats {
             self.pot_health[a] += o.pot_health[a];
             self.pot_away[a] += o.pot_away[a];
             self.pot_hit[a] += o.pot_hit[a];
+            self.drinks[a] += o.drinks[a];
+            self.meals[a] += o.meals[a];
+            self.sips[a] += o.sips[a];
+            self.sip_ticks[a] += o.sip_ticks[a];
+            self.sip_hit[a] += o.sip_hit[a];
+            self.speed_on[a] += o.speed_on[a];
+            self.fed[a] += o.fed[a];
+            self.pot_after[a] += o.pot_after[a];
+            self.off[a] += o.off[a];
         }
     }
     pub fn write(&self, out: &mut [f64]) {
@@ -648,6 +726,24 @@ impl Stats {
             self.pot_away[1],
             self.pot_hit[0],
             self.pot_hit[1],
+            self.drinks[0],
+            self.drinks[1],
+            self.meals[0],
+            self.meals[1],
+            self.sips[0],
+            self.sips[1],
+            self.sip_ticks[0],
+            self.sip_ticks[1],
+            self.sip_hit[0],
+            self.sip_hit[1],
+            self.speed_on[0],
+            self.speed_on[1],
+            self.fed[0],
+            self.fed[1],
+            self.pot_after[0],
+            self.pot_after[1],
+            self.off[0],
+            self.off[1],
         ];
         for (o, x) in out.iter_mut().zip(v.iter()) {
             *o = *x;
@@ -704,6 +800,14 @@ pub struct Env {
     pot_since: [i32; 2],
     pot_back: [bool; 2],
     off_run: [i32; 2],
+    /// The drink (1) or the meal (2) each player has its right button down
+    /// for, and what it asked of the rest of the hotbar on its last tick.
+    consume: [u8; 2],
+    asked_bar: [u8; 2],
+    /// Whether each client was drinking or eating on its last tick, and
+    /// for how many ticks in a row it has seen the other player do so.
+    was_consuming: [bool; 2],
+    opp_use_ticks: [i32; 2],
     /// A player has died: the duel ends when both have made their tick.
     over: bool,
 }
@@ -815,6 +919,12 @@ pub fn new_match(p: &Params, rng: &mut Rng, mode: Mode) -> (Match, [f64; 2], Bot
         ..ServerCfg::default()
     };
     let pearls = if rng.chance(p.pearl_prob) { p.pearls.clamp(0.0, 64.0) as u8 } else { 0 };
+    // The later draws are made only for what is switched on, so that duels
+    // without it come out as they always did.
+    let timed = real && p.speed_end_prob > 0.0 && rng.chance(p.speed_end_prob);
+    let hungry = real && p.hunger_prob > 0.0 && rng.chance(p.hunger_prob);
+    let mut scfg = scfg;
+    scfg.hunger |= hungry;
     let seed = rng.next_u64();
     let mut m = Match::new(world, spawns, p.speed_amp, kb, scfg, ccfg, net, [0, c1, sv], seed);
     m.s.plugin = plugin;
@@ -824,7 +934,44 @@ pub fn new_match(p: &Params, rng: &mut Rng, mode: Mode) -> (Match, [f64; 2], Bot
         m.s.p[i].pearls = pearls;
         m.c[i].lp.pearls = pearls;
         if real {
-            let n = level(p.potions, rng).clamp(0, 7) as u8;
+            let mut n = level(p.potions, rng).clamp(0, 7) as u8;
+            if timed && (p.speed_who == 0 || p.speed_who as usize == i + 1) {
+                // Speed as after a potion drunk some time ago, and potions
+                // of it in the slots after the healing ones.
+                let left = (rng.range(p.speed_left_s[0], p.speed_left_s[1].max(p.speed_left_s[0])) * 20.0).round() as i32;
+                let cups = level(p.drinks, rng).clamp(0, 2) as u8;
+                n = n.min(7 - cups - hungry as u8);
+                let (sp, lp) = (&mut m.s.p[i], &mut m.c[i].lp);
+                sp.drinks = potion_mask(n + cups) & !potion_mask(n);
+                lp.drinks = sp.drinks;
+                if left > 0 && p.speed_amp >= 0 {
+                    sp.speed_ticks = left;
+                    sp.speed_shown = DRINK_SHOWN;
+                    sp.fx = DRINK_SHOWN;
+                    lp.speed_ticks = left;
+                    lp.fx = DRINK_SHOWN;
+                    m.c[1 - i].rp.fx = DRINK_SHOWN;
+                } else {
+                    sp.speed_ticks = 0;
+                    sp.l.attr.speed_amp = -1;
+                    lp.speed_ticks = -1;
+                    lp.speed_amp = -1;
+                    lp.l.attr.speed_amp = -1;
+                }
+            }
+            if hungry {
+                n = n.min(6);
+                let food = level(p.start_food, rng).clamp(0, 20);
+                let sat = if food >= 20 { 5.0f32 } else { 0.0f32 };
+                let (sp, lp) = (&mut m.s.p[i], &mut m.c[i].lp);
+                sp.steak = 64;
+                lp.steak = 64;
+                sp.food = Food { level: food, saturation: sat, exhaustion: 0.0, timer: 0 };
+                sp.last_food = food;
+                sp.was_hungry = sat == 0.0;
+                lp.food = food;
+                lp.saturation = sat;
+            }
             m.s.p[i].potions = potion_mask(n);
             m.c[i].lp.potions = potion_mask(n);
             if (p.hurt_who == 0 || p.hurt_who as usize == i + 1) && rng.chance(p.start_hurt) {
@@ -867,6 +1014,7 @@ pub fn new_match(p: &Params, rng: &mut Rng, mode: Mode) -> (Match, [f64; 2], Bot
     bot.pearl_cd = m.s.cfg.pearl_cooldown;
     bot.pearl_lead = p.bot_pearl_lead;
     bot.potion *= p.bot_potion;
+    bot.drink *= p.bot_drink;
     (m, ping, bot)
 }
 
@@ -906,6 +1054,10 @@ impl Env {
             potion_stage: [0; 2],
             asked_potion: [false; 2],
             pot_since: [1000; 2],
+            consume: [0; 2],
+            asked_bar: [0; 2],
+            was_consuming: [false; 2],
+            opp_use_ticks: [0; 2],
             pot_back: [true; 2],
             off_run: [0; 2],
             over: false,
@@ -932,6 +1084,10 @@ impl Env {
         self.potion_stage = [0; 2];
         self.asked_potion = [false; 2];
         self.pot_since = [1000; 2];
+        self.consume = [0; 2];
+        self.asked_bar = [0; 2];
+        self.was_consuming = [false; 2];
+        self.opp_use_ticks = [0; 2];
         self.pot_back = [true; 2];
         self.off_run = [0; 2];
         self.over = false;
@@ -1043,6 +1199,9 @@ impl Env {
             if self.pot_since[h.victim] <= 20 {
                 self.ep.pot_hit[h.victim] += 1.0;
             }
+            if self.m.c[h.victim].lp.consuming() {
+                self.ep.sip_hit[h.victim] += 1.0;
+            }
             self.ep.damage[h.attacker] += h.damage as f64;
             if h.blocked {
                 self.ep.blocked[h.victim] += 1.0;
@@ -1084,7 +1243,10 @@ impl Env {
         let reach = dist(eye, ebb.closest_point(eye));
         let aim = 1.0 - ang / 180.0;
         let range = 1.0 - (reach - 3.0).clamp(0.0, 12.0) / 12.0;
-        (p.w_aim * aim as f32 + p.w_range * range as f32, ang)
+        // As the player's own client has them.
+        let fast = if c.lp.speed_amp >= 0 { p.w_speed } else { 0.0 };
+        let fed = if c.lp.food > 6 { p.w_fed } else { 0.0 };
+        (p.w_aim * aim as f32 + p.w_range * range as f32 + fast + fed, ang)
     }
 
     /// Is the other player within attack reach of `id`, in `id`'s own view?
@@ -1129,7 +1291,12 @@ impl Env {
     /// Can player `id` throw a pearl now, as far as it can tell itself?
     fn pearl_ready(&self, id: usize) -> bool {
         let lp = &self.m.c[id].lp;
-        lp.pearls > 0 && self.pearl_wait[id] <= 0 && self.pearl_stage[id] == 0 && self.potion_stage[id] == 0 && lp.held == SLOT_SWORD
+        lp.pearls > 0
+            && self.pearl_wait[id] <= 0
+            && self.pearl_stage[id] == 0
+            && self.potion_stage[id] == 0
+            && self.consume[id] == 0
+            && lp.held == SLOT_SWORD
     }
 
     /// Can player `id` throw a potion now? With the sword in hand, or on
@@ -1138,11 +1305,59 @@ impl Env {
         let lp = &self.m.c[id].lp;
         lp.potions != 0
             && self.pearl_stage[id] == 0
+            && self.consume[id] == 0
             && match self.potion_stage[id] {
                 0 => lp.held == SLOT_SWORD,
                 2 => true,
                 _ => false,
             }
+    }
+
+    /// The key presses of a drink or a meal, laid over what player `id`
+    /// asked for on this tick. `choice` is what it asked of the rest of the
+    /// hotbar: 2 to drink, 3 to eat, 4 to stop, 1 to throw a healing
+    /// potion, which stops as well. Asked with the sword in hand, the
+    /// number key of the potion of Speed or of the steak is pressed with a
+    /// right click, and the button stays down on the ticks that follow, on
+    /// which nothing else is asked, until the client is no longer using the
+    /// item: the server has said that the bottle is empty or the steak
+    /// eaten, or the stack was replaced. Then, or when the player stops,
+    /// the button is let go and the number key of the sword pressed, so a
+    /// meal is one steak. No left click is made meanwhile: the game throws
+    /// them away while an item is in use.
+    fn consume_keys(&mut self, id: usize, choice: i32, inp: &mut Input) {
+        self.asked_bar[id] = choice.clamp(0, 4) as u8;
+        let lp = &self.m.c[id].lp;
+        if self.consume[id] == 0 {
+            let slot = match choice {
+                2 if lp.drinks != 0 => lp.drinks.trailing_zeros() as u8,
+                3 if lp.steak > 0 && lp.food < 20 => SLOT_FOOD,
+                _ => return,
+            };
+            if lp.held != SLOT_SWORD || self.pearl_stage[id] != 0 || self.potion_stage[id] != 0 {
+                return;
+            }
+            inp.slot_key = slot + 1;
+            inp.attack = false;
+            inp.use_item = true;
+            inp.use_again = self.prev_inp[id].use_item;
+            self.consume[id] = (choice - 1) as u8;
+            self.was_consuming[id] = false;
+        } else if (self.was_consuming[id] && !lp.consuming()) || choice == 4 || choice == 1 || lp.held == SLOT_SWORD {
+            inp.slot_key = SLOT_SWORD + 1;
+            inp.use_item = false;
+            self.consume[id] = 0;
+        } else {
+            inp.use_item = true;
+            inp.attack = false;
+            // The click that did not start a use (a full stomach, as the
+            // server knows before the client): give up.
+            if !lp.consuming() && !self.was_consuming[id] && self.prev_inp[id].slot_key == 0 {
+                inp.slot_key = SLOT_SWORD + 1;
+                inp.use_item = false;
+                self.consume[id] = 0;
+            }
+        }
     }
 
     /// The key presses of a potion throw, as `pearl_keys`: the number key
@@ -1293,13 +1508,41 @@ impl Env {
         if !self.pot_back[id] {
             if off && self.pot_since[id] < 40 {
                 self.ep.pot_away[id] += 1.0;
+                self.ep.pot_after[id] += 1.0;
             } else {
                 self.pot_back[id] = true;
             }
         }
         self.off_run[id] = if off { self.off_run[id] + 1 } else { 0 };
+        if off {
+            self.ep.off[id] += 1.0;
+        }
         if self.pot_since[id] < 1000 {
             self.pot_since[id] += 1;
+        }
+        // Drinking and eating.
+        let lp = &self.m.c[id].lp;
+        let rp = &self.m.c[id].rp;
+        let consuming = lp.consuming();
+        if consuming {
+            self.ep.sip_ticks[id] += 1.0;
+            if !self.was_consuming[id] {
+                self.ep.sips[id] += 1.0;
+            }
+        }
+        self.was_consuming[id] = consuming;
+        let seen = rp.using && matches!(rp.item, Item::Drink | Item::Food);
+        self.opp_use_ticks[id] = if seen { self.opp_use_ticks[id] + 1 } else { 0 };
+        let sp = &mut self.m.s.p[id];
+        self.ep.drinks[id] += sp.drinks_done as f64;
+        self.ep.meals[id] += sp.meals_done as f64;
+        sp.drinks_done = 0;
+        sp.meals_done = 0;
+        if sp.speed_ticks > 0 {
+            self.ep.speed_on[id] += 1.0;
+        }
+        if sp.food.level > 6 {
+            self.ep.fed[id] += 1.0;
         }
         if out.threw {
             self.ep.pearls[id] += 1.0;
@@ -1340,7 +1583,9 @@ impl Env {
     pub fn step(&mut self, action: &[i32]) -> usize {
         let id = self.pending;
         let mut inp = decode_action(action);
-        self.potion_keys(id, action.len() > 9 && action[9] != 0, &mut inp);
+        let bar = if action.len() > 9 { action[9] } else { 0 };
+        self.consume_keys(id, bar, &mut inp);
+        self.potion_keys(id, bar == 1, &mut inp);
         self.pearl_keys(id, action.len() > 8 && action[8] != 0, &mut inp);
         self.limit_clicks(id, &mut inp);
         let out = self.m.client_tick(id, &inp);
@@ -1452,6 +1697,31 @@ impl Env {
             for a in 0..3 {
                 o[b + 33 + a] = e.map(|e| e.pos[a] as f32).unwrap_or(0.0);
             }
+            // As the server has them: what is in the hand (0 sword, 1 pearl,
+            // 2 healing potion, 3 potion of Speed, 4 bottle, 5 steak, 6
+            // nothing), whether it is being drunk (1) or eaten (2), the
+            // seconds of Speed left (-1 without it), food, potions of Speed
+            // left, and whether the effect's particles show.
+            let sp = &self.m.s.p[id];
+            let item = sp.in_hand().0;
+            o[b + 36] = match item {
+                Item::Sword => 0.0,
+                Item::Pearl => 1.0,
+                Item::Potion => 2.0,
+                Item::Drink => 3.0,
+                Item::Bottle => 4.0,
+                Item::Food => 5.0,
+                Item::Empty => 6.0,
+            };
+            o[b + 37] = match (sp.using_item && sp.use_slot == sp.held, item) {
+                (true, Item::Drink) => 1.0,
+                (true, Item::Food) => 2.0,
+                _ => 0.0,
+            };
+            o[b + 38] = if sp.l.attr.speed_amp >= 0 { sp.speed_ticks as f32 / 20.0 } else { -1.0 };
+            o[b + 39] = sp.food.level as f32;
+            o[b + 40] = sp.drinks.count_ones() as f32;
+            o[b + 41] = sp.fx as i32 as f32;
         }
         let g = 2 * VIEW_PLAYER;
         o[g] = self.ticks_left as f32;
@@ -1729,6 +1999,33 @@ impl Env {
             o[126] = still[0] / POTION_HEAL;
             o[127] = heal[1] / POTION_HEAL;
         }
+        // Speed that runs out, drinks and food, as this client knows them:
+        // whether it has Speed and how much of a potion's time is left,
+        // the potions of it and the steak it carries, its food and
+        // saturation and whether that is enough to sprint; whether it is
+        // drinking or eating, how far along, and which of the two it has
+        // the button down for; what it asked of the hotbar last tick; and
+        // of the opponent, whether particles of an effect show around it,
+        // whether it is drinking or eating, for how long it has been, and
+        // whether it holds an empty bottle.
+        let speed = lp.speed_ticks > 0;
+        o[128] = speed as u8 as f32;
+        o[129] = if speed { lp.speed_ticks.min(1800) as f32 / 1800.0 } else { 0.0 };
+        o[130] = lp.drinks.count_ones() as f32 / 2.0;
+        o[131] = (lp.steak > 0) as u8 as f32;
+        o[132] = lp.food as f32 / 20.0;
+        o[133] = lp.saturation / 20.0;
+        o[134] = (lp.food > 6) as u8 as f32;
+        let using = if lp.consuming() { lp.bar().stack(lp.use_slot).0 } else { Item::Empty };
+        o[135] = (using == Item::Drink) as u8 as f32;
+        o[136] = (using == Item::Food) as u8 as f32;
+        o[137] = if lp.consuming() { ((USE_TICKS - lp.use_count) as f32 / USE_TICKS as f32).clamp(0.0, 1.5) } else { 0.0 };
+        o[138] = self.consume[id] as f32 / 2.0;
+        o[139] = self.asked_bar[id] as f32 / 4.0;
+        o[140] = rp.fx as u8 as f32;
+        o[141] = (rp.using && rp.item == Item::Drink) as u8 as f32;
+        o[142] = (rp.using && rp.item == Item::Food) as u8 as f32;
+        o[143] = self.opp_use_ticks[id].min(48) as f32 / USE_TICKS as f32;
     }
 
     /// Extra inputs for the value function only: things a client cannot see.
@@ -1818,6 +2115,14 @@ impl Env {
         o[57] = s.p[1 - id].potions.count_ones() as f32 / 7.0;
         o[58] = s.thrown.iter().any(|e| e.thrower != id && e.kind == Kind::Potion) as u8 as f32;
         o[59] = if s.cfg.infinite_health { 0.0 } else { s.cfg.hit_health() / 4.0 };
+        // Speed, food and drinks as the server has them.
+        for (k, who) in [id, 1 - id].into_iter().enumerate() {
+            let q = &s.p[who];
+            o[60 + 4 * k] = q.speed_ticks.min(1800) as f32 / 1800.0;
+            o[61 + 4 * k] = q.food.level as f32 / 20.0;
+            o[62 + 4 * k] = q.drinks.count_ones() as f32 / 2.0;
+            o[63 + 4 * k] = if q.using_item && q.use_slot != SLOT_SWORD { q.use_count.clamp(0, USE_TICKS) as f32 / USE_TICKS as f32 } else { 0.0 };
+        }
     }
 }
 

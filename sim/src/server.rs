@@ -6,7 +6,9 @@
 use crate::aabb::{dist_sq, Aabb, V3, EYE_HEIGHT};
 use crate::living::Living;
 use crate::mth::{self, JavaRandom, Rng};
-use crate::net::{Item, Kind, ThrownEv, C2S, S2C, SLOT_PEARL, SLOT_SWORD};
+use crate::net::{
+    Bar, Item, Kind, ThrownEv, BLOCK_TICKS, C2S, DRINK_AMP, DRINK_TICKS, S2C, SLOT_SWORD, STEAK_FOOD, STEAK_SATURATION, USE_TICKS,
+};
 use crate::world::{RayHit, World};
 use std::collections::VecDeque;
 
@@ -293,6 +295,12 @@ pub fn throw_heading(kind: Kind, feet: V3, yaw: f32, pitch: f32) -> (V3, V3) {
 pub const PEARL_DAMAGE: f32 = 5.0;
 
 pub const MAX_HEALTH: f32 = 20.0;
+/// The ticks of a Speed that does not run out within a duel.
+pub const FOR_GOOD: i32 = 10_000_000;
+/// The longest an effect can be said to last in its packet.
+pub const EFFECT_TICKS_SENT: i32 = 32767;
+/// The Speed of a potion shows particles.
+pub const DRINK_SHOWN: bool = true;
 
 /// Would `World.getEntitiesWithinAABB` find an entity filed under chunk
 /// `c` for the box `q`? It looks through the chunks within two blocks of
@@ -384,11 +392,18 @@ pub struct ServerPlayer {
     pub last_ground_y: f64,
     /// Went above the plugin's height limit and has not landed since.
     pub touched_top: bool,
-    /// `isUsingItem()`: blocking with the sword, as far as the server
-    /// knows. The using-item flag other players see is the same thing.
+    /// `isUsingItem()`: blocking with the sword, drinking or eating, as far
+    /// as the server knows. The using-item flag other players see is the
+    /// same thing.
     pub using_item: bool,
-    /// The sword lost durability and is sent again on the next tick.
-    pub slot_dirty: bool,
+    /// The hotbar slot of the stack in use and `itemInUseCount`: the ticks
+    /// until the drink or the meal is finished.
+    pub use_slot: u8,
+    pub use_count: i32,
+    /// The hotbar slots whose stack is not what the player was last sent:
+    /// a sword that lost durability, the bottle a drink left, a steak less.
+    /// They are sent on the next tick.
+    pub dirty: u16,
     /// Stands for a client that blocks around every hit it takes, without
     /// slowing down or giving up its own hits: the server always has it
     /// blocking.
@@ -410,6 +425,22 @@ pub struct ServerPlayer {
     pub pearls: u8,
     /// The hotbar slots that hold a splash potion, one bit each.
     pub potions: u16,
+    /// Those that hold a potion to drink and those that hold an empty
+    /// bottle, and the steaks in the last slot.
+    pub drinks: u16,
+    pub bottles: u16,
+    pub steak: u8,
+    /// Ticks of Speed left (0: none; its amplifier is in the attributes)
+    /// and whether the effect shows particles.
+    pub speed_ticks: i32,
+    pub speed_shown: bool,
+    /// The watched colour of the effect particles is not zero: other
+    /// players see particles around this one. Sent when it changes.
+    pub fx: bool,
+    pub fx_dirty: bool,
+    /// Drinks and meals finished since the caller last cleared them.
+    pub drinks_done: u32,
+    pub meals_done: u32,
     /// Damage value of the sword: the hits that have cost it durability.
     pub sword_wear: u32,
     /// `previousEquipment[0]`: what this player held when it was last
@@ -460,7 +491,9 @@ impl ServerPlayer {
             last_ground_y: pos[1],
             touched_top: false,
             using_item: false,
-            slot_dirty: false,
+            use_slot: SLOT_SWORD,
+            use_count: 0,
+            dirty: 0,
             autoblock: false,
             damage_taken: 0.0,
             health_lost: 0.0,
@@ -472,6 +505,15 @@ impl ServerPlayer {
             held: SLOT_SWORD,
             pearls: 0,
             potions: 0,
+            drinks: 0,
+            bottles: 0,
+            steak: 0,
+            speed_ticks: if speed_amp >= 0 { FOR_GOOD } else { 0 },
+            speed_shown: false,
+            fx: false,
+            fx_dirty: false,
+            drinks_done: 0,
+            meals_done: 0,
             sword_wear: 0,
             equip: (Item::Sword, 0),
             gone: Vec::new(),
@@ -479,15 +521,35 @@ impl ServerPlayer {
         }
     }
 
-    /// The stack in hand: which item, and its wear (a sword) or its size.
+    /// The hotbar but for the sword.
+    #[inline]
+    pub fn bar(&self) -> Bar {
+        Bar { pearls: self.pearls, potions: self.potions, drinks: self.drinks, bottles: self.bottles, steak: self.steak }
+    }
+
+    #[inline]
+    pub fn set_bar(&mut self, b: Bar) {
+        self.pearls = b.pearls;
+        self.potions = b.potions;
+        self.drinks = b.drinks;
+        self.bottles = b.bottles;
+        self.steak = b.steak;
+    }
+
+    /// The stack in a slot: which item, and its wear (a sword) or its size.
+    #[inline]
+    pub fn stack(&self, slot: u8) -> (Item, u32) {
+        if slot == SLOT_SWORD {
+            (Item::Sword, self.sword_wear)
+        } else {
+            self.bar().stack(slot)
+        }
+    }
+
+    /// The stack in hand.
     #[inline]
     pub fn in_hand(&self) -> (Item, u32) {
-        match self.held {
-            SLOT_SWORD => (Item::Sword, self.sword_wear),
-            SLOT_PEARL if self.pearls > 0 => (Item::Pearl, self.pearls as u32),
-            s if self.potions >> s & 1 != 0 => (Item::Potion, 1),
-            _ => (Item::Empty, 0),
-        }
+        self.stack(self.held)
     }
 
     /// `EntityPlayer.setItemInUse` / `clearItemInUse` with the flag other
@@ -498,6 +560,44 @@ impl ServerPlayer {
             self.using_item = u;
             self.meta_dirty = true;
         }
+    }
+
+    /// `setItemInUse(stack, duration)` for the stack in hand: nothing
+    /// changes when that very stack is in use already.
+    fn start_use(&mut self, ticks: i32) {
+        if !(self.using_item && self.use_slot == self.held && self.use_count > 0) {
+            self.use_slot = self.held;
+            self.use_count = ticks;
+        }
+        self.set_using(true);
+    }
+
+    /// `isBlocking()`: the item in use is the sword.
+    #[inline]
+    pub fn blocking(&self) -> bool {
+        self.using_item && (self.autoblock || self.use_slot == SLOT_SWORD)
+    }
+
+    /// `addPotionEffect` for Speed, with what `EntityPlayerMP` sends: a new
+    /// effect, or one combined with the Speed there is. Either way the
+    /// modifier of the speed attribute is set again, which sends the
+    /// attribute to everybody.
+    pub fn add_speed(&mut self, amp: i8, ticks: i32, shown: bool) -> S2C {
+        if self.speed_ticks > 0 {
+            // PotionEffect.combine
+            if amp > self.l.attr.speed_amp {
+                self.l.attr.speed_amp = amp;
+                self.speed_ticks = ticks;
+            } else if amp == self.l.attr.speed_amp && self.speed_ticks < ticks {
+                self.speed_ticks = ticks;
+            }
+        } else {
+            self.l.attr.speed_amp = amp;
+            self.speed_ticks = ticks;
+        }
+        self.speed_shown = shown;
+        self.attr_dirty = true;
+        S2C::Effect { amp: self.l.attr.speed_amp, ticks: self.speed_ticks.min(EFFECT_TICKS_SENT), shown }
     }
 
     /// `EntityLivingBase.setHealth`: between nothing and twenty, and a
@@ -672,17 +772,16 @@ impl Server {
             // processUseEntity for the two interactions: nothing comes of
             // them whatever is in hand.
             C2S::InteractAt | C2S::Interact => {}
-            // processPlayerBlockPlacement on a block: neither a sword nor a
-            // pearl does anything to it. With anything but the sword in
-            // hand, the handler then brings its copy of the inventory up to
-            // date without sending it, which loses a sword that was about
-            // to be sent again.
-            C2S::UseBlock => {
-                if self.p[from].in_hand().0 != Item::Sword {
-                    self.p[from].slot_dirty = false;
+            // processPlayerBlockPlacement on a block: nothing in the kit
+            // does anything to it.
+            C2S::UseBlock(said) => self.after_use(from, said, out),
+            // With nothing in hand the handler stops at once.
+            C2S::UseItem(said) => {
+                if self.p[from].in_hand().0 != Item::Empty {
+                    self.use_item(from, rng, out);
+                    self.after_use(from, said, out);
                 }
             }
-            C2S::UseItem => self.use_item(from, rng, out),
             // processPlayerDigging RELEASE_USE_ITEM -> stopUsingItem
             C2S::ReleaseUse => self.p[from].set_using(false),
             // processHeldItemChange
@@ -694,18 +793,50 @@ impl Server {
         }
     }
 
+    /// The end of `processPlayerBlockPlacement`. Unless the stack in hand
+    /// is one that takes time to use (a sword, a potion, food), the handler
+    /// brings its copy of the inventory up to date without sending it,
+    /// which loses anything that was about to be sent again, and then sends
+    /// the slot in hand if it is not what the client said it held.
+    fn after_use(&mut self, i: usize, said: (Item, u8), out: &mut Outbox) {
+        let p = &mut self.p[i];
+        let (item, n) = p.in_hand();
+        if item.takes_time() {
+            return;
+        }
+        p.dirty = 0;
+        if (item, n as u8) != said {
+            out.push((i, S2C::SetSlot { slot: p.held, item, count: n as u8 }));
+        }
+    }
+
     /// `processPlayerBlockPlacement` with direction 255: use what is in
-    /// hand. The sword blocks; a pearl or a potion is thrown.
+    /// hand. The sword blocks; a pearl or a splash potion is thrown; a
+    /// drink or a meal begins.
     fn use_item(&mut self, i: usize, rng: &mut Rng, out: &mut Outbox) {
         match self.p[i].in_hand().0 {
-            Item::Empty => {}
+            // ItemGlassBottle.onItemRightClick finds no water.
+            Item::Empty | Item::Bottle => {}
             // tryUseItem -> ItemSword.onItemRightClick -> setItemInUse
-            Item::Sword => self.p[i].set_using(true),
+            Item::Sword => self.p[i].start_use(BLOCK_TICKS),
+            // ItemPotion.onItemRightClick for a potion to drink.
+            Item::Drink => self.p[i].start_use(USE_TICKS),
+            // ItemFood.onItemRightClick: only with room for food. Without,
+            // tryUseItem sends the whole inventory, as for any stack that
+            // takes time to use and is not in use after the click.
+            Item::Food => {
+                if self.p[i].food.level < 20 {
+                    self.p[i].start_use(USE_TICKS);
+                } else if !self.p[i].using_item {
+                    out.push((i, S2C::WindowItems(self.p[i].bar())));
+                    out.push((i, S2C::Cursor));
+                }
+            }
             Item::Pearl => {
                 if self.cfg.pearl_cooldown > 0 && self.p[i].pearl_wait > 0 {
                     // The plugin cancels the click and sends the inventory
                     // again, so that the client gets its pearl back.
-                    out.push((i, S2C::WindowItems { pearls: self.p[i].pearls, potions: self.p[i].potions }));
+                    out.push((i, S2C::WindowItems(self.p[i].bar())));
                     out.push((i, S2C::Cursor));
                     return;
                 }
@@ -715,16 +846,12 @@ impl Server {
                 self.throws[i] += 1;
                 self.spawn_thrown(i, Kind::Pearl, rng, out);
                 // tryUseItem: the stack changed, so the whole inventory is
-                // sent, unless the server still has the player blocking.
+                // sent, unless the server still has the player using an
+                // item.
                 if !self.p[i].using_item {
-                    out.push((i, S2C::WindowItems { pearls: self.p[i].pearls, potions: self.p[i].potions }));
+                    out.push((i, S2C::WindowItems(self.p[i].bar())));
                     out.push((i, S2C::Cursor));
                 }
-                // Back in the packet handler: the inventory copy is brought
-                // up to date without sending, then the slot is sent because
-                // it differs from what the client said it held.
-                self.p[i].slot_dirty = false;
-                out.push((i, S2C::SetSlot { slot: self.p[i].held, count: self.p[i].pearls }));
             }
             Item::Potion => {
                 // ItemPotion.onItemRightClick for a splash potion: the
@@ -733,13 +860,40 @@ impl Server {
                 self.potion_throws[i] += 1;
                 self.spawn_thrown(i, Kind::Potion, rng, out);
                 if !self.p[i].using_item {
-                    out.push((i, S2C::WindowItems { pearls: self.p[i].pearls, potions: self.p[i].potions }));
+                    out.push((i, S2C::WindowItems(self.p[i].bar())));
                     out.push((i, S2C::Cursor));
                 }
-                self.p[i].slot_dirty = false;
-                out.push((i, S2C::SetSlot { slot: self.p[i].held, count: 0 }));
             }
         }
+    }
+
+    /// `EntityPlayerMP.onItemUseFinish`: the player is told, the potion
+    /// gives its Speed and leaves a bottle, or the steak is eaten.
+    fn finish_use(&mut self, i: usize, out: &mut Outbox) {
+        let p = &mut self.p[i];
+        let slot = p.held;
+        match p.in_hand().0 {
+            Item::Drink => {
+                out.push((i, S2C::UseDone));
+                p.drinks &= !(1 << slot);
+                p.bottles |= 1 << slot;
+                p.dirty |= 1 << slot;
+                p.drinks_done += 1;
+                let e = p.add_speed(DRINK_AMP, DRINK_TICKS, DRINK_SHOWN);
+                out.push((i, e));
+            }
+            Item::Food => {
+                out.push((i, S2C::UseDone));
+                p.steak -= 1;
+                p.dirty |= 1 << slot;
+                p.meals_done += 1;
+                // FoodStats.addStats
+                p.food.level = (STEAK_FOOD + p.food.level).min(20);
+                p.food.saturation = (p.food.saturation + STEAK_FOOD as f32 * STEAK_SATURATION * 2.0f32).min(p.food.level as f32);
+            }
+            _ => return,
+        }
+        p.set_using(false);
     }
 
     /// `new EntityEnderPearl(world, thrower)` or `new EntityPotion(world,
@@ -1099,9 +1253,16 @@ impl Server {
     /// position back. Only the motion and the ground flag survive.
     fn on_update_entity(&mut self, i: usize, world: &World, rng: &mut Rng, out: &mut Outbox) {
         // EntityPlayer.onUpdate: an item is in use only while it is the one
-        // in hand.
-        if self.p[i].using_item && self.p[i].held != SLOT_SWORD {
-            self.p[i].set_using(false);
+        // in hand, and a drink or a meal is finished when its time is up.
+        if self.p[i].using_item {
+            if self.p[i].held == self.p[i].use_slot {
+                self.p[i].use_count -= 1;
+                if self.p[i].use_count == 0 {
+                    self.finish_use(i, out);
+                }
+            } else {
+                self.p[i].set_using(false);
+            }
         }
         // EntityLivingBase.onEntityUpdate: a player whose head is inside a
         // block suffocates. A pearl that lands against a ceiling or close
@@ -1114,6 +1275,26 @@ impl Server {
             let p = &mut self.p[i];
             if p.hurt_time > 0 {
                 p.hurt_time -= 1;
+            }
+            // updatePotionEffects: the Speed runs out, and every thirty
+            // seconds of it the player is told how much is left.
+            if p.speed_ticks > 0 {
+                p.speed_ticks -= 1;
+                if p.speed_ticks == 0 {
+                    // onFinishedPotionEffect
+                    p.l.attr.speed_amp = -1;
+                    p.attr_dirty = true;
+                    out.push((i, S2C::EffectEnd));
+                } else if p.speed_ticks % 600 == 0 {
+                    let ticks = p.speed_ticks.min(EFFECT_TICKS_SENT);
+                    out.push((i, S2C::Effect { amp: p.l.attr.speed_amp, ticks, shown: p.speed_shown }));
+                }
+            }
+            // updatePotionMetadata
+            let fx = p.speed_ticks > 0 && p.speed_shown;
+            if fx != p.fx {
+                p.fx = fx;
+                p.fx_dirty = true;
             }
             // EntityLivingBase.onUpdate: when the stack in hand is not the
             // one last seen, the other player is told, and the attack
@@ -1257,7 +1438,7 @@ impl Server {
                 let wear = self.cfg.sword_wear;
                 if sword_now && (wear >= 1.0 || (wear > 0.0 && rng.f64() < wear as f64)) {
                     self.p[a].sword_wear += 1;
-                    self.p[a].slot_dirty = true;
+                    self.p[a].dirty |= 1 << SLOT_SWORD;
                 }
                 if i > 0 {
                     let yaw = self.p[a].l.yaw;
@@ -1380,7 +1561,7 @@ impl Server {
                     crit: false,
                     kb: [0.0; 3],
                     dist: 0.0,
-                    blocked: self.p[v].using_item,
+                    blocked: self.p[v].blocking(),
                     damage: dealt.0,
                     dealt: dealt.1,
                 });
@@ -1394,7 +1575,7 @@ impl Server {
     /// health that was taken in the end.
     fn damage_entity(&mut self, v: usize, mut amount: f32, src: Source, rng: &mut Rng) -> (f32, f32) {
         let direct = matches!(src, Source::Player(_));
-        if direct && self.p[v].using_item && amount > 0.0 {
+        if direct && self.p[v].blocking() && amount > 0.0 {
             amount = (1.0f32 + amount) * 0.5f32;
         }
         let blocked = amount;
@@ -1476,9 +1657,12 @@ impl Server {
                 p.hurt_resistant_time -= 1;
             }
             // openContainer.detectAndSendChanges
-            if p.slot_dirty {
-                p.slot_dirty = false;
-                out.push((i, S2C::SetSlot { slot: SLOT_SWORD, count: 1 }));
+            while p.dirty != 0 {
+                let slot = p.dirty.trailing_zeros() as u8;
+                p.dirty &= p.dirty - 1;
+                let (item, n) = p.stack(slot);
+                let count = if slot == SLOT_SWORD { 1 } else { n as u8 };
+                out.push((i, S2C::SetSlot { slot, item, count }));
             }
             // destroyedItemsNetCache
             if !p.gone.is_empty() {
@@ -1529,7 +1713,7 @@ impl Server {
     fn tracker_update(&mut self, i: usize, out: &mut Outbox) {
         let other = 1 - i;
         let p = &mut self.p[i];
-        if p.update_counter % 2 == 0 || p.is_airborne || p.meta_dirty || p.health_dirty {
+        if p.update_counter % 2 == 0 || p.is_airborne || p.meta_dirty || p.health_dirty || p.fx_dirty {
             p.ticks_since_teleport += 1;
             let pos = p.l.body.pos;
             let k = mth::floor_d(pos[0] * 32.0);
@@ -1565,13 +1749,15 @@ impl Server {
                 }
             }
             // sendMetadataToAllAssociatedPlayers: tracking players, then self.
-            if p.meta_dirty || p.health_dirty {
+            if p.meta_dirty || p.health_dirty || p.fx_dirty {
                 let flags = if p.meta_dirty { Some((p.l.sprinting, p.using_item)) } else { None };
                 let health = if p.health_dirty { Some(p.health) } else { None };
+                let fx = if p.fx_dirty { Some(p.fx) } else { None };
                 p.meta_dirty = false;
                 p.health_dirty = false;
-                out.push((other, S2C::Meta { own: false, flags, health }));
-                out.push((i, S2C::Meta { own: true, flags, health }));
+                p.fx_dirty = false;
+                out.push((other, S2C::Meta { own: false, flags, health, fx }));
+                out.push((i, S2C::Meta { own: true, flags, health, fx }));
             }
             if p.attr_dirty {
                 p.attr_dirty = false;

@@ -132,18 +132,24 @@ def with_use(rng, seq, holds=False):
             i += 1
     return out
 
-def with_pearls(rng, seq, per_count, gap=(25, 80), blocking=False, solo=False, potions=0, pearls=True, again=False):
+def with_pearls(rng, seq, per_count, gap=(25, 80), blocking=False, solo=False, potions=0, pearls=True, again=False,
+                drinks=0, steak=False):
     """Add ender pearl throws to the inputs: the number key of the pearls, a right click and
     the number key of the sword. Thrown at once or after carrying the pearl for a while
     (clicks go on meanwhile), with the button kept down so that more follow, out of a sword
     block, and with the view flicked up, down or aside just before. With potions, some of
     the throws are potions instead, each from a hotbar slot of its own (number keys 3 on),
-    mostly thrown at the feet; now and then the key of a slot that is already empty."""
+    mostly thrown at the feet; now and then the key of a slot that is already empty. With
+    potions to drink (in the slots after the splash potions) or steak (key 9), some of the
+    turns are a drink or a meal: the button held until it is done and beyond, let go too
+    early, another key pressed in the middle, or let go and pressed again at once."""
     n = len(seq)
     out = [list(s) + [0] * (9 - len(s)) for s in seq]
     full = list(range(3, 3 + potions))
     rng.shuffle(full)
     empty = []
+    cups = list(range(3 + potions, 3 + potions + drinks))
+    drunk = []
 
     def pitch_at(i):
         p = 0.0
@@ -162,6 +168,42 @@ def with_pearls(rng, seq, per_count, gap=(25, 80), blocking=False, solo=False, p
 
     t = rng.randint(14, 40)
     while t < n - 45:
+        if (drinks or steak) and t < n - 110 and rng.random() < 0.45:
+            # A drink or a meal.
+            keys = ([cups[-1]] * 4 if cups else []) + ([9] * 3 if steak else []) + drunk[:1]
+            key = rng.choice(keys)
+            if key in cups:
+                cups.remove(key)
+                drunk.append(key)
+            how = rng.choices(["done", "early", "key", "long", "twice"], [5, 2, 2, 2, 2])[0]
+            start = t + rng.choice([0, 0, 1, 3])
+            out[t][8] = key
+            for k in range(t - 1, start):
+                out[k][7] = 0
+            hold = {"done": rng.randint(33, 44), "early": rng.randint(2, 31), "key": rng.randint(4, 30),
+                    "long": rng.randint(45, 90), "twice": rng.randint(8, 40)}[how]
+            for k in range(start, start + hold):
+                out[k][7] = 1
+            end = start + hold
+            if how == "key":
+                # Another slot in hand with the button still down for a moment.
+                out[end][8] = rng.choice([1, 1, 2, 3, 9])
+                more = rng.choice([0, 1, 3])
+                for k in range(end, end + more):
+                    out[k][7] = 1
+                end += more
+            elif how == "twice":
+                # Let go and pressed again between two ticks, then held to the end.
+                out[start + rng.randint(1, hold - 1)][7] = 2
+                for k in range(end, end + 36):
+                    out[k][7] = 1
+                end += 36
+            out[end][7] = 0
+            back = end + rng.choice([0, 0, 1, 2, 5])
+            if back < n:
+                out[back][8] = 1
+            t = back + rng.randint(*gap)
+            continue
         kind = rng.choices(["quick", "carry", "held", "block", "again"], [5, 3, 2, 3 if blocking else 0, 6 if again else 0])[0]
         aim = rng.choices(["as is", "up", "down", "side", "high"], [3, 3, 2, 2, 1] if not solo else [1, 3, 2, 3, 2])[0]
         key = 2
@@ -232,12 +274,15 @@ def with_pearls(rng, seq, per_count, gap=(25, 80), blocking=False, solo=False, p
         t = back + rng.randint(*gap)
     return [tuple(o) for o in out]
 
-def fight_fake(rng, n, lines, hops=True, attacks=True, blocks=False, pearls=0.0, potions=0, potion_rate=0.0):
+def fight_fake(rng, n, lines, hops=True, attacks=True, blocks=False, pearls=0.0, potions=0, potion_rate=0.0,
+               drinks=0, steak=False, drink_rate=0.0):
     """What the scripted player does on each server tick."""
     arc, air = jump_arc(), []
     full = list(range(2, 2 + potions))
     rng.shuffle(full)
     empty = []
+    cups = list(range(2 + potions, 2 + potions + drinks))
+    drunk = []
     dist, angle = 2.5, 0.0
     t = 0
     later = {}
@@ -296,6 +341,22 @@ def fight_fake(rng, n, lines, hops=True, attacks=True, blocks=False, pearls=0.0,
                 if rng.random() < 0.2:
                     later.setdefault(k + 1, []).append("USE")
                 later.setdefault(k + rng.choice([0, 1, 1, 2, 5]), []).append("SLOT 0")
+            if drink_rate and not later and rng.random() < drink_rate and (cups or steak or drunk):
+                # A drink or a meal: to the end, or given up by letting go or by another slot.
+                slots = ([cups[-1]] * 4 if cups else []) + ([8] * 3 if steak else []) + drunk[:1]
+                slot = rng.choice(slots)
+                if slot in cups:
+                    cups.remove(slot)
+                    drunk.append(slot)
+                lines.append("F %d SLOT %d" % (t, slot))
+                k = t + rng.choice([0, 0, 1, 3])
+                later.setdefault(k, []).append("USE")
+                hold = rng.choice([rng.randint(33, 44), rng.randint(33, 44), rng.randint(2, 31), rng.randint(45, 80)])
+                if rng.random() < 0.6:
+                    later.setdefault(k + hold, []).append("RELEASE")
+                if rng.random() < 0.15:
+                    later.setdefault(k + hold // 2, []).append("USE")
+                later.setdefault(k + hold + rng.choice([0, 0, 1, 2, 5]), []).append("SLOT 0")
             for a in later.pop(t, []):
                 lines.append("F %d %s" % (t, a))
             if hops and not air and rng.random() < 0.04:
@@ -383,19 +444,27 @@ def main():
         pen(lines, half=6, height=9, roof=True) if roof else pen(lines)
         lines.append("fake 0.5 4 3.0 180 0")
         n_pearls, n_pots = int(opts.get("pearls", "0")), int(opts.get("potions", "7"))
+        n_drinks, n_steak = int(opts.get("drinks", "0")), int(opts.get("steak", "0"))
         if n_pearls:
             lines.append("pearls %d" % n_pearls)
         lines.append("potions %d" % n_pots)
+        if n_drinks:
+            lines.append("drinks %d" % n_drinks)
+        if n_steak:
+            lines.append("steak %d" % n_steak)
+        if "speedticks" in opts:
+            lines.append("speedticks %s" % opts["speedticks"])
         if opts.get("unbreakable", "0") != "0":
             lines.append("unbreakable 1")
-        seq = fight_inputs(rng, 1000, per_count=per_count)
+        seq = fight_inputs(rng, int(opts.get("ticks", "1000")), per_count=per_count)
         blocking = opts.get("blocks", "0") != "0"
         seq = with_use(rng, seq) if blocking else seq
         gap = (8, 30) if opts.get("many", "0") != "0" else (25, 80)
         seq = [(0,) * 9] * 12 + with_pearls(rng, seq, per_count, gap=gap, blocking=blocking, potions=n_pots, pearls=n_pearls > 0,
-                                            again=opts.get("again", "0") != "0")
+                                            again=opts.get("again", "0") != "0", drinks=n_drinks, steak=n_steak > 0)
         fight_fake(rng, len(seq) + 60, lines, blocks=blocking, pearls=float(opts.get("fake", "0.02")) if n_pearls else 0.0,
-                   potions=n_pots, potion_rate=float(opts.get("fakepot", "0.02")))
+                   potions=n_pots, potion_rate=float(opts.get("fakepot", "0.02")),
+                   drinks=n_drinks, steak=n_steak > 0, drink_rate=float(opts.get("fakedrink", "0.015")) if n_drinks or n_steak else 0.0)
     elif name == "potsolo":
         # Alone under the roof: potions (and pearls) in every direction.
         pen(lines, half=6, height=9, roof=True)

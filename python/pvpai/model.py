@@ -26,6 +26,13 @@ NEW_CHOICE_BIAS = -5.0
 RESTART = {9: (8,)}
 
 
+def start_bias(head, n):
+    """Starting preferences of the `n` choices of a control, or None when
+    they start evenly. Choices a control has gained since start rare."""
+    b = START_BIAS.get(head)
+    return None if b is None else (b + [NEW_CHOICE_BIAS] * n)[:n]
+
+
 def _init(layer, gain):
     nn.init.orthogonal_(layer.weight, gain)
     nn.init.zeros_(layer.bias)
@@ -59,9 +66,9 @@ class Policy(nn.Module):
             self.heads[2].bias.copy_(torch.tensor([0.0, -1.7]))
             # Blocking costs clicks and speed and a pearl costs health, so
             # both start rare.
-            for h, bias in START_BIAS.items():
+            for h in START_BIAS:
                 if len(self.act_dims) > h:
-                    self.heads[h].bias.copy_(torch.tensor(bias))
+                    self.heads[h].bias.copy_(torch.tensor(start_bias(h, self.act_dims[h])))
 
     def initial_state(self, n, device=None):
         z = torch.zeros(n, self.hidden, device=device)
@@ -134,7 +141,7 @@ def fit_state(sd, policy):
         part = k.split(".")
         head = int(part[1]) if part[0] == "heads" else None
         if k not in sd or head in again:
-            start = START_BIAS.get(head) if head is not None and part[2] == "bias" else None
+            start = start_bias(head, ref.shape[0]) if head is not None and part[2] == "bias" else None
             out[k] = torch.tensor(start, dtype=ref.dtype) if start is not None else torch.zeros_like(ref)
             grown = True
         elif sd[k].shape != ref.shape:

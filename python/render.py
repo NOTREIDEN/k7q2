@@ -24,6 +24,9 @@ SWORD = (118, 232, 220)
 PEARL = (22, 124, 108)
 PORTAL = (176, 92, 224)
 POTION = (226, 56, 96)
+DRINK = (124, 175, 198)
+BOTTLE = (214, 228, 236)
+STEAK = (150, 82, 52)
 SPLASH = (255, 122, 160)
 HEART, HEART_EMPTY = (232, 44, 52), (64, 22, 26)
 TEAM = [
@@ -123,11 +126,13 @@ def cube_quads(centre, size, color):
     return [(w[list(idx)], np.array(n, float), shade(color, np.array(n, float), False)) for idx, n in FACES]
 
 
-def player_quads(pos, yaw, pitch, walk, amp, swing, team, hurt, block=False, pearl=False, potion=False, empty=False):
+def player_quads(pos, yaw, pitch, walk, amp, swing, team, hurt, block=False, pearl=False, potion=False, empty=False,
+                 other=None, mouth=False):
     """World-space quads (corners, normal, colour) of one blocky player.
     With `block` the sword is held upright in front of the body; with
-    `pearl` or `potion` the hand holds that instead of the sword, and with
-    `empty` nothing."""
+    `pearl` or `potion` the hand holds that instead of the sword, with
+    `other` something of that colour, and with `empty` nothing. With
+    `mouth` the hand is at the mouth, drinking or eating."""
     cy, sy = math.cos(math.radians(yaw)), math.sin(math.radians(yaw))
 
     def to_world(p):
@@ -145,8 +150,10 @@ def player_quads(pos, yaw, pitch, walk, amp, swing, team, hurt, block=False, pea
     sword = (box((-6.6, 10.5, 1), (-5.4, 12.5, 17)), (0, 22, 0), arm, [SWORD] * 6)
     if pearl:
         sword = (box((-7.6, 9.2, 0.4), (-4.4, 12.4, 3.6)), (0, 22, 0), arm, [PEARL] * 6)
-    elif potion:
-        sword = (box((-7.6, 8.6, 0.4), (-4.4, 12.6, 3.6)), (0, 22, 0), arm, [POTION] * 6)
+    elif potion or other is not None:
+        if mouth:
+            arm = -2.0
+        sword = (box((-7.6, 8.6, 0.4), (-4.4, 12.6, 3.6)), (0, 22, 0), arm, [POTION if other is None else other] * 6)
     elif empty:
         sword = None
     elif block:
@@ -237,7 +244,8 @@ def draw_scene(img, cam, players, half, floor_y, skip=None, pearls=(), marks=(),
         if i == skip:
             continue
         quads += player_quads(p["pos"], p["yaw"], p["pitch"], p["walk"], p["amp"], p["swing"], TEAM[i], p["hurt"],
-                              p.get("block", False), p.get("pearl", False), p.get("potion", False), p.get("empty", False))
+                              p.get("block", False), p.get("pearl", False), p.get("potion", False), p.get("empty", False),
+                              p.get("other"), p.get("mouth", False))
     for q in pearls:
         # Drawn larger than the quarter block it is, so it can be followed.
         quads += cube_quads(q, 0.34, PEARL)
@@ -276,6 +284,10 @@ class Segment:
         self.dist = np.cumsum(step, 1)
         self.speed = step
         self.real = "real_health" in self.gi and self.g("real_health") > 0
+        # Speed that runs out or potions of it, and hunger, anywhere in the duel.
+        self.timed = "speed_s" in self.pi and any(
+            self.col(p, "speed_s").min() < 1000 or self.col(p, "drinks").max() > 0 for p in (0, 1))
+        self.hungry = "food" in self.pi and min(self.col(0, "food").min(), self.col(1, "food").min()) < 18
 
     def col(self, p, name):
         return self.v[:, p * self.np + self.pi[name]]
@@ -309,6 +321,10 @@ class Segment:
             # been thrown.
             "potion": "potions" in self.pi and self.col(p, "held")[t1] >= 2 and not self.threw(p, t1),
             "empty": "potions" in self.pi and self.col(p, "held")[t1] >= 2 and self.threw(p, t1),
+            # A potion of Speed, the bottle it leaves or steak in hand, and
+            # whether it is at the mouth.
+            "other": {3: DRINK, 4: BOTTLE, 5: STEAK}.get(int(self.col(p, "item")[t1])) if "item" in self.pi else None,
+            "mouth": "consuming" in self.pi and self.col(p, "consuming")[t1] > 0,
         }
 
     def threw(self, p, t, ticks=10):
@@ -418,8 +434,23 @@ def hud(img, seg, t, fonts, inset_box):
         box_w = 330 if not edge else 520
         if seg.real:
             box_w = max(box_w, 400)
+        more = seg.real and (seg.timed or seg.hungry)
+        line = []
+        if more:
+            # Speed left and the potions of it in the hotbar; food out of 20.
+            left = float(seg.col(p, "speed_s")[tick])
+            if seg.timed:
+                line.append(("Velocidad: " + ("no" if left < 0 else "fija" if left > 1000 else f"{left:.0f} s"))
+                            + f" (+{int(seg.col(p, 'drinks')[tick])})")
+            if seg.hungry:
+                food = int(seg.col(p, "food")[tick])
+                line.append(f"Comida: {food}/20" + ("" if food > 6 else " sin sprint"))
+            doing = int(seg.col(p, "consuming")[tick])
+            if doing:
+                line.append("BEBIENDO" if doing == 1 else "COMIENDO")
+            box_w = max(box_w, int(d.textlength("   ".join(line), font=small)) + 28)
         d.rectangle([x - 14 if p == 0 else x - box_w, 16, x + box_w if p == 0 else x + 14,
-                     low + (40 if edge else 10) + (62 if seg.real else 0)], fill=(0, 0, 0, 96))
+                     low + (40 if edge else 10) + (62 if seg.real else 0) + (30 if more else 0)], fill=(0, 0, 0, 96))
         if seg.real:
             # Health as the server has it, the potions left, and for a
             # moment what a potion has just given.
@@ -431,6 +462,9 @@ def hud(img, seg, t, fonts, inset_box):
             text(d, (side, y - 2), f"{hp / 2:.1f}" + (f"  +{got / 2:.1f}" if got else ""), small,
                  (130, 255, 150) if got else (255, 255, 255), anchor)
             text(d, (x, y + 28), f"Pociones: {int(seg.col(p, 'potions')[tick])}", small, (255, 170, 190), anchor)
+            if more:
+                slow = (seg.timed and left < 0) or (seg.hungry and seg.col(p, "food")[tick] <= 6)
+                text(d, (x, y + 58), "   ".join(line), small, (255, 150, 110) if slow else (150, 205, 235), anchor)
         if blocks:
             # Damage dealt in hearts (two points each) and hits taken on a block.
             # With real health the hearts below say what the hits cost.
@@ -457,12 +491,16 @@ def hud(img, seg, t, fonts, inset_box):
         d.text((bx + sz / 2, by + sz / 2), label, font=mid, fill=(20, 20, 20) if on else (235, 235, 235), anchor="mm")
     wide = [("SALTO", k("jump") > 0), ("SPRINT", seg.col(0, "sprinting")[tick] > 0), ("CLIC", k("attack") > 0)]
     if "using" in seg.pi:
-        wide.append(("BLOQ", k("using") > 0))
+        wide.append(("BLOQ", k("using") > 0 and not ("consuming" in seg.pi and k("consuming") > 0)))
     if "pearls" in seg.pi and seg.col(0, "pearls")[0] > 0:
         # Lit for a third of a second after a throw, which itself takes one tick.
         wide.append(("PERLA", seg.col(0, "pearls")[max(tick - 7, 0)] > seg.col(0, "pearls")[tick]))
     if seg.real:
         wide.append(("POCIÓN", seg.threw(0, tick, 7)))
+    if seg.real and seg.timed:
+        wide.append(("BEBER", seg.col(0, "consuming")[tick] == 1))
+    if seg.real and seg.hungry:
+        wide.append(("COMER", seg.col(0, "consuming")[tick] == 2))
     for i, (label, on) in enumerate(wide):
         bx, by = x0 + i * 112, y0 + 2 * (sz + 6)
         d.rectangle([bx, by, bx + 106, by + 40], fill=(255, 255, 255, 215) if on else (0, 0, 0, 110))

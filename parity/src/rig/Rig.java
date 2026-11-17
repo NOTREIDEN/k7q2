@@ -84,7 +84,7 @@ public final class Rig {
     static final Map<Integer, List<String[]>> fakeActions = new HashMap<Integer, List<String[]>>();
     static double[] start = {0.5, 4.0, 0.5, 0.0, 0.0};
     static double[] fakeStart = null;
-    static int settle = 100;
+    static int settle = 100, waited = 0, unready = 0;
     static double penLo = -1000.0, penHi = 1000.0;
     static int speedAmp = 1;
     static float sensitivity = 0.5F;
@@ -94,6 +94,13 @@ public final class Rig {
     /** Splash potions of Instant Health II, one each in the hotbar slots from the third on. */
     static int potions = 0;
     static final int HEAL_II = 16421;
+    /** Potions of Swiftness II to drink, one each in the hotbar slots after the splash potions. */
+    static int drinks = 0;
+    static final int SPEED_II = 8226;
+    /** Steaks in the last hotbar slot. */
+    static int steak = 0;
+    /** How long the Speed of the start lasts, in ticks; below zero, for good and without particles. */
+    static int speedTicks = -1;
     // The kit. With health on, hits cost health: no Resistance and no Saturation.
     static boolean health = false, armor = false;
     static int prot = 0, feather = 0, sharp = 0;
@@ -173,6 +180,12 @@ public final class Rig {
                 pearls = Integer.parseInt(p[1]);
             } else if (p[0].equals("potions")) {
                 potions = Math.min(7, Integer.parseInt(p[1]));
+            } else if (p[0].equals("drinks")) {
+                drinks = Integer.parseInt(p[1]);
+            } else if (p[0].equals("steak")) {
+                steak = Integer.parseInt(p[1]);
+            } else if (p[0].equals("speedticks")) {
+                speedTicks = Integer.parseInt(p[1]);
             } else if (p[0].equals("health")) {
                 health = !p[1].equals("0");
             } else if (p[0].equals("armor")) {
@@ -198,7 +211,8 @@ public final class Rig {
         log("HEADER ticks=" + inputs.size() + " speed=" + speedAmp + " sensitivity=" + hf(sensitivity)
             + " fake=" + (fakeStart != null ? 1 : 0) + " blocks=" + blocks.size() + " fmt=5 wear=" + (unbreakable ? 0 : 1) + " pearls=" + pearls
             + " res=" + (health ? 0 : 1) + " armor=" + (armor ? 20 : 0) + " prot=" + (armor ? prot : 0) + " ff=" + (armor ? feather : 0)
-            + " sharp=" + sharp + " eseed=" + enchSeed + " potions=" + potions);
+            + " sharp=" + sharp + " eseed=" + enchSeed + " potions=" + potions
+            + " drinks=" + drinks + " steak=" + steak + " spt=" + speedTicks + " food=" + startFood + " sat=" + hf(startSat));
         for (int[] b : blocks) log("BLOCK " + b[0] + " " + b[1] + " " + b[2]);
     }
 
@@ -245,6 +259,10 @@ public final class Rig {
             mc.launchIntegratedServer("rig" + System.currentTimeMillis(), "rig", ws);
             state = 1;
             return;
+        }
+        if (state < 3 && ++waited % 200 == 0) {
+            System.out.println("rig: waiting in state " + state + ", setup " + setupDone + ", ready " + ready + ", screen " + mc.currentScreen
+                + ", player " + (mc.thePlayer != null) + ", other " + (mc.theWorld != null && other(mc) != null));
         }
         if (state == 1) {
             if (mc.thePlayer == null || mc.theWorld == null || mc.getIntegratedServer() == null) return;
@@ -337,7 +355,8 @@ public final class Rig {
             + " rtpitch=" + hd((Double) get(o, c, "otherPlayerMPPitch"))
             + " rog=" + (o.onGround ? 1 : 0) + " rspr=" + (o.isSprinting() ? 1 : 0) + " rht=" + o.hurtTime
             + " rswing=" + (o.isSwingInProgress ? 1 : 0) + " rswp=" + o.swingProgressInt
-            + " reat=" + (o.isEating() ? 1 : 0) + " rhp=" + hf(o.getHealth());
+            + " reat=" + (o.isEating() ? 1 : 0) + " rhp=" + hf(o.getHealth())
+            + " rfx=" + o.getDataWatcher().getWatchableObjectInt(7);
     }
 
     static String local(EntityPlayerSP p) {
@@ -365,7 +384,7 @@ public final class Rig {
             + " sd=" + wear(p) + " held=" + p.inventory.currentItem
             + " cpi=" + get(Minecraft.getMinecraft().playerController, net.minecraft.client.multiplayer.PlayerControllerMP.class, "currentPlayerItem")
             + " pc=" + count(p) + " pots=" + pots(p) + " pe=" + clientPearls(Minecraft.getMinecraft())
-            + " hp=" + hf(p.getHealth()) + " sat=" + hf(p.getFoodStats().getSaturationLevel());
+            + " hp=" + hf(p.getHealth()) + " sat=" + hf(p.getFoodStats().getSaturationLevel()) + more(p);
     }
 
     /** Pearls in the second hotbar slot. */
@@ -379,9 +398,27 @@ public final class Rig {
         int m = 0;
         for (int i = 0; i < 9; i++) {
             ItemStack s = p.inventory.mainInventory[i];
-            if (s != null && s.getItem() == Items.potionitem && s.stackSize > 0) m |= 1 << i;
+            if (s != null && s.getItem() == Items.potionitem && s.stackSize > 0 && net.minecraft.item.ItemPotion.isSplash(s.getMetadata())) m |= 1 << i;
         }
         return m;
+    }
+
+    /** The hotbar slots that hold a potion to drink and those that hold an empty bottle, the
+        steaks in the last slot, the ticks of use left, the ticks of Speed left (-1: none) and
+        whether particles of an effect show. */
+    static String more(EntityPlayer p) {
+        int dr = 0, bt = 0;
+        for (int i = 0; i < 9; i++) {
+            ItemStack s = p.inventory.mainInventory[i];
+            if (s == null || s.stackSize <= 0) continue;
+            if (s.getItem() == Items.potionitem && !net.minecraft.item.ItemPotion.isSplash(s.getMetadata())) dr |= 1 << i;
+            if (s.getItem() == Items.glass_bottle) bt |= 1 << i;
+        }
+        ItemStack f = p.inventory.mainInventory[8];
+        PotionEffect e = p.getActivePotionEffect(Potion.moveSpeed);
+        return " dr=" + dr + " bt=" + bt + " fd=" + (f != null && f.getItem() == Items.cooked_beef ? f.stackSize : 0)
+            + " iuc=" + p.getItemInUseCount() + " spt=" + (e == null ? -1 : e.getDuration()) + " spa=" + (e == null ? -1 : e.getAmplifier())
+            + " fx=" + p.getDataWatcher().getWatchableObjectInt(7);
     }
 
     /** The pearls and potions in flight as this client has them. */
@@ -403,7 +440,14 @@ public final class Rig {
         return s == null ? -1 : s.getItemDamage();
     }
 
+    /** The Speed of the start runs out this many ticks into the recording. */
+    static void speedLeft(EntityPlayer p) {
+        PotionEffect e = p.getActivePotionEffect(Potion.moveSpeed);
+        if (e != null && speedTicks > 0) set(e, PotionEffect.class, "duration", Integer.valueOf(speedTicks));
+    }
+
     static void clientInit(Minecraft mc) {
+        speedLeft(mc.thePlayer);
         log("CINIT " + local(mc.thePlayer) + remote(other(mc)));
     }
 
@@ -579,7 +623,10 @@ public final class Rig {
 
     static void prepare(EntityPlayerMP p) {
         p.clearActivePotions();
-        if (speedAmp >= 0) p.addPotionEffect(new PotionEffect(Potion.moveSpeed.id, 10000000, speedAmp, false, false));
+        if (speedAmp >= 0 && speedTicks < 0) p.addPotionEffect(new PotionEffect(Potion.moveSpeed.id, 10000000, speedAmp, false, false));
+        // As after a potion: it runs out, and its particles show.
+        // The time it has left is set when the recording starts.
+        if (speedAmp >= 0 && speedTicks > 0) p.addPotionEffect(new PotionEffect(Potion.moveSpeed.id, 10000000, speedAmp));
         if (!health) {
             p.addPotionEffect(new PotionEffect(Potion.resistance.id, 10000000, 4, false, false));
             p.addPotionEffect(new PotionEffect(Potion.saturation.id, 10000000, 0, false, false));
@@ -608,6 +655,8 @@ public final class Rig {
         p.inventory.mainInventory[0] = sword;
         if (pearls > 0) p.inventory.mainInventory[1] = new ItemStack(Items.ender_pearl, pearls);
         for (int i = 0; i < potions; i++) p.inventory.mainInventory[2 + i] = new ItemStack(Items.potionitem, 1, HEAL_II);
+        for (int i = 0; i < drinks && 2 + potions + i < 9; i++) p.inventory.mainInventory[2 + potions + i] = new ItemStack(Items.potionitem, 1, SPEED_II);
+        if (steak > 0) p.inventory.mainInventory[8] = new ItemStack(Items.cooked_beef, steak);
         p.inventory.currentItem = 0;
         p.setHealth(p.getMaxHealth());
     }
@@ -668,7 +717,7 @@ public final class Rig {
             + " ft=" + get(p.getFoodStats(), net.minecraft.util.FoodStats.class, "foodTimer")
             + " lhp=" + hf((Float) get(p, EntityPlayerMP.class, "lastHealth"))
             + " lfood=" + get(p, EntityPlayerMP.class, "lastFoodLevel")
-            + " wh=" + (((Boolean) get(p, EntityPlayerMP.class, "wasHungry")) ? 1 : 0)
+            + " wh=" + (((Boolean) get(p, EntityPlayerMP.class, "wasHungry")) ? 1 : 0) + more(p)
             + net(p.playerNetServerHandler)
             + " ccx=" + p.chunkCoordX + " ccy=" + p.chunkCoordY + " ccz=" + p.chunkCoordZ + " atc=" + (p.addedToChunk ? 1 : 0)
             + tracker(p);
@@ -715,12 +764,24 @@ public final class Rig {
                 // A client reports in every tick; do the same for the scripted player.
                 if (fake != null && setupDone) fakeNet.processPlayer(new C03PacketPlayer(true));
                 ready = setupDone && (fake == null || (entry(real).trackingPlayers.contains(fake) && entry(fake).trackingPlayers.contains(real)));
+                if (setupDone && fake != null && !ready && ++unready % 100 == 0) {
+                    net.minecraft.server.management.PlayerManager pm = w.getPlayerManager();
+                    System.out.println("rig: not ready: real sees fake " + entry(fake).trackingPlayers.contains(real)
+                        + ", fake sees real " + entry(real).trackingPlayers.contains(fake)
+                        + ", real at chunk " + real.chunkCoordX + " " + real.chunkCoordZ + " (" + real.posX + " " + real.posZ + ") watched by fake "
+                        + pm.isPlayerWatchingChunk(fake, real.chunkCoordX, real.chunkCoordZ) + " left to send " + fake.loadedChunks.size()
+                        + ", fake at chunk " + fake.chunkCoordX + " " + fake.chunkCoordZ + " watched by real "
+                        + pm.isPlayerWatchingChunk(real, fake.chunkCoordX, fake.chunkCoordZ) + " left to send " + real.loadedChunks.size()
+                        + ", real managed " + real.managedPosX + " " + real.managedPosZ);
+                }
                 return;
             }
             if (!serverRecording) {
                 serverRecording = true;
                 // The random part of what Protection takes off a hit comes from this generator.
                 ((java.util.Random) get(null, net.minecraft.enchantment.EnchantmentHelper.class, "enchantmentRand")).setSeed(enchSeed);
+                speedLeft(real);
+                if (fake != null) speedLeft(fake);
                 log("SINIT " + sp(real));
                 if (fake != null) log("SINIT " + sp(fake));
             }

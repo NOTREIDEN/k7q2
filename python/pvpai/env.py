@@ -29,6 +29,9 @@ PARAM = {
     "potions_min": 73, "potions_max": 74, "start_hurt": 75, "start_health_min": 76, "start_health_max": 77,
     "w_win": 78, "w_heal": 79, "w_waste": 80, "bot_potion": 81, "hunger": 82,
     "hurt_who": 83, "pearls_who": 84,
+    "speed_end_prob": 85, "speed_left_min_s": 86, "speed_left_max_s": 87,
+    "drinks_min": 88, "drinks_max": 89, "hunger_prob": 90, "start_food_min": 91, "start_food_max": 92,
+    "speed_who": 93, "bot_drink": 94, "w_speed": 95, "w_fed": 96,
 }
 
 STAT_NAMES = [
@@ -42,6 +45,9 @@ STAT_NAMES = [
     "heal_self0", "heal_self1", "heal_gift0", "heal_gift1", "pot_offer0", "pot_offer1",
     "pot_perfect0", "pot_perfect1", "pot_double0", "pot_double1", "pot_health0", "pot_health1",
     "pot_away0", "pot_away1", "pot_hit0", "pot_hit1",
+    "drinks0", "drinks1", "meals0", "meals1", "sips0", "sips1", "sip_ticks0", "sip_ticks1",
+    "sip_hit0", "sip_hit1", "speed_on0", "speed_on1", "fed0", "fed1",
+    "pot_after0", "pot_after1", "off0", "off1",
 ]
 
 # Per-player fields of VecEnv.view(), then the fields that follow both players.
@@ -51,6 +57,7 @@ VIEW_PLAYER = [
     "seen_x", "seen_y", "seen_z", "using", "blocking", "blocked", "damage",
     "held", "pearls", "pearl_on", "pearl_x", "pearl_y", "pearl_z",
     "health", "potions", "potion_on", "potion_x", "potion_y", "potion_z",
+    "item", "consuming", "speed_s", "food", "drinks", "speed_fx",
 ]
 VIEW_GLOBAL = ["ticks_left", "ep_len", "arena_half", "floor_y", "ping0", "ping1", "cps0", "cps1",
                "reach1", "kb_taken1", "backtrack1_ms",

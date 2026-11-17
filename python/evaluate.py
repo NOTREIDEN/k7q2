@@ -19,7 +19,8 @@ def health(st):
     it gave the other player; then how the agent throws: the share of its
     potions that offered all eight points, the share thrown right after
     another, its health at the throw, the ticks its crosshair left the
-    opponent for a potion, and the hits it took in the second after."""
+    opponent for a potion, how many of them came after the throw, and the
+    hits it took in the second after."""
     deaths = st["deaths0"] + st["deaths1"]
     duels = max(st["episodes"], 1)
     s0, s1 = max(st["splashes0"], 1), max(st["splashes1"], 1)
@@ -28,7 +29,7 @@ def health(st):
             f"{st['potions1']/duels:6.1f}  {st['heal_self0']/s0:11.1f}  {st['heal_self1']/s1:6.1f}  "
             f"{st['pot_offer0']/s0:5.1f}  {st['heal_gift0']/s0:4.1f}  {st['heal_gift1']/s1:6.1f}  "
             f"{st['pot_perfect0']/s0:4.2f}  {st['pot_double0']/t0:6.2f}  {st['pot_health0']/t0:9.1f}  "
-            f"{st['pot_away0']/t0:10.1f}  {st['pot_hit0']/t0:10.2f}")
+            f"{st['pot_away0']/t0:10.1f}  {st['pot_after0']/t0:10.1f}  {st['pot_hit0']/t0:10.2f}")
 
 
 def main():
@@ -49,7 +50,7 @@ def main():
     print(f"checkpoint with {ck.get('samples', 0)/1e6:.1f}M samples; {args.duels} duels of {args.seconds:.0f} s per level")
     print("level  hits/min  taken/min  sprint-hit  on-target  aim-err  clicks/s  best-combo  blocking  blocked  dmg/min  dmg-taken/min"
           "  block-ticks  block-tap  kb/hit  pearls/min  their-pearls/min  first-hit-own  first-hit-theirs"
-          + ("  wins  duel-s  potions/duel  theirs  heal/potion  theirs  reach  gift  theirs  full  double  at-health  away-ticks  hits-after" if args.health else ""))
+          + ("  wins  duel-s  potions/duel  theirs  heal/potion  theirs  reach  gift  theirs  full  double  at-health  away-ticks  back-ticks  hits-after" if args.health else ""))
     for level in [int(x) for x in args.levels.split(",")]:
         env = VecEnv(args.duels, BOT, 1234 + level, args.lib)
         env.set_param("bot_level_min", level)

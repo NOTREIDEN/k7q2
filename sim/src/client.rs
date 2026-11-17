@@ -5,7 +5,7 @@
 use crate::aabb::{dist, Aabb, V3, EYE_HEIGHT};
 use crate::living::Living;
 use crate::mth;
-use crate::net::{Item, Kind, ThrownEv, C2S, S2C, SLOT_PEARL, SLOT_SWORD};
+use crate::net::{Bar, Item, Kind, ThrownEv, BLOCK_TICKS, C2S, S2C, SLOT_SWORD, STEAK_FOOD, STEAK_SATURATION, USE_TICKS};
 use crate::world::{RayHit, World};
 
 /// Keys and mouse for one client tick.
@@ -87,8 +87,11 @@ pub struct RemotePlayer {
     pub swing_in_progress: bool,
     pub swing_progress_int: i32,
     /// The flag the server sets while this player uses an item: with a
-    /// sword in hand, it is shown blocking.
+    /// sword in hand, it is shown blocking; with a potion or food, drinking
+    /// or eating.
     pub using: bool,
+    /// Particles of an effect show around it.
+    pub fx: bool,
     /// Its health, which the server tells everybody.
     pub health: f32,
     /// What this player holds, as the server last said: the item, and the
@@ -205,6 +208,7 @@ impl RemotePlayer {
             swing_in_progress: false,
             swing_progress_int: 0,
             using: false,
+            fx: false,
             health: 20.0,
             item: Item::Sword,
             item_n: 0,
@@ -340,17 +344,23 @@ pub struct LocalPlayer {
     pub last_pitch: f32,
     pub position_update_ticks: i32,
     pub hurt_time: i32,
-    /// `isUsingItem()`: this client is blocking with the sword.
+    /// `isUsingItem()`: this client is blocking with the sword, drinking or
+    /// eating.
     pub using_item: bool,
+    /// The hotbar slot of the stack in use and `itemInUseCount`, which a
+    /// client only counts down: the server says when a drink or a meal is
+    /// finished.
+    pub use_slot: u8,
+    pub use_count: i32,
     /// `Minecraft.rightClickDelayTimer`.
     pub right_click_delay: i32,
     /// The right button as it was on the previous tick.
     pub use_key_down: bool,
-    /// Counts the times the server replaced the held item stack. A block
-    /// belongs to the stack it was started with: once the stack has been
-    /// replaced, the client drops the block on its own, without telling
-    /// the server.
-    pub stack_gen: u32,
+    /// Counts, for every hotbar slot, the times its stack was replaced by
+    /// a new one. A block, a drink or a meal belongs to the stack it was
+    /// started with: once that stack has been replaced, the client drops
+    /// the use on its own, without telling the server.
+    pub gens: [u32; 9],
     pub use_gen: u32,
     /// The using-item flag of this player as the server last sent it.
     pub flag_using: bool,
@@ -363,6 +373,17 @@ pub struct LocalPlayer {
     pub pearls: u8,
     /// The hotbar slots that hold a splash potion, one bit each.
     pub potions: u16,
+    /// Those that hold a potion to drink and those that hold an empty
+    /// bottle, and the steaks in the last slot.
+    pub drinks: u16,
+    pub bottles: u16,
+    pub steak: u8,
+    /// The Speed effect as this client has it: its amplifier and the ticks
+    /// left, counted down here and set again whenever the server says
+    /// (-1: no effect), and whether particles show around this player.
+    pub speed_amp: i8,
+    pub speed_ticks: i32,
+    pub fx: bool,
     /// Health, food and saturation as the server last said.
     pub health: f32,
     pub food: i32,
@@ -404,15 +425,23 @@ impl LocalPlayer {
             position_update_ticks: 0,
             hurt_time: 0,
             using_item: false,
+            use_slot: SLOT_SWORD,
+            use_count: 0,
             right_click_delay: 0,
             use_key_down: false,
-            stack_gen: 0,
+            gens: [0; 9],
             use_gen: 0,
             flag_using: false,
             held: SLOT_SWORD,
             synced: SLOT_SWORD,
             pearls: 0,
             potions: 0,
+            drinks: 0,
+            bottles: 0,
+            steak: 0,
+            speed_amp: speed_amp,
+            speed_ticks: if speed_amp >= 0 { crate::server::FOR_GOOD } else { -1 },
+            fx: false,
             health: 20.0,
             food: 20,
             saturation: 5.0,
@@ -456,15 +485,58 @@ impl LocalPlayer {
         [p[0], p[1] + EYE_HEIGHT, p[2]]
     }
 
+    /// The hotbar but for the sword.
+    #[inline]
+    pub fn bar(&self) -> Bar {
+        Bar { pearls: self.pearls, potions: self.potions, drinks: self.drinks, bottles: self.bottles, steak: self.steak }
+    }
+
+    #[inline]
+    pub fn set_bar(&mut self, b: Bar) {
+        self.pearls = b.pearls;
+        self.potions = b.potions;
+        self.drinks = b.drinks;
+        self.bottles = b.bottles;
+        self.steak = b.steak;
+    }
+
     /// What is in hand.
     #[inline]
     pub fn in_hand(&self) -> Item {
-        match self.held {
-            SLOT_SWORD => Item::Sword,
-            SLOT_PEARL if self.pearls > 0 => Item::Pearl,
-            s if self.potions >> s & 1 != 0 => Item::Potion,
-            _ => Item::Empty,
+        if self.held == SLOT_SWORD {
+            Item::Sword
+        } else {
+            self.bar().stack(self.held).0
         }
+    }
+
+    /// The stack in hand as a packet names it: the item and how many.
+    #[inline]
+    fn said(&self) -> (Item, u8) {
+        if self.held == SLOT_SWORD {
+            (Item::Sword, 1)
+        } else {
+            let (item, n) = self.bar().stack(self.held);
+            (item, n as u8)
+        }
+    }
+
+    /// `setItemInUse(stack, duration)` for the stack in hand.
+    #[inline]
+    fn start_use(&mut self, ticks: i32) {
+        if !(self.using_item && self.use_slot == self.held && self.use_gen == self.gens[self.held as usize]) {
+            self.using_item = true;
+            self.use_slot = self.held;
+            self.use_gen = self.gens[self.held as usize];
+            self.use_count = ticks;
+        }
+    }
+
+    /// Whether the client is drinking or eating: using an item that is not
+    /// the sword.
+    #[inline]
+    pub fn consuming(&self) -> bool {
+        self.using_item && self.use_slot != SLOT_SWORD
     }
 
     /// `PlayerControllerMP.syncCurrentPlayItem`: tell the server which slot
@@ -638,37 +710,47 @@ fn right_click(lp: &mut LocalPlayer, pick: &Pick, out: &mut Vec<C2S>) -> Option<
         out.push(C2S::Interact);
     } else if pick.block {
         lp.sync_slot(out);
-        out.push(C2S::UseBlock);
+        out.push(C2S::UseBlock(lp.said()));
         if item == Item::Empty {
             return None;
         }
     }
+    if item == Item::Empty {
+        return None;
+    }
+    // sendUseItem: the server is told, with the stack as it is before the
+    // use, and the item is used here as well.
+    lp.sync_slot(out);
+    out.push(C2S::UseItem(lp.said()));
     match item {
-        Item::Empty => None,
+        Item::Empty | Item::Bottle => None,
+        // ItemSword.onItemRightClick -> setItemInUse
         Item::Sword => {
-            // sendUseItem -> ItemSword.onItemRightClick -> setItemInUse
-            lp.sync_slot(out);
-            out.push(C2S::UseItem);
-            if !lp.using_item {
-                lp.using_item = true;
-                lp.use_gen = lp.stack_gen;
+            lp.start_use(BLOCK_TICKS);
+            None
+        }
+        // ItemPotion.onItemRightClick for a potion to drink.
+        Item::Drink => {
+            lp.start_use(USE_TICKS);
+            None
+        }
+        // ItemFood.onItemRightClick: only with room for food, as far as
+        // this client knows.
+        Item::Food => {
+            if lp.food < 20 {
+                lp.start_use(USE_TICKS);
             }
             None
         }
         Item::Pearl => {
-            // sendUseItem -> ItemEnderPearl.onItemRightClick: the client
-            // only takes one off its stack. The pearl itself comes from the
-            // server.
-            lp.sync_slot(out);
-            out.push(C2S::UseItem);
+            // ItemEnderPearl.onItemRightClick: the client only takes one
+            // off its stack. The pearl itself comes from the server.
             lp.pearls -= 1;
             Some(Kind::Pearl)
         }
         Item::Potion => {
-            // sendUseItem -> ItemPotion.onItemRightClick for a splash
-            // potion: the stack of one is used up.
-            lp.sync_slot(out);
-            out.push(C2S::UseItem);
+            // ItemPotion.onItemRightClick for a splash potion: the stack of
+            // one is used up.
             lp.potions &= !(1 << lp.held);
             Some(Kind::Potion)
         }
@@ -788,7 +870,14 @@ impl Client {
             S2C::Look { yaw, pitch, on_ground } => self.rp.rel_move([0, 0, 0], Some((yaw, pitch)), on_ground),
             S2C::LookMove { d, yaw, pitch, on_ground } => self.rp.rel_move(d, Some((yaw, pitch)), on_ground),
             S2C::Teleport { p, yaw, pitch, on_ground } => self.rp.teleport(p, yaw, pitch, on_ground),
-            S2C::Meta { own, flags, health } => {
+            S2C::Meta { own, flags, health, fx } => {
+                if let Some(f) = fx {
+                    if own {
+                        self.lp.fx = f;
+                    } else {
+                        self.rp.fx = f;
+                    }
+                }
                 if let Some((sprinting, using)) = flags {
                     if own {
                         // The flags byte is overwritten without going through
@@ -826,17 +915,68 @@ impl Client {
                 lp.saturation = saturation;
             }
             // handleSetSlot puts a new stack object into the hotbar.
-            S2C::SetSlot { slot, count } => match slot {
-                SLOT_SWORD => self.lp.stack_gen = self.lp.stack_gen.wrapping_add(1),
-                SLOT_PEARL => self.lp.pearls = count,
-                s if s < 9 => self.lp.potions = self.lp.potions & !(1 << s) | ((count > 0) as u16) << s,
-                _ => {}
-            },
+            S2C::SetSlot { slot, item, count } => {
+                if slot < 9 {
+                    let lp = &mut self.lp;
+                    lp.gens[slot as usize] = lp.gens[slot as usize].wrapping_add(1);
+                    if slot != SLOT_SWORD {
+                        let mut b = lp.bar();
+                        b.put(slot, item, count);
+                        lp.set_bar(b);
+                    }
+                }
+            }
             // handleWindowItems puts new stack objects into every slot.
-            S2C::WindowItems { pearls, potions } => {
-                self.lp.stack_gen = self.lp.stack_gen.wrapping_add(1);
-                self.lp.pearls = pearls;
-                self.lp.potions = potions;
+            S2C::WindowItems(b) => {
+                for g in self.lp.gens.iter_mut() {
+                    *g = g.wrapping_add(1);
+                }
+                self.lp.set_bar(b);
+            }
+            // handleEntityStatus 9 -> EntityPlayer.onItemUseFinish, for the
+            // stack this client has in use: the drink leaves a bottle, a
+            // new stack, in the slot in hand; the steak is one less, and
+            // the food it gives is counted here before the server says.
+            S2C::UseDone => {
+                let lp = &mut self.lp;
+                if lp.using_item {
+                    let slot = lp.held;
+                    let mut b = lp.bar();
+                    match b.stack(lp.use_slot).0 {
+                        Item::Drink if lp.use_slot != SLOT_SWORD => {
+                            b.put(lp.use_slot, Item::Empty, 0);
+                            b.put(slot, Item::Bottle, 1);
+                            lp.gens[slot as usize] = lp.gens[slot as usize].wrapping_add(1);
+                        }
+                        Item::Food if lp.use_slot != SLOT_SWORD => {
+                            b.steak -= 1;
+                            lp.food = (STEAK_FOOD + lp.food).min(20);
+                            lp.saturation = (lp.saturation + STEAK_FOOD as f32 * STEAK_SATURATION * 2.0f32).min(lp.food as f32);
+                        }
+                        _ => {}
+                    }
+                    lp.set_bar(b);
+                    lp.using_item = false;
+                }
+            }
+            // handleEntityEffect and handleRemoveEntityEffect: what the
+            // client shows. Its speed comes with the attribute.
+            S2C::Effect { amp, ticks, .. } => {
+                let lp = &mut self.lp;
+                if lp.speed_ticks < 0 || amp > lp.speed_amp {
+                    lp.speed_amp = amp;
+                    lp.speed_ticks = ticks;
+                } else if amp == lp.speed_amp && lp.speed_ticks < ticks {
+                    // PotionEffect.combine: the longer of the two. The
+                    // client's own count, which runs once per tick, can be
+                    // ahead of the server's, which runs once per movement
+                    // packet.
+                    lp.speed_ticks = ticks;
+                }
+            }
+            S2C::EffectEnd => {
+                self.lp.speed_amp = -1;
+                self.lp.speed_ticks = -1;
             }
             S2C::Cursor => {}
             // handleEntityEquipment
@@ -995,8 +1135,16 @@ impl Client {
         // --- EntityPlayerSP.onUpdate ---
         // EntityPlayer.onUpdate: the item in use has to be the very stack
         // that is in the hand.
-        if lp.using_item && (lp.use_gen != lp.stack_gen || lp.held != SLOT_SWORD) {
-            lp.using_item = false;
+        if lp.using_item {
+            if lp.held == lp.use_slot && lp.use_gen == lp.gens[lp.held as usize] {
+                lp.use_count -= 1;
+            } else {
+                lp.using_item = false;
+            }
+        }
+        // updatePotionEffects: the client counts along.
+        if lp.speed_ticks > 0 {
+            lp.speed_ticks -= 1;
         }
         // onEntityUpdate
         if lp.hurt_time > 0 {

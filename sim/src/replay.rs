@@ -11,7 +11,7 @@
 use crate::aabb::Aabb;
 use crate::client::{Client, ClientCfg, Input};
 use crate::mth::{JavaRandom, Rng};
-use crate::net::{Item, Kind, ThrownEv, C2S, S2C, POTION_SLOTS, SLOT_PEARL, SLOT_SWORD};
+use crate::net::{Bar, Item, Kind, ThrownEv, C2S, S2C, SLOT_SWORD};
 use crate::server::{chunk_of, feather_points, prot_points, Food, KbProfile, Server, ServerCfg, ServerPlayer, MAX_HEALTH};
 use crate::world::World;
 use std::collections::HashMap;
@@ -87,22 +87,33 @@ fn stack(s: &str) -> (Item, u32) {
     match p[0] {
         "276" => (Item::Sword, p[1].parse().unwrap()),
         "368" => (Item::Pearl, p[2].parse().unwrap()),
-        // A splash potion of Instant Health II.
+        // A splash potion of Instant Health II, a potion of Swiftness II
+        // to drink, an empty bottle and steak.
         "373" if p[1] == "16421" => (Item::Potion, p[2].parse().unwrap()),
+        "373" if p[1] == "8226" => (Item::Drink, p[2].parse().unwrap()),
+        "374" => (Item::Bottle, p[2].parse().unwrap()),
+        "364" => (Item::Food, p[2].parse().unwrap()),
         other => panic!("an item the simulator does not know: {other}"),
     }
 }
 
-/// Which hotbar slots hold a potion, from the nine stacks of the hotbar as
-/// the rig writes them.
-fn potion_slots(hotbar: &str) -> u16 {
-    let mut m = 0u16;
-    for (k, e) in hotbar.split(',').enumerate().take(9) {
-        if stack(e).0 == Item::Potion {
-            m |= 1 << k;
-        }
+/// The hotbar but for the sword, from the nine stacks of the hotbar as the
+/// rig writes them.
+fn bar_of(hotbar: &str) -> Bar {
+    let mut b = Bar::default();
+    for (k, e) in hotbar.split(',').enumerate().take(9).skip(1) {
+        let (item, n) = stack(e);
+        b.put(k as u8, item, n as u8);
     }
-    m & POTION_SLOTS
+    b
+}
+
+/// The stack a client says it has in hand.
+fn said(s: &str) -> (Item, u8) {
+    match stack(s) {
+        (Item::Sword, _) => (Item::Sword, 1),
+        (item, n) => (item, n as u8),
+    }
 }
 
 /// Turn a recorded server-to-client packet into the simulator's packet.
@@ -135,8 +146,7 @@ fn s2c(l: &Line, at: usize, own_id: i64, pearls: &mut PearlIds) -> Option<S2C> {
         if l.i("windowId") != 0 {
             return None;
         }
-        let second = l.s("itemStacks").split(',').nth(SLOT_PEARL as usize).unwrap_or("-");
-        return Some(S2C::WindowItems { pearls: stack(second).1 as u8, potions: potion_slots(l.s("itemStacks")) });
+        return Some(S2C::WindowItems(bar_of(l.s("itemStacks"))));
     }
     if class == "S04PacketEntityEquipment" {
         if id("entityID") || l.i("equipmentSlot") != 0 {
@@ -173,7 +183,7 @@ fn s2c(l: &Line, at: usize, own_id: i64, pearls: &mut PearlIds) -> Option<S2C> {
     }
     if class == "S1CPacketEntityMetadata" {
         let list = l.s("field_149378_b").trim_matches(|c| c == '[' || c == ']');
-        let (mut flags, mut health) = (None, None);
+        let (mut flags, mut health, mut fx) = (None, None, None);
         for e in list.split(';').filter(|e| !e.is_empty()) {
             let p: Vec<&str> = e.split(':').collect();
             if p[0] == "0" {
@@ -184,8 +194,17 @@ fn s2c(l: &Line, at: usize, own_id: i64, pearls: &mut PearlIds) -> Option<S2C> {
             if p[0] == "6" {
                 health = Some(f32::from_bits(u32::from_str_radix(p[2], 16).unwrap()));
             }
+            // Watched value 7 is the colour of the effect particles, zero
+            // without any.
+            if p[0] == "7" {
+                fx = Some(p[2].parse::<i64>().unwrap() != 0);
+            }
         }
-        return if flags.is_some() || health.is_some() { Some(S2C::Meta { own: id("entityId"), flags, health }) } else { None };
+        return if flags.is_some() || health.is_some() || fx.is_some() {
+            Some(S2C::Meta { own: id("entityId"), flags, health, fx })
+        } else {
+            None
+        };
     }
     if class == "S06PacketUpdateHealth" {
         return Some(S2C::Health { health: l.f("health"), food: l.i("foodLevel") as i32, saturation: l.f("saturationLevel") });
@@ -219,9 +238,11 @@ fn s2c(l: &Line, at: usize, own_id: i64, pearls: &mut PearlIds) -> Option<S2C> {
         // where the sword is, and 37 the second, where the pearls are.
         // Window -1 is the stack on the mouse cursor.
         return match (l.i("windowId"), l.i("slot")) {
-            (0, 36) => Some(S2C::SetSlot { slot: SLOT_SWORD, count: 1 }),
-            (0, 37) => Some(S2C::SetSlot { slot: SLOT_PEARL, count: stack(l.s("item")).1 as u8 }),
-            (0, k @ 38..=44) => Some(S2C::SetSlot { slot: (k - 36) as u8, count: stack(l.s("item")).1 as u8 }),
+            (0, 36) => Some(S2C::SetSlot { slot: SLOT_SWORD, item: Item::Sword, count: 1 }),
+            (0, k @ 37..=44) => {
+                let (item, n) = stack(l.s("item"));
+                Some(S2C::SetSlot { slot: (k - 36) as u8, item, count: n as u8 })
+            }
             (-1, _) => Some(S2C::Cursor),
             _ => None,
         };
@@ -237,7 +258,22 @@ fn s2c(l: &Line, at: usize, own_id: i64, pearls: &mut PearlIds) -> Option<S2C> {
         });
     }
     if class == "S19PacketEntityStatus" {
-        return if l.i("logicOpcode") == 2 { Some(S2C::Hurt { own: id("entityId") }) } else { None };
+        return match l.i("logicOpcode") {
+            2 => Some(S2C::Hurt { own: id("entityId") }),
+            9 if id("entityId") => Some(S2C::UseDone),
+            _ => None,
+        };
+    }
+    // Speed is effect 1; the last field says whether its particles show.
+    if class == "S1DPacketEntityEffect" {
+        return if l.i("effectId") == 1 && id("entityId") {
+            Some(S2C::Effect { amp: l.i("amplifier") as i8, ticks: l.i("duration") as i32, shown: l.i("hideParticles") != 0 })
+        } else {
+            None
+        };
+    }
+    if class == "S1EPacketRemoveEntityEffect" {
+        return if l.i("effectId") == 1 && id("entityId") { Some(S2C::EffectEnd) } else { None };
     }
     if class == "S0BPacketAnimation" {
         return if l.i("type") == 0 && !id("entityId") { Some(S2C::Swing) } else { None };
@@ -285,7 +321,10 @@ fn c2s(l: &Line, at: usize) -> Option<C2S> {
             "INTERACT" => Some(C2S::Interact),
             _ => None,
         },
-        "C08PacketPlayerBlockPlacement" => Some(if l.i("placedBlockDirection") == 255 { C2S::UseItem } else { C2S::UseBlock }),
+        "C08PacketPlayerBlockPlacement" => {
+            let st = said(l.s("stack"));
+            Some(if l.i("placedBlockDirection") == 255 { C2S::UseItem(st) } else { C2S::UseBlock(st) })
+        }
         // Starting and giving up on breaking a block is not modelled.
         "C07PacketPlayerDigging" => if l.s("status") == "RELEASE_USE_ITEM" { Some(C2S::ReleaseUse) } else { None },
         "C09PacketHeldItemChange" => Some(C2S::HeldItem(l.i("slotId") as u8)),
@@ -413,7 +452,7 @@ fn replay_client(lines: &[Line], world: &World, speed: i8, sens: f32, o: &Option
         lp.hurt_time = l.i("ht") as i32;
         if l.has("use") {
             lp.using_item = l.b("use");
-            lp.use_gen = lp.stack_gen;
+            lp.use_gen = lp.gens[lp.held as usize];
             lp.right_click_delay = l.i("rcd") as i32;
             lp.flag_using = l.b("eat");
         }
@@ -423,6 +462,17 @@ fn replay_client(lines: &[Line], world: &World, speed: i8, sens: f32, o: &Option
             lp.pearls = l.i("pc") as u8;
             if l.has("pots") {
                 lp.potions = l.i("pots") as u16;
+            }
+            if l.has("dr") {
+                lp.drinks = l.i("dr") as u16;
+                lp.bottles = l.i("bt") as u16;
+                lp.steak = l.i("fd") as u8;
+                lp.use_slot = lp.held;
+                lp.use_gen = lp.gens[lp.held as usize];
+                lp.use_count = l.i("iuc") as i32;
+                lp.speed_ticks = l.i("spt") as i32;
+                lp.speed_amp = l.i("spa") as i8;
+                lp.fx = l.i("fx") != 0;
             }
         }
         if l.has("hp") {
@@ -612,6 +662,18 @@ fn replay_client(lines: &[Line], world: &World, speed: i8, sens: f32, o: &Option
                     if st.has("pots") {
                         ok &= fi("potions left", lp.potions as i64, st.i("pots"), &mut rep);
                     }
+                    if st.has("dr") {
+                        ok &= fi("drinks left", lp.drinks as i64, st.i("dr"), &mut rep);
+                        ok &= fi("bottles", lp.bottles as i64, st.i("bt"), &mut rep);
+                        ok &= fi("steak left", lp.steak as i64, st.i("fd"), &mut rep);
+                        if lp.using_item {
+                            ok &= fi("ticks of use left", lp.use_count as i64, st.i("iuc"), &mut rep);
+                        }
+                        ok &= fi("ticks of speed left", lp.speed_ticks as i64, st.i("spt"), &mut rep);
+                        ok &= fi("effect particles", lp.fx as i64, (st.i("fx") != 0) as i64, &mut rep);
+                        ok &= fi("food", lp.food as i64, st.i("food"), &mut rep);
+                        ok &= fd("saturation", lp.saturation as f64, st.f("sat") as f64, &mut rep);
+                    }
                     // The pearls and potions in flight, as the game client
                     // has them.
                     let list = st.s("pe").trim_matches(|ch| ch == '[' || ch == ']');
@@ -715,6 +777,7 @@ fn about(p: &S2C) -> u8 {
     match p {
         S2C::Velocity { own, .. } | S2C::Hurt { own } | S2C::Meta { own, .. } | S2C::Props { own, .. } => !*own as u8,
         S2C::PosLook { .. } | S2C::SetSlot { .. } | S2C::WindowItems { .. } | S2C::Cursor | S2C::Destroy { .. } | S2C::Health { .. } => 0,
+        S2C::UseDone | S2C::Effect { .. } | S2C::EffectEnd => 0,
         S2C::Thrown { .. } => 2,
         _ => 1,
     }
@@ -751,6 +814,16 @@ fn load_server(p: &mut ServerPlayer, l: &Line) {
         if l.has("pots") {
             p.potions = l.i("pots") as u16;
         }
+        if l.has("dr") {
+            p.drinks = l.i("dr") as u16;
+            p.bottles = l.i("bt") as u16;
+            p.steak = l.i("fd") as u8;
+            p.use_slot = p.held;
+            p.use_count = l.i("iuc") as i32;
+            p.speed_ticks = (l.i("spt") as i32).max(0);
+            p.fx = l.i("fx") != 0;
+            p.speed_shown = p.fx;
+        }
         // The wear is recorded for the stack in hand only.
         if p.held == SLOT_SWORD && l.i("sd") >= 0 {
             p.sword_wear = l.i("sd") as u32;
@@ -770,7 +843,8 @@ fn load_server(p: &mut ServerPlayer, l: &Line) {
     } else {
         p.last_health = p.health;
     }
-    p.slot_dirty = false;
+    p.dirty = 0;
+    p.fx_dirty = false;
     p.meta_dirty = false;
     p.health_dirty = false;
     p.attr_dirty = false;
@@ -805,6 +879,7 @@ fn replay_server(lines: &[Line], world: &World, speed: i8, o: &Options, wear: f3
         return rep;
     }
     let n = inits.len();
+    let timed = inits[0].has("spt");
     let player_ids: Vec<i64> = inits.iter().map(|l| l.i("id")).collect();
     let mk = |l: Option<&&Line>| match l {
         Some(l) => {
@@ -888,6 +963,12 @@ fn replay_server(lines: &[Line], world: &World, speed: i8, o: &Options, wear: f3
             if fmt < 3 {
                 // Older recordings did not note what the other player holds.
                 out.retain(|(_, p)| !matches!(p, S2C::Equip { .. }));
+            }
+            if !timed {
+                // Nor how long the Speed of the start had been running, on
+                // which it depends when the player is told of it again.
+                out.retain(|(_, p)| !matches!(p, S2C::Effect { .. }));
+                want.retain(|(_, p)| !matches!(p, S2C::Effect { .. }));
             }
             rep.count("packets out", want.len());
             rep.count("teleports back", want.iter().filter(|w| matches!(w.1, S2C::PosLook { .. })).count());
@@ -1047,7 +1128,7 @@ fn replay_server(lines: &[Line], world: &World, speed: i8, o: &Options, wear: f3
                 ok &= fi("swing", p.swing_in_progress as i64, st.i("swing"), &mut rep);
                 ok &= fi("swing time", p.swing_progress_int as i64, st.i("swp"), &mut rep);
                 if st.has("blk") {
-                    ok &= fi("blocking", p.using_item as i64, st.i("blk"), &mut rep);
+                    ok &= fi("blocking", p.blocking() as i64, st.i("blk"), &mut rep);
                     ok &= fi("use flag", p.using_item as i64, st.i("eat"), &mut rep);
                 }
                 if st.has("held") {
@@ -1055,6 +1136,16 @@ fn replay_server(lines: &[Line], world: &World, speed: i8, o: &Options, wear: f3
                     ok &= fi("pearls left", p.pearls as i64, st.i("pc"), &mut rep);
                     if st.has("pots") {
                         ok &= fi("potions left", p.potions as i64, st.i("pots"), &mut rep);
+                    }
+                    if st.has("dr") {
+                        ok &= fi("drinks left", p.drinks as i64, st.i("dr"), &mut rep);
+                        ok &= fi("bottles", p.bottles as i64, st.i("bt"), &mut rep);
+                        ok &= fi("steak left", p.steak as i64, st.i("fd"), &mut rep);
+                        if p.using_item {
+                            ok &= fi("ticks of use left", p.use_count as i64, st.i("iuc"), &mut rep);
+                        }
+                        ok &= fi("ticks of speed left", if p.speed_ticks > 0 { p.speed_ticks as i64 } else { -1 }, st.i("spt"), &mut rep);
+                        ok &= fi("effect particles", p.fx as i64, (st.i("fx") != 0) as i64, &mut rep);
                     }
                     if p.held == SLOT_SWORD {
                         ok &= fi("sword wear", p.sword_wear as i64, st.i("sd"), &mut rep);
@@ -1131,11 +1222,14 @@ fn replay_server(lines: &[Line], world: &World, speed: i8, o: &Options, wear: f3
                     if p == C2S::Attack {
                         rep.count("attacks", 1);
                     }
-                    if p == C2S::UseItem {
+                    if let C2S::UseItem(_) = p {
                         rep.count(
                             match sv.p[who].in_hand().0 {
                                 Item::Pearl => "pearls thrown",
                                 Item::Potion => "potions thrown",
+                                Item::Drink => "drinks begun",
+                                Item::Food => "clicks with steak",
+                                Item::Bottle => "clicks with a bottle",
                                 _ => "blocks",
                             },
                             1,

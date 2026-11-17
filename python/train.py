@@ -262,7 +262,24 @@ def main():
                         potion_double=st["pot_double0"] / max(st["potions0"], 1.0),
                         potion_at_health=st["pot_health0"] / max(st["potions0"], 1.0),
                         potion_away_ticks=st["pot_away0"] / max(st["potions0"], 1.0),
+                        # Of those, the ticks after the throw until the crosshair is back,
+                        # and the share of all ticks it is that far off anyway.
+                        potion_back_ticks=st["pot_after0"] / max(st["potions0"], 1.0),
+                        off_frac=st["off0"] / st["ticks0"],
                         potion_hits_taken=st["pot_hit0"] / max(st["potions0"], 1.0),
+                        # Speed that runs out and hunger: drinks and meals finished per
+                        # duel by each side, the share of the ones begun that were
+                        # finished, the hits taken per one begun, and the share of the
+                        # time with Speed and with food enough to sprint.
+                        drinks_per_duel=st["drinks0"] / st["episodes"],
+                        opp_drinks_per_duel=st["drinks1"] / st["episodes"],
+                        meals_per_duel=st["meals0"] / st["episodes"],
+                        opp_meals_per_duel=st["meals1"] / st["episodes"],
+                        sip_done=(st["drinks0"] + st["meals0"]) / max(st["sips0"], 1.0),
+                        sip_hits_taken=st["sip_hit0"] / max(st["sips0"], 1.0),
+                        speed_frac=st["speed_on0"] / st["ticks0"],
+                        opp_speed_frac=st["speed_on1"] / max(st["ticks1"], 1.0),
+                        fed_frac=st["fed0"] / st["ticks0"],
                     )
             window.clear()
         log.write(json.dumps(row) + "\n")
@@ -283,7 +300,12 @@ def main():
                   f"heal {b.get('potion_heal', 0):.1f}/{b.get('opp_potion_heal', 0):.1f} "
                   f"reach {b.get('potion_reach', 0):.1f} gift {b.get('potion_gift', 0):.1f}/{b.get('opp_potion_gift', 0):.1f} "
                   f"full {b.get('potion_perfect', 0):.2f} x2 {b.get('potion_double', 0):.2f} at {b.get('potion_at_health', 0):.1f} "
-                  f"away {b.get('potion_away_ticks', 0):.1f} hit {b.get('potion_hits_taken', 0):.2f} "
+                  f"away {b.get('potion_away_ticks', 0):.1f} back {b.get('potion_back_ticks', 0):.1f} off {b.get('off_frac', 0):.2f} "
+                  f"hit {b.get('potion_hits_taken', 0):.2f} "
+                  f"drink {b.get('drinks_per_duel', 0):.2f}/{b.get('opp_drinks_per_duel', 0):.2f} "
+                  f"eat {b.get('meals_per_duel', 0):.2f}/{b.get('opp_meals_per_duel', 0):.2f} "
+                  f"done {b.get('sip_done', 0):.2f} sip-hit {b.get('sip_hits_taken', 0):.2f} "
+                  f"speed {b.get('speed_frac', 0):.2f}/{b.get('opp_speed_frac', 0):.2f} fed {b.get('fed_frac', 0):.2f} "
                   f"| self: hit/min {s.get('hits_per_min', 0):5.1f} combo {s.get('max_combo', 0):.1f} "
                   f"aim {s.get('aim_err_deg', 0):5.1f} pot {s.get('potions_per_min', 0):.1f} "
                   f"heal {s.get('potion_heal', 0):.1f}", flush=True)

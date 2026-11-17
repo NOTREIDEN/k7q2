@@ -76,7 +76,7 @@ fn obs(e: &Env) -> [f32; OBS_DIM] {
 
 #[test]
 fn the_controls_are_what_the_trainer_is_told() {
-    assert_eq!(ACT_DIMS, [3, 3, 2, 2, 2, 27, 29, 2, 2, 2]);
+    assert_eq!(ACT_DIMS, [3, 3, 2, 2, 2, 27, 29, 2, 2, 5]);
     assert_eq!(PITCH_BINS[10], 0);
     assert_eq!(PITCH_BINS[DOWN as usize], 377);
     // The choices the first networks were trained with are where they were.
