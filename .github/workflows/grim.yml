@@ -91,9 +91,9 @@ jobs:
           npm install --no-audit --no-fund
           node grim.js ../../e2e-server .. "$SECONDS_AT_KEYS" > grim.log 2>&1 || true
           echo "::group::Everything the server and the test said"
-          cat grim.log
+          head -c 30000000 grim.log
           echo "::endgroup::"
-          grep -v '^\[server\]' grim.log | tail -n 600
+          grep -v '^\[server\]' grim.log | tail -n 700
           grep -q 'the test ran as meant' grim.log
       - name: The end of the client's log
         if: always()

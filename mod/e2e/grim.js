@@ -17,6 +17,8 @@ const modDir = path.resolve(process.argv[3] || '..')
 const SECONDS = parseInt(process.argv[4] || '120', 10)
 const PORT = 25599
 const RIVAL = 'Rival'
+/** Lines of the server that are kept and printed: one that fails in a loop writes without end. */
+const MOST = 60000
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms))
 const plain = s => s.replace(/\u001b\[[0-9;]*m/g, '').replace(/§./g, '')
 
@@ -25,7 +27,9 @@ fs.writeFileSync(path.join(dir, 'eula.txt'), 'eula=true\n')
 fs.writeFileSync(path.join(dir, 'server.properties'), [
   'server-port=' + PORT, 'server-ip=127.0.0.1', 'online-mode=false', 'level-type=FLAT', 'generate-structures=false',
   'spawn-monsters=false', 'spawn-animals=false', 'spawn-npcs=false', 'spawn-protection=0', 'allow-nether=false',
-  'pvp=true', 'gamemode=0', 'difficulty=1', 'view-distance=4', 'max-players=4', 'announce-player-achievements=false', ''
+  'pvp=true', 'gamemode=0', 'difficulty=1', 'view-distance=4', 'max-players=4', 'announce-player-achievements=false',
+  // The network code this old server brings for Linux does not run on the Java that Grim needs.
+  'use-native-transport=false', ''
 ].join('\n'))
 fs.writeFileSync(path.join(dir, 'bukkit.yml'), 'settings:\n  allow-end: false\n  connection-throttle: -1\n')
 
@@ -43,11 +47,22 @@ function start() {
     while ((i = rest.indexOf('\n')) >= 0) {
       const line = plain(rest.slice(0, i).replace(/\r$/, ''))
       rest = rest.slice(i + 1)
+      if (lines.length >= MOST) {
+        if (lines.length === MOST) {
+          lines.push('')
+          console.log('FAIL  the server said more than ' + MOST + ' lines; the rest is not kept')
+        }
+        continue
+      }
       lines.push(line)
       console.log('[server] ' + line)
     }
   })
-  server.stderr.on('data', d => process.stdout.write('[server] ' + d))
+  let errors = 0
+  server.stderr.on('data', d => {
+    errors += d.length
+    if (errors < 2000000) process.stdout.write('[server] ' + d)
+  })
   server.on('exit', () => { exited = true })
 }
 const say = command => server.stdin.write(command + '\n')
@@ -131,11 +146,18 @@ async function main() {
   check(grimFiles.length > 0, 'Grim is on the server and wrote its configuration')
   for (const f of grimFiles) {
     const before = fs.readFileSync(f, 'utf8')
-    const after = before.replace(/(print-to-console:\s*)false/g, '$1true')
-    if (after !== before) {
-      fs.writeFileSync(f, after)
-      console.log('printing to the console switched on in ' + path.relative(dir, f))
+    let after = before.replace(/(print-to-console:\s*)false/g, '$1true')
+    if (after !== before) console.log('printing to the console switched on in ' + path.relative(dir, f))
+    if (/punishments\.ya?ml$/.test(f)) {
+      // Grim tells and does not kick or ban, as on the server this is for.
+      const kept = []
+      for (const l of after.split('\n')) {
+        if (/^\s*-\s/.test(l) && /\b(kick|ban|tempban)\b/i.test(l)) console.log('taken out of ' + path.relative(dir, f) + ': ' + l.trim())
+        else kept.push(l)
+      }
+      after = kept.join('\n')
     }
+    if (after !== before) fs.writeFileSync(f, after)
   }
 
   start()
@@ -173,6 +195,15 @@ async function main() {
     }
   }
   setTimeout(() => outfit(name), 1500)
+  // The ping the server has for it: what the player list says and what Grim measures.
+  const pings = []
+  const asked = setInterval(() => {
+    if (exited || clientDone) return
+    const listed = bot.players[name] ? bot.players[name].ping : null
+    if (listed !== null) pings.push(listed)
+    console.log(`PING  ${name} in the player list: ${listed} ms; ${RIVAL}: ${bot.players[RIVAL] ? bot.players[RIVAL].ping : null} ms`)
+    say('grim profile ' + name)
+  }, 20000)
   const until = Date.now() + (SECONDS + 600) * 1000
   while (!clientDone && Date.now() < until) {
     for (; seen < lines.length; seen++) {
@@ -181,6 +212,7 @@ async function main() {
     }
     await sleep(200)
   }
+  clearInterval(asked)
   if (!clientDone) client.kill('SIGKILL')
   const result = path.join(modDir, 'run', 'servertest.txt')
   const told = fs.existsSync(result) ? fs.readFileSync(result, 'utf8').trim() : 'nothing written'
@@ -207,6 +239,8 @@ async function main() {
     by[k] = (by[k] || 0) + 1
   }
   console.log('')
+  console.log(`PING  of ${name} in the player list while it fought: ${pings.join(', ')} ms`)
+  for (const l of lines.slice(from).filter(l => /ping/i.test(l) && !/Server Ping Player Sample/.test(l)).slice(-12)) console.log('PING  | ' + l)
   console.log(`GRIM about ${name}: ${about.length} lines` + (about.length ? '' : ' (nothing flagged)'))
   for (const k of Object.keys(by).sort((a, b) => by[b] - by[a])) console.log(`GRIM   ${k}: ${by[k]}`)
   for (const l of about.slice(0, 400)) console.log('GRIM   | ' + l)
