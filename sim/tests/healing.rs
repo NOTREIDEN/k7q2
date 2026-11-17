@@ -426,6 +426,51 @@ fn a_hurt_bot_heals_itself() {
     assert!(quality / thrown > 5.5, "{quality} offered by {thrown} potions");
 }
 
+/// A runner turns its back on the opponent when it is hurt, heals itself
+/// on the run and comes back; another bot of its level comes straight on.
+#[test]
+fn a_runner_heals_itself_out_of_reach_and_comes_back() {
+    let dist = |e: &Env| {
+        let (a, b) = (e.m.s.p[0].l.body.pos, e.m.s.p[1].l.body.pos);
+        (a[0] - b[0]).hypot(a[2] - b[2])
+    };
+    let mut ran = 0;
+    for seed in 0..10 {
+        let duel = |runner: f64| {
+            let mut p = params();
+            p.bot_level = [4.0, 4.0];
+            p.start_dist_min = 6.0;
+            p.start_dist_max = 6.0;
+            p.bot_runner = runner;
+            let mut e = Env::new(Mode::Bot, p, 300 + seed);
+            // The agent stands there with full health; the bot starts at six.
+            e.m.s.p[0].health = 20.0;
+            e.m.c[0].lp.health = 20.0;
+            let (mut far, mut near, mut healed) = (0.0f64, f64::MAX, 0);
+            for t in 0..300 {
+                run(&mut e, 1, |_, _| IDLE);
+                far = far.max(dist(&e));
+                if e.m.s.p[1].health >= 16.0 && healed == 0 {
+                    healed = t;
+                }
+                if healed != 0 {
+                    near = near.min(dist(&e));
+                }
+            }
+            (far, near, healed, e.bot.runner)
+        };
+        let (far, near, healed, runner) = duel(1.0);
+        assert!(runner);
+        if far > 12.0 && healed != 0 && near < 4.0 {
+            ran += 1;
+        }
+        // Without it the bot takes a few steps away for its potion at most.
+        let (far, _, healed, runner) = duel(0.0);
+        assert!(!runner && far < 10.0, "{far}");
+    }
+    assert!(ran >= 8, "ran, healed and came back in {ran} of 10 duels");
+}
+
 #[test]
 fn a_bot_throws_a_pearl_at_a_player_that_heals_itself() {
     // The agent is hurt and throws its potion straight up, which takes a

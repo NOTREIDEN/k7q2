@@ -55,6 +55,11 @@ pub struct BotParams {
     /// too few at hand (0 never). It stands still with the screen open,
     /// so the better bots wait for room, as for a drink.
     pub refill: f64,
+    /// A runner: once hurt enough to heal itself it turns its back on the
+    /// opponent and runs for as long as it has potions to throw, keeping
+    /// off the walls, and comes back healed. With the same Speed nobody
+    /// catches it on foot; a pearl does.
+    pub runner: bool,
 }
 
 impl BotParams {
@@ -77,6 +82,7 @@ impl BotParams {
                 potion: 0.0,
                 drink: 0.0,
                 refill: 0.0,
+                runner: false,
             },
             2 => BotParams {
                 level,
@@ -95,6 +101,7 @@ impl BotParams {
                 potion: 0.4,
                 drink: 0.4,
                 refill: 0.4,
+                runner: false,
             },
             3 => BotParams {
                 level,
@@ -113,6 +120,7 @@ impl BotParams {
                 potion: 0.7,
                 drink: 0.7,
                 refill: 0.7,
+                runner: false,
             },
             _ => BotParams {
                 level: 4,
@@ -131,6 +139,7 @@ impl BotParams {
                 potion: 1.0,
                 drink: 1.0,
                 refill: 1.0,
+                runner: false,
             },
         }
     }
@@ -202,6 +211,8 @@ pub struct BotState {
     inv_need: i32,
     inv_drawn: bool,
     inv_keep: u32,
+    /// A runner on the run (see `BotParams::runner`).
+    pub fleeing: bool,
 }
 
 fn gauss(rng: &mut Rng) -> f64 {
@@ -580,12 +591,59 @@ pub fn act(c: &Client, world: &World, cfg: &ClientCfg, p: &BotParams, st: &mut B
         inp.jump = true;
     }
 
+    // A runner that is hurt runs from the opponent until it is healed or
+    // out of potions, which it throws ahead of itself as it goes (below).
+    // It heads straight away from the opponent, or as near to that as the
+    // walls leave room for five blocks on, and jumps to be faster.
+    let mut flee_yaw = None;
+    if p.runner {
+        if !st.fleeing {
+            st.fleeing = lp.potions != 0 && st.potion_at > 0.0 && lp.health <= st.potion_at && hdist < 12.0;
+        } else if lp.potions == 0 || lp.health >= 16.0 || hdist > 24.0 {
+            st.fleeing = false;
+        }
+        if st.fleeing {
+            let me = lp.l.body.pos;
+            let lim = world.half - 1.5;
+            let away = if hdist > 1e-6 { [-dx / hdist, -dz / hdist] } else { [0.0, 1.0] };
+            let yaw = (lp.l.yaw as f64).to_radians();
+            let facing = [-yaw.sin(), yaw.cos()];
+            let mut best: Option<([f64; 2], f64)> = None;
+            'turns: for k in 0..=6 {
+                for sign in [1.0, -1.0] {
+                    let (sn, cs) = (sign * k as f64 * 30f64.to_radians()).sin_cos();
+                    let d = [away[0] * cs - away[1] * sn, away[0] * sn + away[1] * cs];
+                    if (me[0] + d[0] * 5.0).abs() <= lim && (me[2] + d[1] * 5.0).abs() <= lim {
+                        let keep = d[0] * facing[0] + d[1] * facing[1];
+                        if best.map_or(true, |(_, b)| keep > b) {
+                            best = Some((d, keep));
+                        }
+                    }
+                }
+                if best.is_some() {
+                    break 'turns;
+                }
+            }
+            let d = best.map_or(away, |(d, _)| d);
+            let want = angles_to(eye, [me[0] + d[0] * 5.0, eye[1], me[2] + d[1] * 5.0]).0;
+            let lim = p.max_turn.max(45.0);
+            inp.dx = (mth::wrap_deg(want - lp.l.yaw as f64).clamp(-lim, lim) / deg_per_count).round() as i32;
+            inp.dy = ((-(lp.l.pitch as f64)).clamp(-lim, lim) / deg_per_count).round() as i32;
+            inp.forward = 1;
+            inp.strafe = 0;
+            inp.sprint_key = true;
+            inp.use_item = false;
+            inp.jump = lp.l.body.on_ground && st.potion_stage == 0;
+            flee_yaw = Some(want);
+        }
+    }
+
     // Would the crosshair be on the target after this turn?
     let new_yaw = (lp.l.yaw as f64 + inp.dx as f64 * deg_per_count) as f32;
     let new_pitch = ((lp.l.pitch as f64 + inp.dy as f64 * deg_per_count) as f32).clamp(-90.0, 90.0);
     let ray_yaw = if cfg.mouse_delay_fix { new_yaw } else { lp.yaw_head };
     let pk = c.pick_ray(world, new_pitch, ray_yaw);
-    if pk.entity && rng.chance(p.click_prob) {
+    if !st.fleeing && pk.entity && rng.chance(p.click_prob) {
         inp.attack = true;
     }
 
@@ -619,7 +677,8 @@ pub fn act(c: &Client, world: &World, cfg: &ClientCfg, p: &BotParams, st: &mut B
                 && lp.held == SLOT_SWORD
                 && st.potion_stage == 0
                 && st.use_stage == 0
-                && st.block_left == 0;
+                && st.block_left == 0
+                && !st.fleeing;
             if ready {
                 if let Some((q, kind)) = pearl_target(c, world, p, st, hdist, rng) {
                     st.pearl_to = q;
@@ -674,27 +733,29 @@ pub fn act(c: &Client, world: &World, cfg: &ClientCfg, p: &BotParams, st: &mut B
     }
     match st.potion_stage {
         0 => {
+            // On the run it heals itself up: another potion while six of
+            // its eight points would not be wasted.
             let ready = p.potion > 0.0
                 && lp.potions != 0
-                && lp.health <= st.potion_at
+                && (lp.health <= st.potion_at || (st.fleeing && lp.health <= 14.0))
                 && st.potion_wait == 0
                 && st.pearl_stage == 0
                 && st.use_stage == 0
                 && lp.held == SLOT_SWORD
                 && st.block_left == 0;
-            let good_moment = p.level < 4 || hdist > 3.5 || rp.ticks_since_hurt <= 8 || lp.health <= 6.0;
+            let good_moment = st.fleeing || p.level < 4 || hdist > 3.5 || rp.ticks_since_hurt <= 8 || lp.health <= 6.0;
             if ready && good_moment && rng.chance(0.35 * p.potion) {
                 st.potion_stage = 1;
-                st.potion_away = p.level >= 3 && hdist < 6.0;
+                st.potion_away = st.fleeing || (p.level >= 3 && hdist < 6.0);
             }
         }
         1 => {
             let b = &lp.l.body;
-            let speed = if st.potion_away { 0.33 } else { b.motion[0].hypot(b.motion[2]) / 0.546 };
+            let speed = if st.potion_away && !st.fleeing { 0.33 } else { b.motion[0].hypot(b.motion[2]) / 0.546 };
             let want_pitch = potion_pitch(speed.min(0.6), b.pos[1] + EYE_HEIGHT - world.floor_y);
             let lim = p.max_turn.max(45.0);
             let dpitch = want_pitch - lp.l.pitch as f64;
-            let dyaw = if st.potion_away { mth::wrap_deg(yaw_to + 180.0 - lp.l.yaw as f64) } else { 0.0 };
+            let dyaw = if st.potion_away { mth::wrap_deg(flee_yaw.unwrap_or(yaw_to + 180.0) - lp.l.yaw as f64) } else { 0.0 };
             inp.dx = (dyaw.clamp(-lim, lim) / deg_per_count).round() as i32;
             inp.dy = (dpitch.clamp(-lim, lim) / deg_per_count).round() as i32;
             inp.attack = false;
@@ -756,7 +817,7 @@ pub fn act(c: &Client, world: &World, cfg: &ClientCfg, p: &BotParams, st: &mut B
                 && st.potion_stage == 0
                 && lp.held == SLOT_SWORD
                 && st.block_left == 0;
-            if (drink || eat) && free {
+            if (drink || eat) && free && !st.fleeing {
                 st.use_need += 1;
                 let busy = rp.using && matches!(rp.item, Item::Drink | Item::Food);
                 let room = [0.0, 0.0, 3.0, 5.0, 7.0][p.level.min(4) as usize];

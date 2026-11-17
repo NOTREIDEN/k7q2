@@ -35,7 +35,7 @@ PARAM = {
     "refill_prob": 97, "inv_potions_min": 98, "inv_potions_max": 99, "inv_drinks_min": 100, "inv_drinks_max": 101,
     "refill_who": 102, "bot_refill": 103, "w_stock": 104,
     "lesson_prob": 105, "lessons": 106, "lesson_dist_min": 107, "lesson_dist_max": 108,
-    "drink_window_s": 109, "w_miss": 110, "w_pot_time": 111,
+    "drink_window_s": 109, "w_miss": 110, "w_pot_time": 111, "bot_runner": 112,
 }
 
 STAT_NAMES = [

@@ -278,6 +278,9 @@ pub struct Params {
     /// Scales how readily scripted bots go to their inventory. 0 turns it
     /// off.
     pub bot_refill: f64,
+    /// Share of the duels in which the scripted bot is a runner (see
+    /// `BotParams::runner`).
+    pub bot_runner: f64,
     /// What it costs a player, in hits, to stand with no healing potion in
     /// the hotbar while the inventory has some, and the same for the
     /// potion of Speed once the Speed is over. A difference of state, like
@@ -396,6 +399,7 @@ impl Default for Params {
             inv_drinks: [0.0, 2.0],
             refill_who: 0,
             bot_refill: 1.0,
+            bot_runner: 0.0,
             w_stock: 0.0,
             lesson_prob: 0.0,
             lessons: 15,
@@ -522,6 +526,7 @@ impl Params {
             109 => self.drink_window_s = v,
             110 => self.w_miss = v as f32,
             111 => self.w_pot_time = v as f32,
+            112 => self.bot_runner = v,
             _ => return false,
         }
         true
@@ -1191,6 +1196,11 @@ pub fn new_duel(p: &Params, rng: &mut Rng, mode: Mode) -> (Match, [f64; 2], BotP
     bot.potion *= p.bot_potion;
     bot.drink *= p.bot_drink;
     bot.refill *= p.bot_refill;
+    // Drawn only when asked for, so that duels without runners come out as
+    // they always did.
+    if p.bot_runner > 0.0 {
+        bot.runner = rng.chance(p.bot_runner);
+    }
     (m, ping, bot, lesson)
 }
 
