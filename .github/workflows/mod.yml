@@ -1,7 +1,7 @@
 name: mod
 
-# Builds the Forge 1.8.9 mod with the newest trained policy inside and puts
-# the jar on the branch "mod".
+# Builds the Forge 1.8.9 mod with the newest trained policy inside, lets it
+# play some seconds in a Forge client and puts the jar on the branch "mod".
 on:
   workflow_dispatch:
 
@@ -57,6 +57,16 @@ jobs:
         run: |
           ls -l mod/build/libs
           unzip -l mod/build/libs/pvpai.jar
+      - name: Let the policy play some seconds in a Forge client
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y -q xvfb x11-xserver-utils libgl1-mesa-dri libglx-mesa0 libxrandr2 libxcursor1 libxxf86vm1 libxi6 libxtst6 libxrender1
+          cd mod
+          LIBGL_ALWAYS_SOFTWARE=1 timeout 1200 xvfb-run -a -s "-screen 0 854x480x24" gradle runClient -Pselftest --stacktrace > runclient.log 2>&1 || true
+          tail -n 80 runclient.log
+          grep -n "pvpai\|PvP AI\|SELFTEST" runclient.log | head -n 40 || true
+          cat run/selftest.txt
+          grep -q '^ok' run/selftest.txt
       - uses: actions/upload-artifact@v4
         with:
           name: mod

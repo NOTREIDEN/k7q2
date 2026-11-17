@@ -16,6 +16,14 @@ java {
 }
 
 loom {
+    runConfigs {
+        "client" {
+            // gradle runClient -Pselftest: the mod tries itself out and the game shuts down (see SelfTest).
+            if (project.hasProperty("selftest")) {
+                vmArgs.add("-Dpvpai.selftest=true")
+            }
+        }
+    }
     forge {
         pack200Provider.set(dev.architectury.pack200.java.Pack200Adapter())
     }

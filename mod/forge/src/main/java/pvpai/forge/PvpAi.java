@@ -36,6 +36,7 @@ public final class PvpAi {
     private File dir = new File("config", "pvpai");
     private Session session;
     private boolean keyWasDown;
+    private final SelfTest selfTest = Boolean.getBoolean("pvpai.selftest") ? new SelfTest(this) : null;
 
     @Mod.EventHandler
     public void preInit(FMLPreInitializationEvent e) {
@@ -70,7 +71,7 @@ public final class PvpAi {
         }
     }
 
-    private boolean on() {
+    boolean on() {
         return session != null && session.on();
     }
 
@@ -90,7 +91,8 @@ public final class PvpAi {
         return pressed;
     }
 
-    private void flip(Minecraft mc) throws IOException {
+    /** Hand the keys over, or take them back. */
+    void flip(Minecraft mc) throws IOException {
         if (on()) {
             session.stop();
             say(mc, "PvP AI apagado.");
@@ -110,6 +112,9 @@ public final class PvpAi {
         Minecraft mc = Minecraft.getMinecraft();
         try {
             if (e.phase == TickEvent.Phase.START) {
+                if (selfTest != null) {
+                    selfTest.step(mc);
+                }
                 if (pressed(mc)) {
                     flip(mc);
                 }
