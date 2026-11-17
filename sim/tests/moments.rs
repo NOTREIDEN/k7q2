@@ -496,18 +496,80 @@ fn a_player_that_goes_for_potions_runs_at_a_hurt_opponent_and_a_plain_one_does_n
 
 #[test]
 fn a_potion_thrown_with_a_turn_and_the_mouse_still_heals_all_eight() {
-    for turn in 0..3 {
-        let mut full = 0;
-        for seed in 0..20 {
-            let mut p = params();
-            p.start_yaw_noise = 25.0;
-            let mut e = Env::new(Mode::SelfPlay, p, seed);
-            let health = e.m.s.p[0].health;
-            run(&mut e, 1, |_| with(9, BAR_TURN + turn));
-            run(&mut e, 30, |_| IDLE);
-            assert_eq!(e.m.s.potion_throws[0], 1);
-            full += (e.m.s.p[0].health >= health + 8.0) as i32;
+    // On a server that throws as the view does and on one that adds the
+    // thrower's movement, known; and not yet known, the most of both.
+    for (carry, knows) in [(0.0, Some(false)), (1.0, Some(true)), (0.0, None), (1.0, None)] {
+        for turn in 0..3 {
+            let (mut full, mut least) = (0, f32::MAX);
+            for seed in 0..20 {
+                let mut p = params();
+                p.start_yaw_noise = 25.0;
+                p.throw_carry_prob = carry;
+                let mut e = Env::new(Mode::SelfPlay, p, seed);
+                if let Some(k) = knows {
+                    e.agent_mut(0).knows_carry(k);
+                }
+                let health = e.m.s.p[0].health;
+                run(&mut e, 1, |_| with(9, BAR_TURN + turn));
+                run(&mut e, 30, |_| IDLE);
+                assert_eq!(e.m.s.potion_throws[0], 1);
+                let gain = e.m.s.p[0].health - health;
+                full += (gain >= 8.0) as i32;
+                least = least.min(gain);
+            }
+            let sure = if knows.is_some() || carry == 1.0 { 19 } else { 0 };
+            assert!(full >= sure && least >= 6.0, "carry {carry} {knows:?} turn {turn}: {full} of 20, least {least}");
         }
-        assert!(full >= 19, "turn {turn}: {full} of 20");
     }
+}
+
+#[test]
+fn on_a_server_that_carries_throws_a_potion_thrown_running_flies_on_and_the_agent_sees_it() {
+    let mut out = Vec::new();
+    for carry in [0.0, 1.0] {
+        let mut p = params();
+        p.throw_carry_prob = carry;
+        let mut e = Env::new(Mode::SelfPlay, p, 6);
+        assert_eq!(e.m.s.cfg.throw_carry, carry > 0.0);
+        let seen = |e: &Env| {
+            let mut o = [0.0f32; OBS_DIM];
+            e.write_obs(0, &mut o[..]);
+            o[153]
+        };
+        assert_eq!(seen(&e), 0.5);
+        // Sprinting ahead with the view down at the feet.
+        let run_down = |k: usize| {
+            let mut a = with(0, 1);
+            a[3] = 1;
+            if k < 4 {
+                a[6] = DOWN;
+            }
+            a
+        };
+        run(&mut e, 14, run_down);
+        let yaw = (e.m.s.p[0].l.yaw as f64).to_radians();
+        let ahead = [-yaw.sin(), yaw.cos()];
+        let at = e.m.s.p[0].l.body.pos;
+        let thrown = e.m.s.potion_throws[0];
+        run(&mut e, 1, |_| {
+            let mut a = run_down(9);
+            a[9] = 1;
+            a
+        });
+        // Where the potion was last seen before it broke, ahead of where it went out.
+        let mut last = None;
+        for _ in 0..12 {
+            run(&mut e, 1, |_| run_down(9));
+            if let Some(t) = e.m.s.thrown.iter().find(|t| t.thrower == 0) {
+                last = Some(t.pos);
+            }
+        }
+        assert_eq!(e.m.s.potion_throws[0], thrown + 1);
+        let end = last.expect("the potion was seen in the air");
+        let went = (end[0] - at[0]) * ahead[0] + (end[2] - at[2]) * ahead[1];
+        out.push((seen(&e), went));
+    }
+    let (plain, carried) = (out[0], out[1]);
+    assert_eq!((plain.0, carried.0), (0.0, 1.0), "{out:?}");
+    assert!(carried.1 > plain.1 + 0.5, "{out:?}");
 }

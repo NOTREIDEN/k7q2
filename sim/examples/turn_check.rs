@@ -1,6 +1,8 @@
 //! Potions thrown with a turn, nobody near: where `run_feet` said the
 //! thrower would be, where it was, and where the potion broke.
-//! `cargo run --release --example turn_check -- [SEEDS] [WAY]`
+//! `cargo run --release --example turn_check -- [SEEDS] [WAY] [CARRY] [KNOWS]`, CARRY
+//! the share of duels on a server that adds the thrower's movement. A fifth
+//! argument, 0 or 1, has the agent know which it is.
 use pvpsim::agent::{run_feet, ACT_HEADS, BAR_TURN, BAR_TURNS, OBS_DIM};
 use pvpsim::aabb::V3;
 use pvpsim::env::{Env, Mode, Params, PRIV_DIM};
@@ -29,10 +31,18 @@ fn main() {
     let args: Vec<String> = std::env::args().collect();
     let seeds: u64 = args.get(1).and_then(|s| s.parse().ok()).unwrap_or(40);
     let way: i32 = args.get(2).and_then(|s| s.parse().ok()).unwrap_or(BAR_TURN);
+    let carry: f64 = args.get(3).and_then(|s| s.parse().ok()).unwrap_or(0.0);
+    // 0 or 1: the agent takes the server to add movement or not; else it has yet to see.
+    let knows: i32 = args.get(4).and_then(|s| s.parse().ok()).unwrap_or(-1);
     let (mut fo, mut fp) = ([0.0f32; OBS_DIM], [0.0f32; PRIV_DIM]);
     let mut eights = 0;
     for seed in 0..seeds {
-        let mut e = Env::new(Mode::SelfPlay, params(), seed);
+        let mut p = params();
+        p.throw_carry_prob = carry;
+        let mut e = Env::new(Mode::SelfPlay, p, seed);
+        if knows >= 0 {
+            e.agent_mut(0).knows_carry(knows == 1);
+        }
         let hp0 = e.m.s.p[0].health;
         let yaw = e.m.c[0].lp.l.yaw as f64 + BAR_TURNS[(way - BAR_TURN) as usize] as f64 * 0.15;
         let pred = run_feet(&e.m.c[0], &e.m.world, yaw as f32);

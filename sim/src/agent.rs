@@ -8,10 +8,10 @@
 //! statistics and what the critic is shown, stays in the environment.
 use crate::aabb::{dist, dist_sq, Aabb, V3};
 use crate::bot;
-use crate::client::{pearl_landing, pearl_preview, Client, ClientCfg, ClientThrown, Input, TickOut, INV_SHUT};
+use crate::client::{pearl_landing, pearl_preview, thrown_flight, Client, ClientCfg, ClientThrown, Input, TickOut, INV_SHUT};
 use crate::mth::{self, Rng};
 use crate::net::{refill_click, shift_click, Item, Kind, SLOT_FOOD, SLOT_PEARL, SLOT_SWORD, USE_TICKS, WINDOW_BAR};
-use crate::server::{splash_heal, throw_heading, MAX_HEALTH, POTION_HEAL};
+use crate::server::{splash_heal, throw_heading, MAX_HEALTH, POTION_HEAL, THROW_SPREAD};
 use crate::world::{RayHit, World};
 
 pub const ACT_HEADS: usize = 11;
@@ -89,7 +89,7 @@ pub const PITCH_BINS: [i32; 29] = [
     -89, -55, -34, -21, -13, -8, -5, -3, -2, -1, 0, 1, 2, 3, 5, 8, 13, 21, 34, 55, 89, -377, -233, -144, 144, 233, 377, -600, 600,
 ];
 
-pub const OBS_DIM: usize = 153;
+pub const OBS_DIM: usize = 154;
 
 /// How many of its last positions an agent keeps.
 const TRAIL: usize = 16;
@@ -193,7 +193,30 @@ pub struct Agent {
     /// tell: the other player hurt soon after a hit of its own, and itself
     /// hurt other than by a pearl of its own coming down.
     combo: [u32; 2],
+    /// Where its player stood after its last tick and the one before: a
+    /// throw on the tick to come goes out with the movement between the
+    /// two, on a server that adds it (`ServerCfg::throw_carry`).
+    said: V3,
+    said_before: V3,
+    /// What it has seen of that: -1 not yet, 0 its potions fly as the
+    /// view throws them, 1 they take on its movement. Each potion of its
+    /// own thrown while moving tells (`CARRY_MOVED`).
+    carry: i8,
+    /// The last potion click: how fast the view throws it across the
+    /// ground, the movement it goes out with, and the ticks since.
+    probe: Option<([f64; 2], [f64; 2], i32)>,
 }
+
+/// How likely the gaussian of a throw is to come out at each of the
+/// deviations `run_aim` tries, from two under to two over in halves
+/// (`exp(-z * z / 2)`, written out to be the same everywhere).
+const SPREAD_WEIGHTS: [f64; 9] = [
+    0.1353352832366127, 0.32465246735834974, 0.6065306597126334, 0.8824969025845955, 1.0, 0.8824969025845955, 0.6065306597126334, 0.32465246735834974, 0.1353352832366127,
+];
+
+/// The least movement across the ground in a tick with which a potion of
+/// its own tells whether the server adds it to the throw.
+const CARRY_MOVED: f64 = 0.08;
 
 impl Agent {
     /// An agent at the start of a duel: the two pings, its click rate, and
@@ -229,6 +252,26 @@ impl Agent {
             refill: 0,
             refill_kind: Item::Potion,
             combo: [0; 2],
+            said: feet,
+            said_before: feet,
+            carry: -1,
+            probe: None,
+        }
+    }
+
+    /// Have it take the server to add its movement to its throws, or not,
+    /// as if a potion of its own had told it (for checks).
+    pub fn knows_carry(&mut self, carry: bool) {
+        self.carry = carry as i8;
+    }
+
+    /// The movement across the ground a throw on the tick to come goes out
+    /// with, if the server is known to add it.
+    fn carried(&self) -> [f64; 2] {
+        if self.carry == 1 {
+            [self.said[0] - self.said_before[0], self.said[2] - self.said_before[2]]
+        } else {
+            [0.0; 2]
         }
     }
 
@@ -512,30 +555,55 @@ impl Agent {
     /// that turns its view to `yaw` on the next and runs along it (see
     /// `run_feet`), and the ticks that potion flies. Of the pitches from
     /// straight down to 20 degrees under level, in steps of one, the one
-    /// whose potion gives this player the most health even a degree higher
-    /// or lower (the server throws a little off the view, at random), then
-    /// breaks soonest, then gives the opponent the least.
+    /// whose potion gives this player the most health on average over the
+    /// little the server throws off the view at random, then breaks
+    /// soonest, then gives the opponent the least. On a server that adds
+    /// the thrower's movement, or one it is not yet known of, half and
+    /// half, with that movement.
     fn run_aim(&self, c: &Client, world: &World, yaw: f32) -> (f32, i32) {
         let run = run_feet(c, world, yaw);
         let other = self.potion_feet(c, -1, self.lag + 2, true);
         let v = Kind::Potion.speed() as f64;
+        // The click goes out after the turn's tick, with its movement on a
+        // server that adds it; not yet known, the pitch has to do for both.
+        let b = c.lp.l.body.pos;
+        let moved = [run[0][0] - b[0], run[0][2] - b[2]];
+        let ways: &[f64] = match self.carry {
+            1 => &[1.0],
+            0 => &[0.0],
+            _ => &[0.0, 1.0],
+        };
         let feet = |j: usize, t: i32| if j == 0 { run[((t + 1).max(0) as usize).min(RUN_TICKS - 1)] } else { other(1, t) };
-        let mut out = [(0i32, [0.0f32; 2]); AIM_PITCHES];
+        // The server adds to the up and down of the direction a gaussian of
+        // 0.0075, which decides the tick the potion breaks on: the heal of
+        // each pitch on average over that, from two deviations under to two
+        // over in halves, each as likely as the gaussian has it.
+        let mut out = [(0i32, 0.0f64, 0.0f64); AIM_PITCHES];
         for (k, o) in out.iter_mut().enumerate() {
             let (from, dir) = throw_heading(Kind::Potion, run[0], yaw, 90.0f32 - k as f32);
-            let m = [dir[0] * v, dir[1] * v, dir[2] * v];
-            let (_, ticks, heal) = potion_outcome(world, from, m, 0, 0, &feet);
-            *o = (ticks, heal);
+            let (mut sum, mut opp, mut all) = (0.0f64, 0.0f64, 0.0f64);
+            for (q, &p) in SPREAD_WEIGHTS.iter().enumerate() {
+                let z = (q as f64 - 4.0) * 0.5;
+                for &w in ways {
+                    let m = [dir[0] * v + w * moved[0], (dir[1] + z * THROW_SPREAD) * v, dir[2] * v + w * moved[1]];
+                    let (_, ticks, heal) = potion_outcome(world, from, m, 0, 0, &feet);
+                    o.0 = o.0.max(ticks);
+                    sum += p * heal[0] as f64;
+                    opp += p * heal[1] as f64;
+                    all += p;
+                }
+            }
+            *o = (o.0, sum / all, opp / all);
         }
-        let mut best = (0usize, -1.0f32);
-        for k in 0..AIM_PITCHES {
-            let sure = out[k.saturating_sub(1)..(k + 2).min(AIM_PITCHES)].iter().map(|o| o.1[0]).fold(f32::MAX, f32::min);
-            let (b, o) = (out[best.0], out[k]);
-            if sure > best.1 || (sure == best.1 && (o.0 < b.0 || (o.0 == b.0 && o.1[1] < b.1[1]))) {
-                best = (k, sure);
+        let mut best = 0usize;
+        for k in 1..AIM_PITCHES {
+            let (b, o) = (out[best], out[k]);
+            let same = (o.1 - b.1).abs() <= 1e-9;
+            if (o.1 > b.1 && !same) || (same && (o.0 < b.0 || (o.0 == b.0 && o.2 < b.2))) {
+                best = k;
             }
         }
-        (90.0f32 - best.0 as f32, out[best.0].0)
+        (90.0f32 - best as f32, out[best].0)
     }
 
     /// The key presses of a potion throw, as `pearl_keys`: the number key
@@ -577,6 +645,7 @@ impl Agent {
                     } else {
                         inp.use_item = true;
                         self.potion_stage = 2;
+                        self.probe_throw(c);
                     }
                 }
             }
@@ -584,6 +653,7 @@ impl Agent {
                 inp.use_item = true;
                 inp.attack = false;
                 self.potion_stage = 2;
+                self.probe_throw(c);
             }
             _ => {
                 if want && self.potion_ready(c) {
@@ -591,6 +661,7 @@ impl Agent {
                     inp.attack = false;
                     inp.use_item = true;
                     inp.use_again = self.prev_inp.use_item;
+                    self.probe_throw(c);
                 } else {
                     inp.slot_key = SLOT_SWORD + 1;
                     inp.use_item = false;
@@ -598,6 +669,15 @@ impl Agent {
                 }
             }
         }
+    }
+
+    /// A potion click on this tick: the throw the server will make of it
+    /// from the view it has, and the movement it goes out with, for the
+    /// potion to tell when it shows whether the server adds that.
+    fn probe_throw(&mut self, c: &Client) {
+        let (_, dir) = throw_heading(Kind::Potion, c.lp.l.body.pos, c.lp.l.yaw, c.lp.l.pitch);
+        let v = Kind::Potion.speed() as f64;
+        self.probe = Some(([dir[0] * v, dir[2] * v], [self.said[0] - self.said_before[0], self.said[2] - self.said_before[2]], 0));
     }
 
     /// The key presses of a pearl throw, laid over what the player asked
@@ -710,6 +790,24 @@ impl Agent {
     /// the server's answers are. And what it foresees for the potions and
     /// pearls that break on their next tick is kept.
     pub fn before_tick(&mut self, c: &Client, world: &World) {
+        self.said_before = self.said;
+        self.said = c.lp.l.body.pos;
+        if let Some((thrown, moved, age)) = self.probe {
+            // Its potion as the server has it after its first tick: the
+            // throw and what was added to it, slowed by the air once.
+            if let Some(e) = c.thrown.iter().rev().find(|e| e.mine && e.kind == Kind::Potion && e.age == 0) {
+                let n = moved[0] * moved[0] + moved[1] * moved[1];
+                if n > CARRY_MOVED * CARRY_MOVED {
+                    let r = [e.motion[0] / 0.99 - thrown[0], e.motion[2] / 0.99 - thrown[1]];
+                    self.carry = ((r[0] * moved[0] + r[1] * moved[1]) / n > 0.5) as i8;
+                }
+                self.probe = None;
+            } else if age >= 20 {
+                self.probe = None;
+            } else {
+                self.probe = Some((thrown, moved, age + 1));
+            }
+        }
         if c.rp.ticks_since_hurt == 0 && c.lp.ticks_since_attack <= HIT_WINDOW {
             self.combo = [self.combo[0] + 1, 0];
         }
@@ -896,7 +994,13 @@ impl Agent {
         // carry this player, in how many ticks, and where that is seen from
         // the opponent (further along the view, to the right of it).
         if lp.pearls > 0 {
-            let (land, ticks) = pearl_preview(world, b.pos, lp.l.yaw, lp.l.pitch);
+            let (land, ticks) = if self.carry == 1 {
+                let (from, dir) = throw_heading(Kind::Pearl, b.pos, lp.l.yaw, lp.l.pitch);
+                let (v, add) = (Kind::Pearl.speed() as f64, self.carried());
+                thrown_flight(world, Kind::Pearl, from, [dir[0] * v + add[0], dir[1] * v, dir[2] * v + add[1]])
+            } else {
+                pearl_preview(world, b.pos, lp.l.yaw, lp.l.pitch)
+            };
             let (lf, lr) = local(yaw, land[0] - b.pos[0], land[2] - b.pos[2]);
             o[92] = clip(lf.hypot(lr) / 16.0, 4.0);
             o[93] = (ticks.min(60)) as f32 / 30.0;
@@ -957,7 +1061,8 @@ impl Agent {
         if lp.potions != 0 {
             let (from, dir) = throw_heading(Kind::Potion, b.pos, lp.l.yaw, lp.l.pitch);
             let v = Kind::Potion.speed() as f64;
-            let m = [dir[0] * v, dir[1] * v, dir[2] * v];
+            let add = self.carried();
+            let m = [dir[0] * v + add[0], dir[1] * v, dir[2] * v + add[1]];
             // The server takes the throw from where this player stands
             // now and has it a step further on the potion's first tick;
             // the opponent is by then as much further as the throw takes
@@ -1024,6 +1129,8 @@ impl Agent {
         // A potion thrown with a turn: the ticks left until the run with
         // it is over.
         o[152] = if self.turned > 0 { (self.move_until - self.turned + 1) as f32 / 8.0 } else { 0.0 };
+        // Whether its throws take on its movement: not seen yet, no, yes.
+        o[153] = [0.5, 0.0, 1.0][(self.carry + 1) as usize];
     }
 }
 

@@ -118,6 +118,14 @@ pub struct ServerCfg {
     /// points (it hit the thrower or broke within a quarter of a block of
     /// its feet). 1 is the game.
     pub potion_strict: f32,
+    /// A newer server under a 1.8 client (1.9 and on, as most are behind
+    /// ViaVersion): a pearl or potion takes on the motion its thrower last
+    /// told the server of, across the ground always and up or down while
+    /// it is off the ground (`shootFromRotation` adding the thrower's known
+    /// movement). Thrown while running or knocked back, a potion flies on
+    /// with the thrower; thrown at the feet while going forward, it lands
+    /// ahead. 1.8 itself adds nothing.
+    pub throw_carry: bool,
 }
 
 impl ServerCfg {
@@ -148,6 +156,7 @@ impl Default for ServerCfg {
             sword_wear: 1.0,
             pearl_cooldown: 0,
             potion_strict: 1.0,
+            throw_carry: false,
         }
     }
 }
@@ -301,6 +310,10 @@ pub fn throw_heading(kind: Kind, feet: V3, yaw: f32, pitch: f32) -> (V3, V3) {
     (pos, [mx / len, my / len, mz / len])
 }
 
+/// The deviation of the gaussian `setThrowableHeading` adds to each part
+/// of a pearl's or potion's direction (0.0075 as a float).
+pub const THROW_SPREAD: f64 = 0.007499999832361937;
+
 /// Damage a pearl does to its thrower on arrival (`DamageSource.fall`).
 pub const PEARL_DAMAGE: f32 = 5.0;
 
@@ -388,6 +401,10 @@ pub struct ServerPlayer {
     /// False from a server teleport until the client answers from there.
     pub has_moved: bool,
     pub last_pos: V3,
+    /// How far the last movement packet moved this player (none for one
+    /// without a place in it, or after a teleport): what `throw_carry`
+    /// adds to a throw.
+    pub moved: V3,
     pub net_ticks: i32,
     /// `networkTickCount` when a movement packet was last accepted.
     pub last_move_tick: i32,
@@ -507,6 +524,7 @@ impl ServerPlayer {
             tracker_on_ground: true,
             has_moved: true,
             last_pos: pos,
+            moved: [0.0; 3],
             net_ticks: 0,
             last_move_tick: 0,
             chunk: chunk_of(pos),
@@ -988,7 +1006,7 @@ impl Server {
     fn spawn_thrown(&mut self, i: usize, kind: Kind, rng: &mut Rng, out: &mut Outbox) {
         let p = &self.p[i];
         let (pos, mut m) = throw_heading(kind, p.l.body.pos, p.l.yaw, p.l.pitch);
-        let spread = 0.007499999832361937 * 1.0f32 as f64;
+        let spread = THROW_SPREAD * 1.0f32 as f64;
         let speed = kind.speed() as f64;
         let aim = [m[0] * speed, m[1] * speed, m[2] * speed];
         for v in m.iter_mut() {
@@ -1002,6 +1020,13 @@ impl Server {
         let f1 = mth::sqrt_d(m[0] * m[0] + m[2] * m[2]);
         let pyaw = (mth::atan2(m[0], m[2]) * 180.0 / std::f64::consts::PI) as f32;
         let ppitch = (mth::atan2(m[1], f1 as f64) * 180.0 / std::f64::consts::PI) as f32;
+        if self.cfg.throw_carry && !replaying {
+            m[0] += p.moved[0];
+            m[2] += p.moved[2];
+            if !p.l.body.on_ground {
+                m[1] += p.moved[1];
+            }
+        }
         let id = self.next_thrown_id;
         self.next_thrown_id += 1;
         let e = Thrown {
@@ -1227,6 +1252,7 @@ impl Server {
         let p = &mut self.p[i];
         p.has_moved = false;
         p.last_pos = pos;
+        p.moved = [0.0; 3];
         p.last_ground_y = pos[1];
         p.set_position_and_rotation(pos, yaw, pitch);
         out.push((i, S2C::PosLook { pos, yaw, pitch }));
@@ -1312,6 +1338,7 @@ impl Server {
             return;
         }
         p.l.body.on_ground = pkt_ground;
+        p.moved = [d[0] - last[0], d[1] - last[1], d[2] - last[2]];
         // The plugin's note of where the player last stood (its move handler).
         if pkt_ground && pos.is_some() && d != last {
             p.last_ground_y = d[1];

@@ -32,7 +32,8 @@ use pvpsim::sim::Match;
 use std::io::Write;
 
 /// Parameter numbers of `Params::set` and the values of the training runs.
-const SETTINGS: [(i32, f64); 23] = [
+const SETTINGS: [(i32, f64); 24] = [
+    (125, 0.5),
     (20, 0.7),
     (48, 0.5),
     (57, 1.0),
@@ -288,6 +289,8 @@ fn main() {
     let mut rng = Rng::new(23);
     let mut choose = [Chooser::new(5), Chooser::new(6)];
     let (mut written, mut duels, mut thrown, mut clicks, mut done) = (0usize, 0u32, [0u32; 2], [0u32; 2], [0u32; 1]);
+    // Ticks with the carry of throws not seen yet, seen not to be, seen to be.
+    let mut seen = [0u32; 3];
     while written < ticks {
         // Half of the duels against a copy that does as much at random,
         // half against the scripted bot.
@@ -345,6 +348,7 @@ fn main() {
             ag[id].write_obs(&m.c[id], &m.world, &m.ccfg, &d, &mut obs);
             let action = choose[id].next();
             if id == 0 {
+                seen[(obs[153] * 2.0) as usize] += 1;
                 o.b(fresh);
                 if fresh {
                     duel(&mut o, &d, p.walls, &ag[0], &m.ccfg, m.c[0].lp.l.body.pos);
@@ -402,4 +406,5 @@ fn main() {
         clicks[1],
         o.0.len()
     );
+    println!("carry of throws: not seen yet on {}, seen not to be on {}, seen to be on {}", seen[1], seen[0], seen[2]);
 }

@@ -39,7 +39,7 @@ public final strictfp class Agent {
     public static final int[] PITCH_BINS = {
         -89, -55, -34, -21, -13, -8, -5, -3, -2, -1, 0, 1, 2, 3, 5, 8, 13, 21, 34, 55, 89, -377, -233, -144, 144, 233, 377, -600, 600,
     };
-    public static final int OBS_DIM = 153;
+    public static final int OBS_DIM = 154;
     private static final int TRAIL = 16;
     /**
      * A hurt of the other player counts as a hit of this one's for this
@@ -150,6 +150,37 @@ public final strictfp class Agent {
      * hurt other than by a pearl of its own coming down.
      */
     private int comboOwn, comboOther;
+    /**
+     * Where its player stood after its last tick and the one before: a
+     * throw on the tick to come goes out with the movement between the
+     * two, on a server that adds it.
+     */
+    private double[] said, saidBefore;
+    /**
+     * What it has seen of that: -1 not yet, 0 its potions fly as the view
+     * throws them, 1 they take on its movement. Each potion of its own
+     * thrown while moving tells ({@link #CARRY_MOVED}).
+     */
+    private int carry = -1;
+    /**
+     * The last potion click: how fast the view throws it across the ground
+     * and the movement it goes out with (null with none), and the ticks since.
+     */
+    private double[] probe;
+    private int probeAge;
+
+    /** The least movement across the ground in a tick with which a potion of its own tells whether the server adds it. */
+    private static final double CARRY_MOVED = 0.08;
+    /** The deviation of the gaussian the server adds to each part of a throw's direction (0.0075 as a float). */
+    private static final double THROW_SPREAD = 0.007499999832361937;
+    /**
+     * How likely that gaussian is to come out at each of the deviations
+     * {@link #runAim} tries, from two under to two over in halves
+     * ({@code exp(-z * z / 2)}, written out to be the same everywhere).
+     */
+    private static final double[] SPREAD_WEIGHTS = {
+        0.1353352832366127, 0.32465246735834974, 0.6065306597126334, 0.8824969025845955, 1.0, 0.8824969025845955, 0.6065306597126334, 0.32465246735834974, 0.1353352832366127,
+    };
 
     /**
      * An agent at the start of a duel: the two pings in milliseconds, its
@@ -167,6 +198,30 @@ public final strictfp class Agent {
             trail[i] = feet.clone();
         }
         lag = (int) Math.floor(pingOwn / 50.0) + 1;
+        said = feet.clone();
+        saidBefore = feet.clone();
+    }
+
+    /** Have it take the server to add its movement to its throws, or not, as if a potion of its own had told it (for checks). */
+    public void knowsCarry(boolean c) {
+        carry = c ? 1 : 0;
+    }
+
+    /** The movement across the ground a throw on the tick to come goes out with, if the server is known to add it. */
+    private double[] carried() {
+        return carry == 1 ? new double[] {said[0] - saidBefore[0], said[2] - saidBefore[2]} : new double[] {0.0, 0.0};
+    }
+
+    /**
+     * A potion click on this tick: the throw the server will make of it
+     * from the view it has, and the movement it goes out with, for the
+     * potion to tell when it shows whether the server adds that.
+     */
+    private void probeThrow(View v) {
+        double[] h = Geo.throwHeading(Inv.KIND_POTION, v.pos, v.yaw, v.pitch);
+        double sp = Geo.speed(Inv.KIND_POTION);
+        probe = new double[] {h[3] * sp, h[5] * sp, said[0] - saidBefore[0], said[2] - saidBefore[2]};
+        probeAge = 0;
     }
 
     private static int pick(int v, int n) {
@@ -462,17 +517,20 @@ public final strictfp class Agent {
                 } else {
                     inp.useItem = true;
                     potionStage = 2;
+                    probeThrow(v);
                 }
             }
         } else if (potionStage == 1) {
             inp.useItem = true;
             inp.attack = false;
             potionStage = 2;
+            probeThrow(v);
         } else if (want && potionReady(v)) {
             inp.slotKey = Integer.numberOfTrailingZeros(v.potions) + 1;
             inp.attack = false;
             inp.useItem = true;
             inp.useAgain = prev.useItem;
+            probeThrow(v);
         } else {
             inp.slotKey = Inv.SLOT_SWORD + 1;
             inp.useItem = false;
@@ -575,35 +633,48 @@ public final strictfp class Agent {
      * The pitch for a potion thrown on the tick after next by a player that
      * turns its view to yaw on the next and runs along it, and the ticks the
      * potion flies: of the pitches from straight down to a little under
-     * level, the one whose potion gives this player the most health, breaks
-     * soonest, and gives the opponent the least, in that order.
+     * level, the one whose potion gives this player the most health on
+     * average over the little the server throws off the view at random,
+     * then breaks soonest, then gives the opponent the least. On a server
+     * that adds the thrower's movement, or one it is not yet known of, half
+     * and half, with that movement.
      */
     private float[] runAim(View v, Blocks blocks, float yaw) {
         double[][] run = runFeet(v, blocks, yaw);
         Feet feet = potionFeet(v, -1, lag + 2, true);
         feet.run = run;
         double sp = Geo.speed(Inv.KIND_POTION);
+        // The click goes out after the turn's tick, with its movement on a
+        // server that adds it; not yet known, the pitch has to do for both.
+        double[] moved = {run[0][0] - v.pos[0], run[0][2] - v.pos[2]};
+        double[] ways = carry == 1 ? new double[] {1.0} : carry == 0 ? new double[] {0.0} : new double[] {0.0, 1.0};
         int[] ticks = new int[AIM_PITCHES];
-        float[] heal = new float[AIM_PITCHES], gift = new float[AIM_PITCHES];
+        double[] heal = new double[AIM_PITCHES], gift = new double[AIM_PITCHES];
         for (int k = 0; k < AIM_PITCHES; k++) {
             double[] hd = Geo.throwHeading(Inv.KIND_POTION, run[0], yaw, 90.0f - (float) k);
-            double[] from = {hd[0], hd[1], hd[2]}, m = {hd[3] * sp, hd[4] * sp, hd[5] * sp};
-            Fate f = potionOutcome(blocks, from, m, 0, 0, feet);
-            ticks[k] = f.ticks;
-            heal[k] = f.heal[0];
-            gift[k] = f.heal[1];
-        }
-        // The most health even a degree higher or lower, then the soonest, then the least for the opponent.
-        int best = 0;
-        float bestSure = -1.0f;
-        for (int k = 0; k < AIM_PITCHES; k++) {
-            float sure = Float.MAX_VALUE;
-            for (int q = Math.max(k - 1, 0); q < Math.min(k + 2, AIM_PITCHES); q++) {
-                sure = Math.min(sure, heal[q]);
+            double[] from = {hd[0], hd[1], hd[2]};
+            double sum = 0.0, opp = 0.0, all = 0.0;
+            // The up and down of the throw, from two deviations under to two over.
+            for (int q = 0; q < SPREAD_WEIGHTS.length; q++) {
+                double z = ((double) q - 4.0) * 0.5, p = SPREAD_WEIGHTS[q];
+                for (double w : ways) {
+                    double[] m = {hd[3] * sp + w * moved[0], (hd[4] + z * THROW_SPREAD) * sp, hd[5] * sp + w * moved[1]};
+                    Fate f = potionOutcome(blocks, from, m, 0, 0, feet);
+                    ticks[k] = Math.max(ticks[k], f.ticks);
+                    sum += p * (double) f.heal[0];
+                    opp += p * (double) f.heal[1];
+                    all += p;
+                }
             }
-            if (sure > bestSure || (sure == bestSure && (ticks[k] < ticks[best] || (ticks[k] == ticks[best] && gift[k] < gift[best])))) {
+            heal[k] = sum / all;
+            gift[k] = opp / all;
+        }
+        // The most health, then the soonest, then the least for the opponent.
+        int best = 0;
+        for (int k = 1; k < AIM_PITCHES; k++) {
+            boolean same = Math.abs(heal[k] - heal[best]) <= 1e-9;
+            if ((heal[k] > heal[best] && !same) || (same && (ticks[k] < ticks[best] || (ticks[k] == ticks[best] && gift[k] < gift[best])))) {
                 best = k;
-                bestSure = sure;
             }
         }
         return new float[] {90.0f - (float) best, (float) ticks[best]};
@@ -764,6 +835,32 @@ public final strictfp class Agent {
      * kept.
      */
     public void beforeTick(View v, Blocks blocks) {
+        saidBefore = said;
+        said = v.pos.clone();
+        if (probe != null) {
+            // Its potion as the server has it after its first tick: the
+            // throw and what was added to it, slowed by the air once.
+            View.Thrown seen = null;
+            for (int i = v.thrown.size() - 1; i >= 0; i--) {
+                View.Thrown t = v.thrown.get(i);
+                if (t.mine && t.kind == Inv.KIND_POTION && t.age == 0) {
+                    seen = t;
+                    break;
+                }
+            }
+            if (seen != null) {
+                double n = probe[2] * probe[2] + probe[3] * probe[3];
+                if (n > CARRY_MOVED * CARRY_MOVED) {
+                    double r0 = seen.motion[0] / 0.99 - probe[0], r1 = seen.motion[2] / 0.99 - probe[1];
+                    carry = (r0 * probe[2] + r1 * probe[3]) / n > 0.5 ? 1 : 0;
+                }
+                probe = null;
+            } else if (probeAge >= 20) {
+                probe = null;
+            } else {
+                probeAge++;
+            }
+        }
         if (v.oTicksSinceHurt == 0 && v.ticksSinceAttack <= HIT_WINDOW) {
             comboOwn++;
             comboOther = 0;
@@ -994,7 +1091,15 @@ public final strictfp class Agent {
         // A pearl thrown on this tick: how far it would carry this player,
         // in how many ticks, and where that is seen from the opponent.
         if (v.pearls > 0) {
-            double[] land = Geo.pearlPreview(blocks, pos, v.yaw, v.pitch);
+            double[] land;
+            if (carry == 1) {
+                double[] h = Geo.throwHeading(Inv.KIND_PEARL, pos, v.yaw, v.pitch);
+                double sp = Geo.speed(Inv.KIND_PEARL);
+                double[] add = carried();
+                land = Geo.flight(blocks, Inv.KIND_PEARL, new double[] {h[0], h[1], h[2]}, new double[] {h[3] * sp + add[0], h[4] * sp, h[5] * sp + add[1]});
+            } else {
+                land = Geo.pearlPreview(blocks, pos, v.yaw, v.pitch);
+            }
             double[] ll = local(yaw, land[0] - pos[0], land[2] - pos[2]);
             o[92] = clip(Math.hypot(ll[0], ll[1]) / 16.0, 4.0);
             o[93] = (float) Math.min((int) land[3], 60) / 30.0f;
@@ -1041,7 +1146,8 @@ public final strictfp class Agent {
         if (v.potions != 0) {
             double[] h = Geo.throwHeading(Inv.KIND_POTION, pos, v.yaw, v.pitch);
             double sp = Geo.speed(Inv.KIND_POTION);
-            double[] from = {h[0], h[1], h[2]}, m = {h[3] * sp, h[4] * sp, h[5] * sp};
+            double[] add = carried();
+            double[] from = {h[0], h[1], h[2]}, m = {h[3] * sp + add[0], h[4] * sp, h[5] * sp + add[1]};
             Fate f = potionOutcome(blocks, from, m, 0, 0, potionFeet(v, -1, lag + 1, true));
             Fate still = potionOutcome(blocks, from, m, 0, 0, potionFeet(v, -1, lag + 1, false));
             double[] ll = local(yaw, f.at[0] - pos[0], f.at[2] - pos[2]);
@@ -1093,5 +1199,7 @@ public final strictfp class Agent {
         o[151] = Math.min((float) Math.max(duel.pearlCooldown - oppPearlAge, 0) / cd, 1.0f);
         // A potion thrown with a turn: the ticks left until the run with it is over.
         o[152] = turned > 0 ? (float) (moveUntil - turned + 1) / 8.0f : 0.0f;
+        // Whether its throws take on its movement: not seen yet, no, yes.
+        o[153] = new float[] {0.5f, 0.0f, 1.0f}[carry + 1];
     }
 }

@@ -346,6 +346,9 @@ pub struct Params {
     /// the air or is under 12 health, it runs straight at it (`steal_keys`).
     /// A potion thrown at its own feet in front of such a player heals both.
     pub league_steal: f64,
+    /// Share of duels on a server whose throws take on the thrower's motion
+    /// (`ServerCfg::throw_carry`).
+    pub throw_carry_prob: f64,
     /// Share of the players that start with potions of Speed at hand whose
     /// potions of it are in the inventory instead, as most players carry
     /// them: to drink one it has to be brought down first.
@@ -459,6 +462,7 @@ impl Default for Params {
             w_inv_near: 0.0,
             inv_near_dist: 4.5,
             league_steal: 0.0,
+            throw_carry_prob: 0.0,
             drinks_stowed: 0.0,
         }
     }
@@ -586,6 +590,7 @@ impl Params {
             122 => self.w_inv_near = v as f32,
             123 => self.inv_near_dist = v,
             124 => self.league_steal = v,
+            125 => self.throw_carry_prob = v,
             113 => self.extreme_share = v,
             114 => self.w_shake = v as f32,
             115 => self.pot_strict_prob = v,
@@ -1098,6 +1103,7 @@ pub fn new_duel(p: &Params, rng: &mut Rng, mode: Mode) -> (Match, [f64; 2], BotP
     if real && p.pot_strict_prob > 0.0 && rng.chance(p.pot_strict_prob) {
         scfg.potion_strict = p.pot_strict.clamp(0.0, 1.0) as f32;
     }
+    scfg.throw_carry = p.throw_carry_prob > 0.0 && rng.chance(p.throw_carry_prob);
     // Cornered with no pearl to leave with, most of the time.
     let stuck = lesson == 7 && rng.chance(0.7);
     let seed = rng.next_u64();
@@ -1742,6 +1748,11 @@ impl Env {
         self.bot = bot;
         self.lesson = lesson;
         self.begin();
+    }
+
+    /// The agent of a player, to set up a check.
+    pub fn agent_mut(&mut self, id: usize) -> &mut Agent {
+        &mut self.ag[id]
     }
 
     /// Apply the pending agent's action and run until an agent has to act
