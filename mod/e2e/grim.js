@@ -274,6 +274,15 @@ async function main() {
   console.log(`GRIM about ${name}: ${about.length} lines` + (about.length ? '' : ' (nothing flagged)'))
   for (const k of Object.keys(by).sort((a, b) => by[b] - by[a])) console.log(`GRIM   ${k}: ${by[k]}`)
   for (const l of about.slice(0, 400)) console.log('GRIM   | ' + l)
+  // The mod's player on the ticks around each second Grim flagged it in (the first eight).
+  const traced = path.join(modDir, 'run', 'ticks.txt')
+  const trace = fs.existsSync(traced) ? fs.readFileSync(traced, 'utf8').split('\n').filter(Boolean) : []
+  const secs = s => { const m = /(\d\d):(\d\d):(\d\d)(?:\.(\d+))?/.exec(s); return m ? +m[1] * 3600 + +m[2] * 60 + +m[3] + (m[4] ? +('0.' + m[4]) : 0) : null }
+  const flagged = [...new Set(about.map(l => /failed/.test(l) && secs(l)).filter(t => t !== null && t !== false))].slice(0, 8)
+  for (const t of flagged) {
+    console.log(`TRACE ${name} from a second before ${t} s to a second after (Grim's clock goes by whole seconds):`)
+    for (const l of trace.filter(l => { const u = secs(l); return u >= t - 1 && u < t + 2 })) console.log('TRACE | ' + l)
+  }
   const rivalBy = {}
   for (const l of lines.slice(from, mark)) {
     const m = l.includes(RIVAL) && /failed\s+(\S+)/i.exec(l)

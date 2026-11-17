@@ -4,6 +4,9 @@ import java.io.File;
 import java.io.FileOutputStream;
 import java.io.IOException;
 import java.io.OutputStream;
+import java.io.PrintWriter;
+import java.text.SimpleDateFormat;
+import java.util.Date;
 import java.util.Locale;
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.entity.EntityPlayerSP;
@@ -26,7 +29,8 @@ import net.minecraft.item.ItemSword;
  * next duel. After -Dpvpai.seconds (90) with the agent at the keys it
  * writes what it did into servertest.txt and the game shuts down. What the
  * server and its plugins make of a client played this way is read off the
- * server's side.
+ * server's side; ticks.txt has the state of the player on each tick with the
+ * agent at the keys, by the clock, to set beside what the server said.
  */
 final class ServerTest {
     private static final int PATIENCE = 20 * 600;
@@ -39,6 +43,8 @@ final class ServerTest {
     private int potions, meals, pearls, visits;
     private int[] had;
     private boolean wasOpen;
+    private PrintWriter trace;
+    private final SimpleDateFormat clock = new SimpleDateFormat("HH:mm:ss.SSS", Locale.ROOT);
 
     ServerTest(PvpAi mod, String address) {
         this.mod = mod;
@@ -114,6 +120,7 @@ final class ServerTest {
         } else {
             swings += me.isSwingInProgress && me.swingProgressInt == 0 ? 1 : 0;
             ticks++;
+            trace(mc, me);
             int[] has = new int[3];
             for (ItemStack s : me.inventory.mainInventory) {
                 if (s != null) {
@@ -143,8 +150,26 @@ final class ServerTest {
         }
     }
 
+    /** The player as it is at the start of this tick, after the last one. */
+    private void trace(Minecraft mc, EntityPlayerSP me) throws IOException {
+        if (trace == null) {
+            trace = new PrintWriter(new File(mc.mcDataDir, "ticks.txt"), "UTF-8");
+        }
+        ItemStack held = me.inventory.getCurrentItem(), using = me.getItemInUse();
+        trace.println(String.format(Locale.ROOT,
+            "%s using %s %d held %d %s sprint %b fwd %.2f strafe %.2f ground %b speed %.3f hurt %d useKey %b screen %s health %.1f",
+            clock.format(new Date()), using == null ? "-" : using.getUnlocalizedName(), me.getItemInUseCount(),
+            me.inventory.currentItem, held == null ? "-" : held.getUnlocalizedName(), me.isSprinting(),
+            me.movementInput.moveForward, me.movementInput.moveStrafe, me.onGround, Math.hypot(me.motionX, me.motionZ),
+            me.hurtTime, mc.gameSettings.keyBindUseItem.isKeyDown(),
+            mc.currentScreen == null ? "-" : mc.currentScreen.getClass().getSimpleName(), me.getHealth()));
+    }
+
     private void end(Minecraft mc, String line) throws IOException {
         state = 3;
+        if (trace != null) {
+            trace.close();
+        }
         System.out.println("SERVERTEST " + line);
         OutputStream out = new FileOutputStream(new File(mc.mcDataDir, "servertest.txt"));
         try {
