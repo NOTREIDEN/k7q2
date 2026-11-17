@@ -1,6 +1,6 @@
 //! Headless simulator of 1.8.9 sword combat between two players, written
 //! against the decompiled 1.8.9 client and server so that the numbers match
-//! the game. See `PARITY.md` for what is covered and how it is checked.
+//! the game.
 pub mod aabb;
 mod atan_tab;
 pub mod body;

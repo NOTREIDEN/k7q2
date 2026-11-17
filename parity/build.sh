@@ -2,7 +2,7 @@
 # Patch five decompiled sources with the hook lines and compile them with the rig.
 #   MCP=/path/to/mcp-919 ./build.sh
 # Needs a Java 8 JDK and an MCP-919 workspace that has been decompiled and
-# recompiled once (src/minecraft, bin/minecraft, jars/). See README.md.
+# recompiled once (src/minecraft, bin/minecraft, jars/).
 set -e
 HERE="$(cd "$(dirname "$0")" && pwd)"
 : "${MCP:?set MCP to the MCP-919 workspace}"
