@@ -23,6 +23,7 @@ PARAM = {
     "opp_backtrack_min_ms": 53, "opp_backtrack_max_ms": 54,
     "kb_plugin": 55, "kb_preset": 56,
     "w_damage": 57, "opp_autoblock": 58, "sword_wear": 59, "bot_block": 60,
+    "pearls": 61, "pearl_prob": 62, "pearl_cd_min_s": 63, "pearl_cd_max_s": 64, "bot_pearl": 65,
 }
 
 STAT_NAMES = [
@@ -30,6 +31,8 @@ STAT_NAMES = [
     "swings0", "swings1", "attacks0", "attacks1", "on_target0", "on_target1",
     "aim_err_sum0", "max_combo_sum0", "reward_sum0",
     "use_ticks0", "use_ticks1", "blocked0", "blocked1", "damage0", "damage1", "crits0", "crits1",
+    "pearls0", "pearls1", "landings0", "landings1", "pearl_won0", "pearl_won1", "pearl_lost0", "pearl_lost1",
+    "blocks0", "blocks1", "kb0", "kb1", "tap_hits0", "tap_hits1",
 ]
 
 # Per-player fields of VecEnv.view(), then the fields that follow both players.
@@ -37,10 +40,12 @@ VIEW_PLAYER = [
     "x", "y", "z", "yaw", "pitch", "on_ground", "sprinting", "hurt_time", "ticks_since_swing",
     "forward", "strafe", "jump", "sprint_key", "attack", "hits", "combo", "sprint_hits",
     "seen_x", "seen_y", "seen_z", "using", "blocking", "blocked", "damage",
+    "held", "pearls", "pearl_on", "pearl_x", "pearl_y", "pearl_z",
 ]
 VIEW_GLOBAL = ["ticks_left", "ep_len", "arena_half", "floor_y", "ping0", "ping1", "cps0", "cps1",
                "reach1", "kb_taken1", "backtrack1_ms",
-               "kb_kind", "kb_h", "kb_v", "kb_friction", "hit_delay", "autoblock1", "sword_wear"]
+               "kb_kind", "kb_h", "kb_v", "kb_friction", "hit_delay", "autoblock1", "sword_wear",
+               "pearl_cd_s"]
 
 SELF_PLAY = 0
 BOT = 1

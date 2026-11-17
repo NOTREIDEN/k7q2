@@ -8,6 +8,11 @@ import torch.nn as nn
 # Starting preference of the right mouse button: pressed on about three
 # ticks in a hundred.
 USE_BIAS = [0.0, -3.5]
+# And of the pearl throw: asked for on about one tick in a hundred, which
+# with the wait between pearls is a throw every quarter of a minute or so.
+PEARL_BIAS = [0.0, -4.5]
+# Controls that do not start evenly, by their position among the controls.
+START_BIAS = {7: USE_BIAS, 8: PEARL_BIAS}
 
 
 def _init(layer, gain):
@@ -41,9 +46,11 @@ class Policy(nn.Module):
                 c = (n - 1) / 2
                 self.heads[h].bias.copy_(torch.tensor([-0.35 * abs(i - c) for i in range(n)]))
             self.heads[2].bias.copy_(torch.tensor([0.0, -1.7]))
-            if len(self.act_dims) > 7:
-                # Blocking costs clicks and speed, so it starts rare.
-                self.heads[7].bias.copy_(torch.tensor(USE_BIAS))
+            # Blocking costs clicks and speed and a pearl costs health, so
+            # both start rare.
+            for h, bias in START_BIAS.items():
+                if len(self.act_dims) > h:
+                    self.heads[h].bias.copy_(torch.tensor(bias))
 
     def initial_state(self, n, device=None):
         z = torch.zeros(n, self.hidden, device=device)
@@ -111,10 +118,9 @@ def fit_state(sd, policy):
     out, grown = {}, False
     for k, ref in policy.state_dict().items():
         if k not in sd:
-            if k.endswith("bias") and ref.numel() == len(USE_BIAS):
-                out[k] = torch.tensor(USE_BIAS, dtype=ref.dtype)
-            else:
-                out[k] = torch.zeros_like(ref)
+            part = k.split(".")
+            start = START_BIAS.get(int(part[1])) if part[0] == "heads" and part[2] == "bias" else None
+            out[k] = torch.tensor(start, dtype=ref.dtype) if start is not None else torch.zeros_like(ref)
             grown = True
         elif sd[k].shape != ref.shape:
             w = torch.zeros_like(ref)
