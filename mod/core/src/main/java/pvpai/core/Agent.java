@@ -26,6 +26,12 @@ public final strictfp class Agent {
     };
     public static final int OBS_DIM = 151;
     private static final int TRAIL = 16;
+    /**
+     * A hurt of the other player counts as a hit of this one's for this
+     * many ticks after a hit of its own went out: the server's answer takes
+     * a ping.
+     */
+    private static final int HIT_WINDOW = 20;
     private static final float MAX_HEALTH = 20.0f, POTION_HEAL = 8.0f;
 
     /** What a potion will do: where it breaks, in how many ticks, and the health it gives this player and the other. */
@@ -106,6 +112,12 @@ public final strictfp class Agent {
     private int oppUseTicks;
     /** The inventory: 0 the screen is shut, 1 open and the click it was opened for is still to come, 2 open and that click made; and the kind of potion it was opened for. */
     private int refill, refillKind = Inv.POTION;
+    /**
+     * The hits in a row it has landed and taken, as its own client can
+     * tell: the other player hurt soon after a hit of its own, and itself
+     * hurt other than by a pearl of its own coming down.
+     */
+    private int comboOwn, comboOther;
 
     /**
      * An agent at the start of a duel: the two pings in milliseconds, its
@@ -535,12 +547,21 @@ public final strictfp class Agent {
 
     /**
      * Called when the packets of this client are in and its tick is to
-     * come. Its own potion, seen for the first time: the ticks since it
+     * come. A hurt that came in since its last tick goes to the hits in a
+     * row. Its own potion, seen for the first time: the ticks since it
      * threw it are how far behind the server's answers are. And what it
      * foresees for the potions and pearls that break on their next tick is
      * kept.
      */
     public void beforeTick(View v, Blocks blocks) {
+        if (v.oTicksSinceHurt == 0 && v.ticksSinceAttack <= HIT_WINDOW) {
+            comboOwn++;
+            comboOther = 0;
+        }
+        if (v.ticksSinceHurt == 0 && v.ticksSinceMoved != 0) {
+            comboOwn = 0;
+            comboOther++;
+        }
         if (v.potionsPending == 0 && sinceThrow < TRAIL) {
             for (View.Thrown e : v.thrown) {
                 if (e.mine && e.kind == Inv.KIND_POTION && e.age == 0) {
@@ -608,10 +629,9 @@ public final strictfp class Agent {
 
     /**
      * What the policy is shown: what the agent can know from its own
-     * client and of the duel. comboOwn and comboOther are the hits in a row
-     * this player has landed, and the other.
+     * client and of the duel.
      */
-    public void observe(View v, Blocks blocks, Duel duel, int comboOwn, int comboOther, float[] o) {
+    public void observe(View v, Blocks blocks, Duel duel, float[] o) {
         float yaw = v.yaw;
         double[] pos = v.pos;
         double[] eye = v.eye();

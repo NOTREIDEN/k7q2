@@ -144,7 +144,7 @@ public final class AgentCheck {
     public static void main(String[] args) throws IOException {
         byte[] raw = Files.readAllBytes(Paths.get(args[0]));
         d = ByteBuffer.wrap(raw).order(ByteOrder.LITTLE_ENDIAN).asDoubleBuffer();
-        if (n() != 5050.0 || n() != 2.0) {
+        if (n() != 5050.0 || n() != 3.0) {
             throw new IOException("not a file of duels, or of another format");
         }
         int obsDim = i(), heads = i();
@@ -219,7 +219,14 @@ public final class AgentCheck {
                     }
                 }
             }
+            int from = d.position();
             view(view);
+            double[] row = new double[d.position() - from];
+            d.position(from);
+            d.get(row);
+            if (!Arrays.equals(row, view.list())) {
+                throw new IllegalStateException("tick " + ticks + ": a view is not written as it was read");
+            }
             double[] told = counts(view);
             book.fill(view);
             if (Arrays.equals(told, counts(view))) {
@@ -229,9 +236,8 @@ public final class AgentCheck {
                 System.out.println("tick " + ticks + ": counts " + Arrays.toString(counts(view)) + ", the simulator's " + Arrays.toString(told));
             }
             double[] eye = view.eye();
-            int comboOwn = i(), comboOther = i();
             agent.beforeTick(view, blocks);
-            agent.observe(view, blocks, duel, comboOwn, comboOther, obs);
+            agent.observe(view, blocks, duel, obs);
             boolean all = true;
             for (int k = 0; k < obsDim; k++) {
                 float want = (float) n();

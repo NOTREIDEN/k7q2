@@ -48,6 +48,9 @@ pub const OBS_DIM: usize = 151;
 
 /// How many of its last positions an agent keeps.
 const TRAIL: usize = 16;
+/// A hurt of the other player counts as a hit of this one's for this many
+/// ticks after a hit of its own went out: the server's answer takes a ping.
+const HIT_WINDOW: i32 = 20;
 
 /// What an agent is told about the duel it plays, the same for both
 /// players and for all of the duel.
@@ -125,6 +128,10 @@ pub struct Agent {
     /// was opened for.
     refill: u8,
     refill_kind: Item,
+    /// The hits in a row it has landed and taken, as its own client can
+    /// tell: the other player hurt soon after a hit of its own, and itself
+    /// hurt other than by a pearl of its own coming down.
+    combo: [u32; 2],
 }
 
 impl Agent {
@@ -152,6 +159,7 @@ impl Agent {
             opp_use_ticks: 0,
             refill: 0,
             refill_kind: Item::Potion,
+            combo: [0; 2],
         }
     }
 
@@ -533,11 +541,18 @@ impl Agent {
     }
 
     /// Called when the packets of this client are in and its tick is to
-    /// come, which is when it is told what it sees. Its own potion, seen
+    /// come, which is when it is told what it sees. A hurt that came in
+    /// since its last tick goes to the hits in a row. Its own potion, seen
     /// for the first time: the ticks since it threw it are how far behind
     /// the server's answers are. And what it foresees for the potions and
     /// pearls that break on their next tick is kept.
     pub fn before_tick(&mut self, c: &Client, world: &World) {
+        if c.rp.ticks_since_hurt == 0 && c.lp.ticks_since_attack <= HIT_WINDOW {
+            self.combo = [self.combo[0] + 1, 0];
+        }
+        if c.lp.ticks_since_hurt == 0 && c.lp.ticks_since_moved != 0 {
+            self.combo = [0, self.combo[1] + 1];
+        }
         if c.lp.potions_pending == 0 && self.since_throw < TRAIL as i32 && c.thrown.iter().any(|e| e.mine && e.kind == Kind::Potion && e.age == 0) {
             self.lag = self.since_throw.max(1);
         }
@@ -557,9 +572,9 @@ impl Agent {
     }
 
     /// What the policy is shown: what the agent can know from its own
-    /// client and of the duel. `combo` is the hits in a row this player
-    /// has landed, and the other.
-    pub fn write_obs(&self, c: &Client, world: &World, ccfg: &ClientCfg, duel: &Duel, combo: [u32; 2], o: &mut [f32]) {
+    /// client and of the duel.
+    pub fn write_obs(&self, c: &Client, world: &World, ccfg: &ClientCfg, duel: &Duel, o: &mut [f32]) {
+        let combo = self.combo;
         let lp = &c.lp;
         let rp = &c.rp;
         let b = &lp.l.body;
@@ -944,3 +959,104 @@ fn potion_outcome(world: &World, mut pos: V3, mut m: V3, mut age: i32, thrower: 
     }
     (pos, 60, [0.0; 2])
 }
+
+/// Everything an agent reads of its client, as a row of numbers: what the
+/// client holds when its packets are in and its tick is to come. A copy of
+/// the agent elsewhere is handed this, and a real client has to show the
+/// same. The slot and the ticks of an item in use are told only while one
+/// is in use.
+pub fn view(c: &Client, world: &World, ccfg: &ClientCfg) -> Vec<f64> {
+    struct Out(Vec<f64>);
+    impl Out {
+        fn n<T: Into<f64>>(&mut self, v: T) {
+            self.0.push(v.into());
+        }
+        fn b(&mut self, v: bool) {
+            self.0.push(v as u8 as f64);
+        }
+        fn v(&mut self, v: V3) {
+            self.0.extend_from_slice(&v);
+        }
+    }
+    let mut o = Out(Vec::with_capacity(VIEW_HEAD + VIEW_THROWN * c.thrown.len()));
+    let (lp, rp) = (&c.lp, &c.rp);
+    let b = &lp.l.body;
+    o.v(b.pos);
+    o.v(b.motion);
+    o.b(b.on_ground);
+    o.b(b.collided_h);
+    o.n(b.fall_distance);
+    o.n(lp.l.yaw);
+    o.n(lp.l.pitch);
+    o.b(lp.l.sprinting);
+    o.n(lp.l.jump_ticks);
+    o.n(lp.l.attr.value());
+    o.b(lp.server_sprint_state);
+    o.n(lp.hurt_time);
+    o.v(lp.last_kb);
+    o.n(lp.ticks_since_kb);
+    o.n(lp.ticks_since_swing);
+    o.n(lp.ticks_since_attack);
+    o.n(lp.ticks_since_hurt);
+    o.n(lp.ticks_since_moved);
+    o.b(lp.using_item);
+    o.n(lp.right_click_delay);
+    o.b(lp.flag_using);
+    o.n(lp.held);
+    o.n(lp.pearls);
+    o.n(lp.potions);
+    o.n(lp.drinks);
+    o.n(lp.bottles);
+    o.n(lp.steak);
+    o.n(lp.potions_seen);
+    o.n(lp.potions_pending);
+    o.n(lp.food);
+    o.n(lp.saturation);
+    o.n(lp.speed_ticks);
+    o.n(lp.health);
+    o.b(lp.consuming());
+    o.n(if lp.using_item { lp.use_slot } else { 0 });
+    o.n(if lp.using_item { lp.use_count } else { 0 });
+    o.b(lp.inv_open);
+    for x in lp.rows.0 {
+        o.n(x);
+    }
+    o.v(rp.pos);
+    o.v(rp.prev_pos);
+    o.v(rp.target);
+    o.n(rp.increments);
+    o.v(rp.bb.min);
+    o.v(rp.bb.max);
+    o.b(rp.on_ground);
+    o.b(rp.sprinting);
+    o.n(rp.hurt_time);
+    o.b(rp.swing_in_progress);
+    o.n(rp.swing_progress_int);
+    o.n(rp.yaw);
+    o.n(rp.pitch);
+    o.n(rp.ticks_since_hurt);
+    o.n(rp.ticks_since_jump);
+    o.b(rp.using);
+    o.n(rp.item as u8);
+    o.n(rp.health);
+    o.b(rp.fx);
+    o.b(c.pick(world, ccfg).entity);
+    assert_eq!(o.0.len() + 1, VIEW_HEAD);
+    o.n(c.thrown.len() as u32);
+    for e in &c.thrown {
+        o.n(e.id);
+        o.n(e.kind as u8);
+        o.b(e.mine);
+        o.v(e.pos);
+        o.v(e.motion);
+        o.n(e.age);
+        o.n(e.air);
+        o.v(e.server_side());
+    }
+    o.0
+}
+
+/// The numbers of `view` before the pearls and potions in flight (the last
+/// of them is how many those are), and the numbers of each of those.
+pub const VIEW_HEAD: usize = 101;
+pub const VIEW_THROWN: usize = 14;

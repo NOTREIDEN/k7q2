@@ -90,4 +90,98 @@ public final class View {
     public double[] eye() {
         return new double[] {pos[0], pos[1] + Geo.EYE_HEIGHT, pos[2]};
     }
+
+    /** The numbers of {@link #list} before the pearls and potions in flight, and of each of those. */
+    public static final int HEAD = 101, PER_THROWN = 14;
+
+    /**
+     * The whole view as a row of numbers, in the order the simulator writes
+     * its own (agent.rs, view). The slot and the ticks of an item in use
+     * are told only while one is in use.
+     */
+    public double[] list() {
+        double[] l = new double[HEAD + PER_THROWN * thrown.size()];
+        int at = 0;
+        at = put(l, at, pos);
+        at = put(l, at, motion);
+        l[at++] = flag(onGround);
+        l[at++] = flag(collidedH);
+        l[at++] = fallDistance;
+        l[at++] = yaw;
+        l[at++] = pitch;
+        l[at++] = flag(sprinting);
+        l[at++] = jumpTicks;
+        l[at++] = speed;
+        l[at++] = flag(serverSprint);
+        l[at++] = hurtTime;
+        at = put(l, at, lastKb);
+        l[at++] = ticksSinceKb;
+        l[at++] = ticksSinceSwing;
+        l[at++] = ticksSinceAttack;
+        l[at++] = ticksSinceHurt;
+        l[at++] = ticksSinceMoved;
+        l[at++] = flag(usingItem);
+        l[at++] = rightClickDelay;
+        l[at++] = flag(flagUsing);
+        l[at++] = held;
+        l[at++] = pearls;
+        l[at++] = potions;
+        l[at++] = drinks;
+        l[at++] = bottles;
+        l[at++] = steak;
+        l[at++] = potionsSeen;
+        l[at++] = potionsPending;
+        l[at++] = food;
+        l[at++] = saturation;
+        l[at++] = speedTicks;
+        l[at++] = health;
+        l[at++] = flag(consuming());
+        l[at++] = usingItem ? useSlot : 0;
+        l[at++] = usingItem ? useCount : 0;
+        l[at++] = flag(invOpen);
+        for (int k = 0; k < 27; k++) {
+            l[at++] = rows[k];
+        }
+        at = put(l, at, oPos);
+        at = put(l, at, oPrevPos);
+        at = put(l, at, oTarget);
+        l[at++] = oIncrements;
+        at = put(l, at, oMin);
+        at = put(l, at, oMax);
+        l[at++] = flag(oOnGround);
+        l[at++] = flag(oSprinting);
+        l[at++] = oHurtTime;
+        l[at++] = flag(oSwinging);
+        l[at++] = oSwingProgress;
+        l[at++] = oYaw;
+        l[at++] = oPitch;
+        l[at++] = oTicksSinceHurt;
+        l[at++] = oTicksSinceJump;
+        l[at++] = flag(oUsing);
+        l[at++] = oItem;
+        l[at++] = oHealth;
+        l[at++] = flag(oFx);
+        l[at++] = flag(onTarget);
+        l[at++] = thrown.size();
+        for (Thrown t : thrown) {
+            l[at++] = t.id;
+            l[at++] = t.kind;
+            l[at++] = flag(t.mine);
+            at = put(l, at, t.pos);
+            at = put(l, at, t.motion);
+            l[at++] = t.age;
+            l[at++] = t.air;
+            at = put(l, at, t.serverSide);
+        }
+        return l;
+    }
+
+    private static double flag(boolean b) {
+        return b ? 1.0 : 0.0;
+    }
+
+    private static int put(double[] l, int at, double[] v) {
+        System.arraycopy(v, 0, l, at, 3);
+        return at + 3;
+    }
 }

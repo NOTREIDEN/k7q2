@@ -1292,8 +1292,7 @@ impl Env {
 
     /// What agent `id` can know from its own client.
     pub fn write_obs(&self, id: usize, o: &mut [f32]) {
-        let combo = [self.combo[id], self.combo[1 - id]];
-        self.ag[id].write_obs(&self.m.c[id], &self.m.world, &self.m.ccfg, &self.duel(), combo, o);
+        self.ag[id].write_obs(&self.m.c[id], &self.m.world, &self.m.ccfg, &self.duel(), o);
     }
 
     /// Shaping potential of agent `id`: high when it faces the opponent and

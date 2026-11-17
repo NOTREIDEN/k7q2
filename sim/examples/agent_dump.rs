@@ -5,7 +5,7 @@
 //! `cargo run --release --example agent_dump -- OUT.bin [TICKS]`.
 //!
 //! The file is a row of little-endian doubles (every number an agent
-//! handles fits one exactly). It starts with 5050, the format (2), the
+//! handles fits one exactly). It starts with 5050, the format (3), the
 //! sizes of an observation and of an action; then for each tick:
 //!
 //! - 1 and the duel if a new duel starts here, else 0. The duel: half the
@@ -16,20 +16,19 @@
 //! - The packets the client was handed since its last tick that an agent's
 //!   own counts go by, how many and then each (see `packet`).
 //! - What the client holds when its packets are in and its tick is to come
-//!   (see `view`), and the two combos.
+//!   (`pvpsim::agent::view`).
 //! - The observation, the action taken, and the keys and buttons it became.
 //! - After the tick: where the player stands, whether it is drinking or
 //!   eating, whether the other is seen to and what it holds, whether a
 //!   pearl and a potion were thrown, whether it swung and whether it hit,
 //!   and the place and the view the server had been told before the tick.
-use pvpsim::agent::{Agent, Duel, ACT_DIMS, ACT_HEADS, OBS_DIM};
+use pvpsim::agent::{view, Agent, Duel, ACT_DIMS, ACT_HEADS, OBS_DIM};
 use pvpsim::bot::{self, BotState};
 use pvpsim::client::{Client, ClientCfg, Input};
 use pvpsim::env::{new_duel, Mode, Params};
 use pvpsim::mth::Rng;
 use pvpsim::net::{Item, ThrownEv, S2C};
 use pvpsim::sim::Match;
-use pvpsim::world::World;
 use std::io::Write;
 
 /// Parameter numbers of `Params::set` and the values of the training runs.
@@ -86,83 +85,6 @@ fn duel(o: &mut Out, d: &Duel, walls: bool, ag: &Agent, ccfg: &ClientCfg, feet: 
     o.n(ag.cps);
     o.n(ccfg.mouse_f1);
     o.v(feet);
-}
-
-/// Everything an agent reads of its client.
-fn view(o: &mut Out, c: &Client, world: &World, ccfg: &ClientCfg) {
-    let (lp, rp) = (&c.lp, &c.rp);
-    let b = &lp.l.body;
-    o.v(b.pos);
-    o.v(b.motion);
-    o.b(b.on_ground);
-    o.b(b.collided_h);
-    o.n(b.fall_distance);
-    o.n(lp.l.yaw);
-    o.n(lp.l.pitch);
-    o.b(lp.l.sprinting);
-    o.n(lp.l.jump_ticks);
-    o.n(lp.l.attr.value());
-    o.b(lp.server_sprint_state);
-    o.n(lp.hurt_time);
-    o.v(lp.last_kb);
-    o.n(lp.ticks_since_kb);
-    o.n(lp.ticks_since_swing);
-    o.n(lp.ticks_since_attack);
-    o.n(lp.ticks_since_hurt);
-    o.n(lp.ticks_since_moved);
-    o.b(lp.using_item);
-    o.n(lp.right_click_delay);
-    o.b(lp.flag_using);
-    o.n(lp.held);
-    o.n(lp.pearls);
-    o.n(lp.potions);
-    o.n(lp.drinks);
-    o.n(lp.bottles);
-    o.n(lp.steak);
-    o.n(lp.potions_seen);
-    o.n(lp.potions_pending);
-    o.n(lp.food);
-    o.n(lp.saturation);
-    o.n(lp.speed_ticks);
-    o.n(lp.health);
-    o.b(lp.consuming());
-    o.n(lp.use_slot);
-    o.n(lp.use_count);
-    o.b(lp.inv_open);
-    for x in lp.rows.0 {
-        o.n(x);
-    }
-    o.v(rp.pos);
-    o.v(rp.prev_pos);
-    o.v(rp.target);
-    o.n(rp.increments);
-    o.v(rp.bb.min);
-    o.v(rp.bb.max);
-    o.b(rp.on_ground);
-    o.b(rp.sprinting);
-    o.n(rp.hurt_time);
-    o.b(rp.swing_in_progress);
-    o.n(rp.swing_progress_int);
-    o.n(rp.yaw);
-    o.n(rp.pitch);
-    o.n(rp.ticks_since_hurt);
-    o.n(rp.ticks_since_jump);
-    o.b(rp.using);
-    o.n(rp.item as u8);
-    o.n(rp.health);
-    o.b(rp.fx);
-    o.b(c.pick(world, ccfg).entity);
-    o.n(c.thrown.len() as u32);
-    for e in &c.thrown {
-        o.n(e.id);
-        o.n(e.kind as u8);
-        o.b(e.mine);
-        o.v(e.pos);
-        o.v(e.motion);
-        o.n(e.age);
-        o.n(e.air);
-        o.v(e.server_side());
-    }
 }
 
 /// A packet as the agent's counts need it; returns whether it is one of
@@ -360,7 +282,7 @@ fn main() {
     }
     let mut o = Out(Vec::new());
     o.n(5050.0);
-    o.n(2.0);
+    o.n(3.0);
     o.n(OBS_DIM as u32);
     o.n(ACT_HEADS as u32);
     let mut rng = Rng::new(23);
@@ -388,7 +310,6 @@ fn main() {
             drink_window_s: p.drink_window_s,
         };
         let mut bot_state = BotState::default();
-        let mut combo = [0u32; 2];
         let mut left = rng.range(300.0, 900.0) as i32;
         let mut fresh = true;
         let mut told = Out(Vec::new());
@@ -399,10 +320,7 @@ fn main() {
                     count += packet(&mut told, p, c, after);
                 }
             });
-            for h in m.s.hits.drain(..) {
-                combo[h.attacker] += 1;
-                combo[h.victim] = 0;
-            }
+            m.s.hits.clear();
             m.s.splashes.clear();
             m.s.landings.clear();
             if id == 0 {
@@ -423,7 +341,7 @@ fn main() {
             }
             ag[id].before_tick(&m.c[id], &m.world);
             let mut obs = [0f32; OBS_DIM];
-            ag[id].write_obs(&m.c[id], &m.world, &m.ccfg, &d, [combo[id], combo[1 - id]], &mut obs);
+            ag[id].write_obs(&m.c[id], &m.world, &m.ccfg, &d, &mut obs);
             let action = choose[id].next();
             if id == 0 {
                 o.b(fresh);
@@ -434,9 +352,7 @@ fn main() {
                 o.n(count);
                 o.0.append(&mut told.0);
                 count = 0;
-                view(&mut o, &m.c[0], &m.world, &m.ccfg);
-                o.n(combo[0]);
-                o.n(combo[1]);
+                o.0.append(&mut view(&m.c[0], &m.world, &m.ccfg));
                 for x in obs {
                     o.n(x);
                 }
