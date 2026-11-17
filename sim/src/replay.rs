@@ -9,6 +9,7 @@
 //! reproduce the recorded state and the recorded outgoing packets, so the
 //! two halves need no common clock.
 use crate::aabb::Aabb;
+use crate::agent::{self, Agent, Duel, ACT_HEADS, OBS_DIM, VIEW_HEAD, VIEW_THROWN};
 use crate::client::{Client, ClientCfg, Input};
 use crate::mth::{JavaRandom, Rng};
 use crate::net::{Bar, Item, Kind, Rows, ThrownEv, C2S, S2C, SLOT_SWORD};
@@ -557,6 +558,9 @@ fn replay_client(lines: &[Line], world: &World, speed: i8, sens: f32, o: &Option
         if l.has("rhp") {
             r.health = l.f("rhp");
         }
+        if l.has("rfx") {
+            r.fx = l.i("rfx") != 0;
+        }
     };
     load(&mut c, init);
     if has_remote {
@@ -573,6 +577,25 @@ fn replay_client(lines: &[Line], world: &World, speed: i8, sens: f32, o: &Option
     let mut out: Vec<C2S> = Vec::new();
     let mut sent: Vec<C2S> = Vec::new();
     let mut ids = PearlIds::default();
+    // A recording made with an agent at the keys says so, with the duel the
+    // agent was told it is in. An agent here is then shown the same and
+    // asked for the same.
+    let duel = lines.iter().find(|l| l.tag == "AGENT").map(|l| {
+        let d = Duel {
+            arena_half: l.d("half"),
+            floor_y: l.d("floor"),
+            real_health: l.b("health"),
+            hit_health: l.f("hit"),
+            pearl_cooldown: l.i("pearlcd") as i32,
+            drink_window_s: l.d("drink"),
+        };
+        (d, [l.d("ping"), l.d("oping")], l.d("cps"))
+    });
+    let mut ag = duel.as_ref().map(|(_, ping, cps)| Agent::new(*ping, *cps, c.lp.l.body.pos));
+    let mut asked: Option<Input> = None;
+    let mut rng = Rng::new(1);
+    // Whether what was compared before a tick was the same.
+    let mut before_ok = true;
     let mut i = lines.iter().position(|l| l.tag == "CINIT").unwrap() + 1;
     while i < lines.len() {
         let l = &lines[i];
@@ -612,6 +635,66 @@ fn replay_client(lines: &[Line], world: &World, speed: i8, sens: f32, o: &Option
                     sent.push(p);
                 }
             }
+            // What the real client held when its packets were in and its
+            // tick was to come, as the mod reads it.
+            "CV" => {
+                let tick = l.words[0].clone();
+                let hex = |s: &str| match s.strip_prefix('x') {
+                    Some(h) => f64::from_bits(u64::from_str_radix(h, 16).unwrap()),
+                    None => s.parse::<f64>().unwrap(),
+                };
+                let mut want: Vec<f64> = l.s("v").split(',').map(hex).collect();
+                let got = agent::view(&c, world, &cfg);
+                // The game's numbers of pearls and potions are its own.
+                let mut k = VIEW_HEAD;
+                while k < want.len() {
+                    want[k] = ids.get(want[k] as i64).map(|x| x as f64).unwrap_or(-1.0);
+                    k += VIEW_THROWN;
+                }
+                let off: Vec<usize> = if want.len() != got.len() {
+                    vec![VIEW_HEAD - 1]
+                } else {
+                    (0..got.len()).filter(|&k| got[k].to_bits() != want[k].to_bits()).collect()
+                };
+                rep.count("views compared", 1);
+                rep.count("views with a pearl or a potion", (got.len() > VIEW_HEAD) as usize);
+                let same = rep.note("view", off.is_empty(), || {
+                    let what: Vec<String> = off
+                        .iter()
+                        .take(8)
+                        .map(|&k| format!("{} {:?} for {:?}", agent::view_name(k), got.get(k).copied().unwrap_or(f64::NAN), want.get(k).copied().unwrap_or(f64::NAN)))
+                        .collect();
+                    format!("tick {tick}: the simulator has {}", what.join(", "))
+                });
+                rep.count("views that differ", !same as usize);
+                before_ok &= same;
+            }
+            // What the agent in the real client showed its policy.
+            "CO" => {
+                if let (Some(a), Some((d, _, _))) = (ag.as_mut(), duel.as_ref()) {
+                    let tick = l.words[0].clone();
+                    a.before_tick(&c, world);
+                    let mut o = [0f32; OBS_DIM];
+                    a.write_obs(&c, world, &cfg, d, &mut o);
+                    let want: Vec<f32> = l.s("o").split(',').map(|s| f32::from_bits(u32::from_str_radix(s, 16).unwrap())).collect();
+                    let off: Vec<usize> = (0..OBS_DIM).filter(|&k| want.get(k).map(|w| w.to_bits()) != Some(o[k].to_bits())).collect();
+                    rep.count("observations compared", 1);
+                    let same = rep.note("observation", off.is_empty(), || {
+                        let what: Vec<String> = off.iter().take(8).map(|&k| format!("number {k} {:?} for {:?}", o[k], want.get(k))).collect();
+                        format!("tick {tick}: the simulator shows {}", what.join(", "))
+                    });
+                    rep.count("observations that differ", !same as usize);
+                    before_ok &= same;
+                }
+            }
+            // What its policy chose.
+            "CA" => {
+                if let (Some(a), Some((d, _, _))) = (ag.as_mut(), duel.as_ref()) {
+                    let action: Vec<i32> = l.s("a").split(',').map(|s| s.parse().unwrap()).collect();
+                    assert_eq!(action.len(), ACT_HEADS);
+                    asked = Some(a.keys(&c, d, &action, &mut rng));
+                }
+            }
             "CI" => {
                 let w = &l.words;
                 let n = |k: usize| w[k].parse::<i32>().unwrap();
@@ -620,18 +703,30 @@ fn replay_client(lines: &[Line], world: &World, speed: i8, sens: f32, o: &Option
                     strafe: n(2) as i8,
                     jump: n(3) != 0,
                     sprint_key: n(4) != 0,
+                    // More than one: that many clicks inside the tick.
                     attack: n(5) != 0,
                     dx: n(6),
                     dy: -n(7),
-                    extra_clicks: 0,
+                    extra_clicks: (n(5).max(1) - 1) as u8,
                     use_item: w.len() > 8 && n(8) != 0,
                     use_again: w.len() > 8 && n(8) == 2,
                     slot_key: if w.len() > 9 { n(9) as u8 } else { 0 },
                     inv: if w.len() > 10 { n(10) as u8 } else { 0 },
                 };
+                if let Some(k) = asked.take() {
+                    let tick = &l.words[0];
+                    rep.count("ticks with the agent at the keys", 1);
+                    let same = rep.note("keys", k == inp, || format!("tick {tick}: the simulator's agent presses {k:?}, the game's {inp:?}"));
+                    rep.count("keys that differ", !same as usize);
+                    before_ok &= same;
+                }
                 let (was_using, was_open) = (c.lp.using_item, c.lp.inv_open);
                 let t = c.tick(world, &inp, &cfg, &mut out);
-                rep.count("clicks", inp.attack as usize);
+                if let (Some(a), Some((d, _, _))) = (ag.as_mut(), duel.as_ref()) {
+                    a.ticked(&c, d, &inp, &t);
+                }
+                rep.count("clicks", inp.attack as usize + inp.extra_clicks as usize);
+                rep.count("ticks with two clicks", (inp.extra_clicks > 0) as usize);
                 rep.count("ticks on target", t.pick.entity as usize);
                 rep.count("right clicks", t.used as usize);
                 rep.count("pearls thrown", t.threw as usize);
@@ -667,7 +762,7 @@ fn replay_client(lines: &[Line], world: &World, speed: i8, sens: f32, o: &Option
                         }
                     } else if m.tag == "CT" {
                         state = Some(m);
-                    } else if m.tag == "CP" || m.tag == "CI" || m.tag == "END" {
+                    } else if m.tag == "CP" || m.tag == "CI" || m.tag == "CV" || m.tag == "CO" || m.tag == "CA" || m.tag == "END" {
                         break;
                     }
                     i += 1;
@@ -681,7 +776,8 @@ fn replay_client(lines: &[Line], world: &World, speed: i8, sens: f32, o: &Option
                     println!("client tick {tick}");
                 }
                 let lp = &c.lp;
-                let mut ok = true;
+                let mut ok = before_ok;
+                before_ok = true;
                 let p = lp.l.body.pos;
                 let mo = lp.l.body.motion;
                 let fd = |name: &'static str, got: f64, want: f64, rep: &mut Report| {

@@ -10,8 +10,13 @@ def patch(rel, edits):
     out = os.path.join(DST, rel)
     os.makedirs(os.path.dirname(out), exist_ok=True)
     open(out, "w").write(s)
+# Inside the client tick where Forge calls a mod at its start and at its end: after the
+# click delay has been counted down, and after everything else.
 patch("net/minecraft/client/Minecraft.java", [
-    ("this.runTick();", "rig.Rig.clientPre(this); this.runTick(); rig.Rig.clientPost(this);"),
+    ("            --this.rightClickDelayTimer;\n        }\n\n        this.mcProfiler.startSection(\"gui\");",
+     "            --this.rightClickDelayTimer;\n        }\n\n        rig.Rig.clientPre(this);\n        this.mcProfiler.startSection(\"gui\");"),
+    ("        this.mcProfiler.endSection();\n        this.systemTime = getSystemTime();",
+     "        this.mcProfiler.endSection();\n        rig.Rig.clientPost(this);\n        this.systemTime = getSystemTime();"),
 ])
 patch("net/minecraft/server/MinecraftServer.java", [
     ("        long i = System.nanoTime();\n        ++this.tickCounter;", "        long i = System.nanoTime();\n        rig.Rig.serverPre(this);\n        ++this.tickCounter;"),

@@ -1060,3 +1060,30 @@ pub fn view(c: &Client, world: &World, ccfg: &ClientCfg) -> Vec<f64> {
 /// of them is how many those are), and the numbers of each of those.
 pub const VIEW_HEAD: usize = 101;
 pub const VIEW_THROWN: usize = 14;
+
+/// What the numbers of `view` are, for a message about one of them.
+pub fn view_name(k: usize) -> String {
+    const HEAD: [&str; VIEW_HEAD] = [
+        "x", "y", "z", "motion x", "motion y", "motion z", "on ground", "at a wall", "fall distance", "yaw", "pitch",
+        "sprinting", "jump ticks", "speed attribute", "sprint told", "hurt time",
+        "knock x", "knock y", "knock z", "ticks since knock", "ticks since swing", "ticks since hit", "ticks since hurt", "ticks since moved",
+        "using an item", "click delay", "use flag", "slot in hand", "pearls", "potions", "drinks", "bottles", "steak",
+        "potions seen", "potions pending", "food", "saturation", "ticks of speed", "health",
+        "drinking or eating", "slot in use", "ticks of use", "inventory open",
+        "row 0", "row 1", "row 2", "row 3", "row 4", "row 5", "row 6", "row 7", "row 8", "row 9", "row 10", "row 11", "row 12", "row 13",
+        "row 14", "row 15", "row 16", "row 17", "row 18", "row 19", "row 20", "row 21", "row 22", "row 23", "row 24", "row 25", "row 26",
+        "other x", "other y", "other z", "other before x", "other before y", "other before z",
+        "other heading x", "other heading y", "other heading z", "other steps",
+        "other box min x", "other box min y", "other box min z", "other box max x", "other box max y", "other box max z",
+        "other on ground", "other sprinting", "other hurt time", "other swinging", "other swing", "other yaw", "other pitch",
+        "other ticks since hurt", "other ticks since moved far", "other using", "other holds", "other health", "other particles",
+        "on target", "thrown",
+    ];
+    const THROWN: [&str; VIEW_THROWN] =
+        ["number", "kind", "own", "x", "y", "z", "motion x", "motion y", "motion z", "age", "air", "server x", "server y", "server z"];
+    if k < VIEW_HEAD {
+        HEAD[k].to_string()
+    } else {
+        format!("thrown {} {}", (k - VIEW_HEAD) / VIEW_THROWN, THROWN[(k - VIEW_HEAD) % VIEW_THROWN])
+    }
+}

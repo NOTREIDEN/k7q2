@@ -48,3 +48,9 @@ inv1 pot 131 health=1 armor=1 prot=2 sharp=2 potions=3 drinks=1 steak=64 pearls=
 inv2 pot 135 health=1 armor=1 prot=2 sharp=2 potions=7 pearls=16 steak=64 inv=2 invpots=16 invdrinks=2 invbottles=2 blocks=1 many=1 refill=6 fakeinv=0.04
 inv3 pot 133 health=1 armor=1 potions=1 drinks=3 steak=64 speed=-1 food=7,0 inv=2 invpots=6 invdrinks=12 invbottles=4 many=1 refill=8 sensitivity=0.83 fakeinv=0.05 fakedrink=0.03
 inv4 pot 134 health=1 armor=1 prot=1 sharp=1 potions=4 drinks=2 pearls=16 inv=2 invpots=18 invdrinks=6 invbottles=3 many=1 again=1 refill=6 speedticks=400 food=14,1 ticks=2400 fakeinv=0.03
+click1 fight 141 double=0.4
+click2 block 142 double=0.4 holds=1
+click3 pot 143 health=1 armor=1 prot=2 sharp=2 potions=7 many=1 refill=6 double=0.5
+bot1 pot 151 health=1 armor=1 prot=2 sharp=2 potions=6 steak=64 pearls=16 inv=1 invpots=18 many=1 refill=6 fakepot=0.03 fake=0.02 ticks=1500 view=6 ping=200,60 cps=15.5 arena=6
+bot2 pot 152 health=1 armor=1 prot=4 sharp=5 potions=4 drinks=2 steak=64 pearls=16 inv=2 invpots=10 invdrinks=4 invbottles=2 many=1 refill=8 speedticks=500 food=15,1 sensitivity=0.83 fakepot=0.04 ticks=1500 view=6 ping=200,40 cps=16.5 arena=6
+bot3 pot 153 health=1 armor=1 prot=2 sharp=2 potions=7 pearls=16 many=1 roof=0 refill=6 ticks=1200 view=8 ping=190,80 cps=14.5 arena=20

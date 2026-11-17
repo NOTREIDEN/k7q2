@@ -650,6 +650,17 @@ def main():
                 t += 1
     else:
         raise SystemExit("unknown script " + name)
+    # double=P: that share of the clicks are two clicks inside one tick, as a mouse clicked
+    # more than twenty times a second sends them.
+    if "double" in opts:
+        twice = random.Random(seed + 9000)
+        seq = [s[:4] + (2,) + s[5:] if s[4] == 1 and twice.random() < float(opts["double"]) else s for s in seq]
+    # What an agent at the keys is told (see RIG_AGENT in run.sh): view=CHUNKS the client
+    # sees around it, ping=OWN,OTHER in milliseconds, cps its click rate, arena half the
+    # side of the arena.
+    for k in ("view", "ping", "cps", "arena"):
+        if k in opts:
+            lines.append("%s %s" % (k, opts[k].replace(",", " ")))
     lines += ["C " + " ".join("%d" % v for v in s) for s in seq]
     open(out, "w").write("\n".join(lines) + "\n")
     print(out, len(seq), "ticks")

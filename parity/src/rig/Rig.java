@@ -72,7 +72,8 @@ import net.minecraft.world.WorldType;
  * every packet handled and sent and the players' state on both sides.
  *
  * Hooks (one line each, added to the decompiled sources):
- *   Minecraft.runGameLoop: clientPre(this) before runTick(), clientPost(this) after
+ *   Minecraft.runTick:     clientPre(this) once the click delay is counted down, clientPost(this)
+ *                          at the end: where Forge calls a mod at the start and the end of a tick
  *   MinecraftServer.tick:  serverPre(this) at the top, serverPost(this) after the world update
  *   PacketThreadUtil:      onHandle(packet, handler) just before processPacket
  *   NetHandlerPlayServer.sendPacket: onServerSend(this, packet) at the top
@@ -81,6 +82,19 @@ import net.minecraft.world.WorldType;
 public final class Rig {
     static final String SCRIPT = System.getProperty("rig.script");
     static final String OUT = System.getProperty("rig.out", "trace.log");
+    /**
+     * Who is at the keys. Not set: the rig presses the script's keys itself. "view": the mod's
+     * own code (mod/client) reads the client and presses the script's keys, and what it read is
+     * written down. A file: the policy in that file plays through the mod's code, and what it
+     * was shown, what it chose and the keys that came of it are written down as well.
+     */
+    static final String AGENT = System.getProperty("rig.agent");
+    static pvpai.client.Bot bot;
+    static pvpai.core.Policy policy;
+    /** What an agent is told of the duel: its ping and the other's, its click rate, half the arena. */
+    static double ping = 200.0, otherPing = 60.0, cps = 15.5, arenaHalf = 24.0;
+    /** Chunks the client sees around it. */
+    static int viewDistance = 2;
     static PrintWriter out;
     static final Object lock = new Object();
 
@@ -219,6 +233,15 @@ public final class Rig {
                 enchSeed = Long.parseLong(p[1]);
             } else if (p[0].equals("block")) {
                 blocks.add(new int[] {Integer.parseInt(p[1]), Integer.parseInt(p[2]), Integer.parseInt(p[3])});
+            } else if (p[0].equals("ping")) {
+                ping = Double.parseDouble(p[1]);
+                otherPing = Double.parseDouble(p[2]);
+            } else if (p[0].equals("cps")) {
+                cps = Double.parseDouble(p[1]);
+            } else if (p[0].equals("arena")) {
+                arenaHalf = Double.parseDouble(p[1]);
+            } else if (p[0].equals("view")) {
+                viewDistance = Integer.parseInt(p[1]);
             }
         }
         r.close();
@@ -257,7 +280,7 @@ public final class Rig {
             gs.pauseOnLostFocus = false;
             gs.mouseSensitivity = sensitivity;
             gs.invertMouse = false;
-            gs.renderDistanceChunks = 2;
+            gs.renderDistanceChunks = viewDistance;
             gs.limitFramerate = 30;
             gs.fancyGraphics = false;
             gs.ambientOcclusion = 0;
@@ -317,6 +340,55 @@ public final class Rig {
             }
             int[] in = inputs.get(ctick);
             boolean open = mc.currentScreen instanceof GuiInventory;
+            if (bot != null) {
+                pvpai.core.Keys k = null;
+                if (policy == null) {
+                    // The script's keys, pressed by the mod's code.
+                    k = new pvpai.core.Keys();
+                    if (open || in[9] != 0) {
+                        k.inv = in[9];
+                        if (open) {
+                            int slot = in[9] >= 73 ? in[9] - 64 : in[9] >= 9 && in[9] <= 44 ? in[9] : 0;
+                            boolean shut = in[9] == 0 || in[9] >= 73;
+                            if (slot != 0 && !clickable(mc.thePlayer, slot)) k.inv = shut ? 0 : 1;
+                        }
+                    } else {
+                        k.forward = in[0];
+                        k.strafe = in[1];
+                        k.jump = in[2] != 0;
+                        k.sprintKey = in[3] != 0;
+                        k.attack = in[4] != 0;
+                        k.extraClicks = Math.max(in[4], 1) - 1;
+                        k.dx = in[5];
+                        k.dy = -in[6];
+                        k.useItem = in[7] != 0;
+                        k.useAgain = in[7] == 2;
+                        k.slotKey = in[8];
+                    }
+                }
+                k = bot.look(k);
+                StringBuilder sb = new StringBuilder("CV " + ctick + " v=");
+                double[] v = bot.view().list();
+                for (int i = 0; i < v.length; i++) sb.append(i > 0 ? "," : "").append(num(v[i]));
+                log(sb.toString());
+                if (policy != null) {
+                    sb = new StringBuilder("CO " + ctick + " o=");
+                    float[] o = bot.shown();
+                    for (int i = 0; i < o.length; i++) sb.append(i > 0 ? "," : "").append(hf(o[i]));
+                    log(sb.toString());
+                    sb = new StringBuilder("CA " + ctick + " a=");
+                    int[] a = bot.action();
+                    for (int i = 0; i < a.length; i++) sb.append(i > 0 ? "," : "").append(a[i]);
+                    log(sb.toString());
+                }
+                log("CI " + ctick + " " + k.forward + " " + k.strafe + " " + (k.jump ? 1 : 0) + " " + (k.sprintKey ? 1 : 0) + " "
+                    + (k.attack ? 1 + k.extraClicks : 0) + " " + k.dx + " " + (-k.dy) + " " + (k.useItem ? k.useAgain ? 2 : 1 : 0) + " " + k.slotKey + " " + k.inv);
+                bot.press();
+                if (mc.inGameHasFocus) mc.mouseHelper.ungrabMouseCursor();
+                mc.inGameHasFocus = false;
+                inClientTick = true;
+                return;
+            }
             if (open || in[9] != 0) {
                 // A tick with the inventory screen: every key is up, as the game leaves
                 // them when a screen opens, and whatever else the script asks is left out.
@@ -353,7 +425,8 @@ public final class Rig {
             key(gs.keyBindSprint, in[3] != 0);
             // A number key: the game takes it before the clicks of the same tick.
             if (in[8] > 0) KeyBinding.onTick(gs.keyBindsHotbar[in[8] - 1].getKeyCode());
-            if (in[4] != 0) KeyBinding.onTick(gs.keyBindAttack.getKeyCode());
+            // More than one: that many clicks inside the tick.
+            for (int n = 0; n < in[4]; n++) KeyBinding.onTick(gs.keyBindAttack.getKeyCode());
             // The right button: a press when it goes down, then held. 2 is
             // the button let go and pressed again since the last tick.
             boolean use = in[7] != 0;
@@ -417,6 +490,59 @@ public final class Rig {
 
     static void key(KeyBinding k, boolean down) {
         KeyBinding.setKeyBindState(k.getKeyCode(), down);
+    }
+
+    /** A number of a view: whole numbers as they are, the rest as the bits of the double after an x. */
+    static String num(double d) {
+        if (d == Math.rint(d) && Math.abs(d) < 1.0e9 && !(d == 0.0 && 1.0 / d < 0.0)) return Long.toString((long) d);
+        return "x" + hd(d);
+    }
+
+    /** The health a plain hit with the sword costs in this kit, on average over what Protection draws. */
+    static float hitHealth() {
+        float damage = 8.0F + 1.25F * (float) sharp;
+        int m = armor && prot > 0 ? Math.min(25, 4 * MathHelper.floor_float((float) (6 + prot * prot) / 3.0F * 0.75F)) : 0;
+        float k = Math.min((float) ((m + 1) >> 1) + (float) (m >> 1) * 0.5F, 20.0F);
+        return damage * (float) (25 - (armor ? 20 : 0)) / 25.0F * (25.0F - k) / 25.0F;
+    }
+
+    /** Put the mod's code at the keys for the recording that starts now. */
+    static void seat(final Minecraft mc) throws Exception {
+        EntityOtherPlayerMP o = other(mc);
+        if (AGENT == null || o == null) return;
+        pvpai.core.Duel d = new pvpai.core.Duel();
+        d.arenaHalf = arenaHalf;
+        d.floorY = 4.0;
+        d.realHealth = health;
+        d.hitHealth = hitHealth();
+        d.pearlCooldown = 0;
+        d.drinkWindowS = 15.0;
+        pvpai.client.Bot.Chooser chooser = null;
+        if (!AGENT.equals("view")) {
+            java.io.InputStream in = new java.io.BufferedInputStream(new java.io.FileInputStream(AGENT));
+            policy = pvpai.core.Policy.load(in);
+            in.close();
+            policy.reset();
+            final java.util.Random draws = new java.util.Random(7L);
+            chooser = new pvpai.client.Bot.Chooser() {
+                public int[] choose(float[] obs) {
+                    return policy.act(obs, draws);
+                }
+            };
+            log("AGENT half=" + hd(d.arenaHalf) + " floor=" + hd(d.floorY) + " health=" + (d.realHealth ? 1 : 0) + " hit=" + hf(d.hitHealth)
+                + " pearlcd=" + d.pearlCooldown + " drink=" + hd(d.drinkWindowS) + " ping=" + hd(ping) + " oping=" + hd(otherPing) + " cps=" + hd(cps));
+        }
+        bot = new pvpai.client.Bot(mc, o, d, ping, otherPing, cps, chooser);
+        pvpai.client.Wire.install(mc, mc.getNetHandler().getNetworkManager(), new pvpai.client.Wire.Tap() {
+            public void before(Packet<?> p) {
+                onHandle(p, mc.getNetHandler());
+                bot.before(p);
+            }
+
+            public void after(Packet<?> p) {
+                bot.after(p);
+            }
+        });
     }
 
     static EntityOtherPlayerMP other(Minecraft mc) {
@@ -531,8 +657,9 @@ public final class Rig {
         if (e != null && speedTicks > 0) set(e, PotionEffect.class, "duration", Integer.valueOf(speedTicks));
     }
 
-    static void clientInit(Minecraft mc) {
+    static void clientInit(Minecraft mc) throws Exception {
         speedLeft(mc.thePlayer);
+        seat(mc);
         log("CINIT " + local(mc.thePlayer) + remote(other(mc)));
     }
 
@@ -540,6 +667,7 @@ public final class Rig {
         if (!inClientTick) return;
         inClientTick = false;
         try {
+            if (bot != null) bot.tickEnd();
             MovingObjectPosition m = mc.objectMouseOver;
             // 1 the other player, 2 a block, 0 nothing.
             int pick = m == null ? 0 : m.typeOfHit == MovingObjectPosition.MovingObjectType.ENTITY ? 1

@@ -1,5 +1,6 @@
 #!/bin/bash
-# Patch five decompiled sources with the hook lines and compile them with the rig.
+# Patch five decompiled sources with the hook lines and compile them with the rig
+# and with the mod's own code (mod/core and mod/client), which the rig can put at the keys.
 #   MCP=/path/to/mcp-919 ./build.sh
 # Needs a Java 8 JDK and an MCP-919 workspace that has been decompiled and
 # recompiled once (src/minecraft, bin/minecraft, jars/).
@@ -14,5 +15,5 @@ python3 "$HERE/patch.py" "$MCP/src/minecraft" "$HERE/work/patched"
 LIBS="$MCP/bin/minecraft:$(ls "$HERE"/dl/*.jar | tr '\n' ':')$(find "$MCP/jars/libraries" -name '*.jar' | grep -v -e /org/lwjgl/ -e natives -e /tv/twitch/ | tr '\n' ':')"
 echo "$LIBS" > "$HERE/work/libs.txt"
 (unset JAVA_TOOL_OPTIONS; "$JAVAC" -nowarn -encoding UTF-8 -source 1.8 -target 1.8 -cp "$LIBS" -d "$HERE/work/classes" \
-  $(find "$HERE/work/patched" "$HERE/src" -name '*.java') 2>&1 | grep -v "^Note:" || true)
+  $(find "$HERE/work/patched" "$HERE/src" "$HERE/../mod/core/src/main" "$HERE/../mod/client/src/main" -name '*.java') 2>&1 | grep -v "^Note:" || true)
 echo "built $HERE/work/classes"
