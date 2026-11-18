@@ -598,3 +598,48 @@ fn on_a_server_that_carries_throws_a_potion_thrown_running_flies_on_and_the_agen
     assert_eq!((plain.0, carried.0), (0.0, 1.0), "{out:?}");
     assert!(carried.1 > plain.1 + 0.5, "{out:?}");
 }
+
+#[test]
+fn the_teacher_of_turned_throws_says_what_it_would_do_and_plays_nothing() {
+    let mut p = params();
+    p.throw_carry_prob = 1.0;
+    let mut taught = p;
+    taught.teach = 1.0;
+    let (mut a, mut b) = (Env::new(Mode::SelfPlay, p, 4), Env::new(Mode::SelfPlay, taught, 4));
+    let act = |k: usize| {
+        let mut x = with(0, 1);
+        x[3] = 1;
+        if k == 3 {
+            x[9] = BAR_TURN;
+            x[11] = 10;
+        }
+        x
+    };
+    let mut seen = vec![];
+    for k in 0..30 {
+        run(&mut a, 1, |_| act(k));
+        run(&mut b, 1, |_| act(k));
+        // The same play either way.
+        for i in 0..2 {
+            assert_eq!(a.m.c[i].lp.l.body.pos, b.m.c[i].lp.l.body.pos);
+            assert_eq!((a.m.c[i].lp.l.yaw, a.m.c[i].lp.l.pitch), (b.m.c[i].lp.l.yaw, b.m.c[i].lp.l.pitch));
+            assert_eq!(a.m.s.p[i].health, b.m.s.p[i].health);
+        }
+        assert_eq!(a.teach, [-1; ACT_HEADS]);
+        seen.push(b.teach);
+    }
+    let none = [-1; ACT_HEADS];
+    assert!(seen[..3].iter().all(|t| *t == none));
+    // The turn: a pitch, and sprinting along the view with the mouse still.
+    let t = seen[3];
+    assert!((0..THROW_PITCHES as i32).contains(&t[11]), "{t:?}");
+    assert_eq!((t[0], t[1], t[2], t[3], t[5], t[10]), (1, 0, 0, 1, 13, 0));
+    // The click: the same, the pitch still too.
+    assert_eq!((seen[4][0], seen[4][3], seen[4][5], seen[4][6], seen[4][10], seen[4][11]), (1, 1, 13, 10, 0, -1));
+    // Then the view turns back by the half turn and it walks the way it ran.
+    assert_eq!(FLICK_BINS[seen[5][10] as usize], 1200);
+    assert!(seen[5][0] >= 0 && seen[5][3] == 0);
+    let last = (5..30).rev().find(|&k| seen[k] != none).expect("it says how to walk");
+    assert!(last <= 3 + 14, "{last}");
+    assert!(seen[last + 1..].iter().all(|t| *t == none));
+}

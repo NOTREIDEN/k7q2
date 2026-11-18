@@ -177,17 +177,22 @@ class Policy(nn.Module):
         logp = torch.stack(logps, -1)
         return torch.stack(acts, -1), logp if per_head else logp.sum(-1), self.value(h, priv), state
 
-    def evaluate_seq(self, obs, priv, actions, state, done, per_head=False):
+    def evaluate_seq(self, obs, priv, actions, state, done, per_head=False, teach=None):
         """Log-prob, entropy and value for stored sequences [T, B, ...];
-        with `per_head`, the log-prob of each control apart [T, B, heads]."""
+        with `per_head`, the log-prob of each control apart [T, B, heads].
+        With `teach` (choices like `actions`, -1 for none), the log-prob of
+        those choices per control as well, 0 where there is none."""
         hs = self.core_seq(obs, state, done)
-        logps, ent = [], 0.0
+        logps, tlogps, ent = [], [], 0.0
         for i, lg in enumerate(self.logits(hs)):
             d = torch.distributions.Categorical(logits=lg)
             logps.append(d.log_prob(actions[..., i]))
+            if teach is not None:
+                tlogps.append(d.log_prob(teach[..., i].clamp(min=0)) * (teach[..., i] >= 0))
             ent = ent + d.entropy()
         logp = torch.stack(logps, -1)
-        return logp if per_head else logp.sum(-1), ent, self.value(hs, priv)
+        out = (logp if per_head else logp.sum(-1), ent, self.value(hs, priv))
+        return out + (torch.stack(tlogps, -1),) if teach is not None else out
 
 
 def fit_state(sd, policy, still=False):

@@ -37,7 +37,7 @@ PARAM = {
     "lesson_prob": 105, "lessons": 106, "lesson_dist_min": 107, "lesson_dist_max": 108,
     "drink_window_s": 109, "w_miss": 110, "w_pot_time": 111, "bot_runner": 112,
     "extreme_share": 113, "w_shake": 114, "pot_strict_prob": 115, "pot_strict": 116,
-    "w_gift": 117, "w_hungry": 118, "w_slow": 119, "drinks_stowed": 120, "bot_presser": 121, "w_inv_near": 122, "inv_near_dist": 123, "league_steal": 124, "throw_carry_prob": 125,
+    "w_gift": 117, "w_hungry": 118, "w_slow": 119, "drinks_stowed": 120, "bot_presser": 121, "w_inv_near": 122, "inv_near_dist": 123, "league_steal": 124, "throw_carry_prob": 125, "teach": 126,
 }
 
 STAT_NAMES = [
@@ -101,6 +101,7 @@ def _load(path):
     lib.pvp_act_dims.argtypes = [ctypes.POINTER(ctypes.c_int32)]
     lib.pvp_vec_view.argtypes = [ctypes.c_void_p, ctypes.c_int32, f32p]
     lib.pvp_vec_overridden.argtypes = [ctypes.c_void_p, ctypes.POINTER(ctypes.c_uint8)]
+    lib.pvp_vec_teach.argtypes = [ctypes.c_void_p, ctypes.POINTER(ctypes.c_int32)]
     return lib
 
 
@@ -168,6 +169,14 @@ class VecEnv:
         league_steal): that tick was not the policy's."""
         out = np.zeros(self.n, np.uint8)
         self.lib.pvp_vec_overridden(self.h, out.ctypes.data_as(ctypes.POINTER(ctypes.c_uint8)))
+        return out
+
+    def teach(self):
+        """Per duel and control, what the teacher of the agent that made
+        the last tick would have chosen on it, -1 where it has no opinion
+        (only with the parameter teach on)."""
+        out = np.zeros((self.n, len(self.act_dims)), np.int32)
+        self.lib.pvp_vec_teach(self.h, out.ctypes.data_as(ctypes.POINTER(ctypes.c_int32)))
         return out
 
     def view(self, index=0):

@@ -29,6 +29,9 @@ class Stream:
         # 0 where others laid their keys over it or a drill changed it: those
         # choices teach the value, not the policy.
         self.own = torch.ones(horizon, n, heads)
+        # What a teacher would have chosen, -1 where it has nothing to say.
+        self.teach = torch.full((horizon, n, heads), -1, dtype=torch.long)
+        self.pend_teach = None
         self.h0 = torch.zeros(n, hidden)
         self.c0 = torch.zeros(n, hidden)
         self.state = (torch.zeros(n, hidden), torch.zeros(n, hidden))
@@ -43,7 +46,12 @@ class Stream:
         act, logp, val, self.state = policy.act(obs, priv, before, per_head=True)
         self.pend = (obs, priv, act, logp, val, before)
         self.pend_own = torch.ones(self.n, act.shape[-1])
+        self.pend_teach = None
         return act.numpy().astype(np.int32)
+
+    def taught(self, teach_np):
+        """What a teacher would have chosen in place of the pending actions."""
+        self.pend_teach = torch.from_numpy(teach_np.astype(np.int64))
 
     def disown(self, overridden_np):
         """Mark the pending actions whose keys others laid over."""
@@ -94,6 +102,7 @@ class Stream:
             self.obs[t], self.priv[t], self.act[t] = obs, priv, act
             self.logp[t], self.val[t], self.rew[t], self.done[t] = logp, val, rew, done
             self.own[t] = self.pend_own
+            self.teach[t] = -1 if self.pend_teach is None else self.pend_teach
             self.t += 1
         self.pend = None
 
@@ -147,6 +156,9 @@ def ppo_update(policy, opt, streams, vs, cfg):
     logp_old = cat([s.logp for s, _, _ in parts])
     done = cat([s.done for s, _, _ in parts])
     own = cat([s.own for s, _, _ in parts])
+    teach = cat([s.teach for s, _, _ in parts])
+    teach_coef = cfg.get("teach_coef", 0.0)
+    use_teach = teach_coef > 0 and bool((teach >= 0).any())
     adv = cat([a for _, a, _ in parts])
     ret = cat([r for _, _, r in parts])
     h0 = cat([s.h0 for s, _, _ in parts], 0)
@@ -161,7 +173,9 @@ def ppo_update(policy, opt, streams, vs, cfg):
     for _ in range(cfg["epochs"]):
         perm = torch.randperm(B)
         for mb in perm.chunk(cfg["minibatches"]):
-            logp_h, ent, v = policy.evaluate_seq(obs[:, mb], priv[:, mb], act[:, mb], (h0[mb], c0[mb]), done[:, mb], per_head=True)
+            got = policy.evaluate_seq(obs[:, mb], priv[:, mb], act[:, mb], (h0[mb], c0[mb]), done[:, mb], per_head=True,
+                                      teach=teach[:, mb] if use_teach else None)
+            logp_h, ent, v = got[:3]
             o = own[:, mb]
             logp = (logp_h * o).sum(-1)
             ratio = torch.exp(logp - (logp_old[:, mb] * o).sum(-1))
@@ -171,6 +185,13 @@ def ppo_update(policy, opt, streams, vs, cfg):
             v_loss = 0.5 * (v - ret_n[:, mb]).pow(2).mean()
             entropy = ent.mean()
             loss = pi_loss + cfg["vf_coef"] * v_loss - cfg["ent_coef"] * entropy
+            if use_teach:
+                # Imitation of the teacher on the choices it has an opinion
+                # on, on the steps that were the policy's own.
+                tm = ((teach[:, mb] >= 0) & (o.sum(-1, keepdim=True) > 0)).float()
+                teach_loss = -(got[3] * tm).sum() / tm.sum().clamp(min=1.0)
+                loss = loss + teach_coef * teach_loss
+                stats["teach_loss"] = stats.get("teach_loss", 0.0) + float(teach_loss)
             opt.zero_grad(set_to_none=True)
             loss.backward()
             torch.nn.utils.clip_grad_norm_(policy.parameters(), cfg["max_grad_norm"])

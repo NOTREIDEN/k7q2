@@ -42,6 +42,10 @@ def main():
     ap.add_argument("--minibatches", type=int, default=4)
     ap.add_argument("--epochs", type=int, default=3)
     ap.add_argument("--param", action="append", default=[], help="name=value for the simulator")
+    ap.add_argument("--teach-coef", type=float, default=0.0,
+                    help="weight of imitating the teacher of the potions thrown with a turn (the sim's parameter teach)")
+    ap.add_argument("--teach-full-until", type=float, default=0.0, help="samples, in millions, up to which that weight is whole")
+    ap.add_argument("--teach-until", type=float, default=0.0, help="samples, in millions, at which it has come down to nothing")
     ap.add_argument("--turn-drill", type=float, default=0.0,
                     help="share of the agent's potions asked for that are thrown with a turn behind instead, to practise them")
     ap.add_argument("--n-league", type=int, default=0, help="duels against earlier versions of the agent")
@@ -99,6 +103,17 @@ def main():
             for kv in args.league_param:
                 name, v = kv.split("=")
                 e.set_param(name, float(v))
+
+    def teach_coef(samples):
+        """The weight of imitating the teacher at this many samples: whole,
+        then down in a straight line to nothing."""
+        m = samples / 1e6
+        if args.teach_coef <= 0 or m >= args.teach_until:
+            return 0.0
+        if m <= args.teach_full_until:
+            return args.teach_coef
+        return args.teach_coef * (args.teach_until - m) / max(args.teach_until - args.teach_full_until, 1e-9)
+    teaching = False
 
     torch.manual_seed(base_seed)
     policy = Policy(any_env.obs_dim, any_env.priv_dim, any_env.act_dims, args.hidden)
@@ -208,26 +223,43 @@ def main():
             if "sp" in envs:
                 e = envs["sp"]
                 e.step(acts["sp0"])  # player 0 ticks; player 1 is next
+                if teaching:
+                    streams["sp0"].taught(e.teach())
                 streams["sp1"].close(policy, e.rew, e.done, e.fobs, e.fpriv, g, vsc, e.obs)
                 a1 = streams["sp1"].choose(policy, e.obs, e.priv)
                 e.step(a1)  # player 1 ticks; player 0 is next
+                if teaching:
+                    streams["sp1"].taught(e.teach())
                 streams["sp1"].disown(e.overridden())
                 streams["sp0"].close(policy, e.rew, e.done, e.fobs, e.fpriv, g, vsc, e.obs)
                 acts["sp0"] = pick("sp0", e.obs, e.priv)
             if "bot" in envs:
                 e = envs["bot"]
                 e.step(acts["bot"])
+                if teaching:
+                    streams["bot"].taught(e.teach())
                 streams["bot"].close(policy, e.rew, e.done, e.fobs, e.fpriv, g, vsc, e.obs)
                 acts["bot"] = pick("bot", e.obs, e.priv)
             for gi in range(groups):
                 k = f"lg{gi}"
                 e = envs[k]
                 e.step(acts[k])  # the agent ticks; the earlier version is next
+                if teaching:
+                    streams[k].taught(e.teach())
                 e.step(league.act(gi, e.obs, e.priv, e.done))  # it ticks; the agent is next
                 streams[k].close(policy, e.rew, e.done, e.fobs, e.fpriv, g, vsc, e.obs)
                 acts[k] = pick(k, e.obs, e.priv)
         t1 = time.time()
         info = ppo_update(policy, opt, list(streams.values()), vs, cfg)
+        # The teacher's weight for the next round of samples, and its
+        # teacher on in the duels while it has any.
+        cfg["teach_coef"] = teach_coef(remote.total_samples(machine_samples()) if remote is not None else machine_samples())
+        if (cfg["teach_coef"] > 0) != teaching:
+            teaching = cfg["teach_coef"] > 0
+            for e in envs.values():
+                e.set_param("teach", 1.0 if teaching else 0.0)
+            if args.worker_id == 0:
+                print(f"teacher {'on' if teaching else 'off'}", flush=True)
         t2 = time.time()
         iters += 1
         total_samples += info["samples"]

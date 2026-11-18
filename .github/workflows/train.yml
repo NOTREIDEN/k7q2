@@ -40,6 +40,7 @@ on:
           --param drinks_stowed=0.6 --param bot_presser=0.5 --param drink_window_s=30
           --param w_inv_near=0.5 --param throw_carry_prob=0.5 --param league_steal=0.3
           --league-param league_steal=0.5 --turn-drill 0.5
+          --teach-coef 1 --teach-full-until 15640 --teach-until 16130
       previous:
         description: Id of the run to continue from (empty starts from seed/stage1.pt)
         default: ""

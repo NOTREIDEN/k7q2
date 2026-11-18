@@ -96,6 +96,14 @@ pub unsafe extern "C" fn pvp_vec_overridden(p: *mut VecEnv, out: *mut u8) {
 }
 
 /// # Safety
+/// `out` must hold one i32 per control for each environment.
+#[no_mangle]
+pub unsafe extern "C" fn pvp_vec_teach(p: *mut VecEnv, out: *mut i32) {
+    let v = &*p;
+    v.teach(slice::from_raw_parts_mut(out, v.envs.len() * crate::agent::ACT_HEADS));
+}
+
+/// # Safety
 /// `out` must hold `pvp_stats_dim()` doubles.
 #[no_mangle]
 pub unsafe extern "C" fn pvp_vec_take_stats(p: *mut VecEnv, out: *mut f64) {

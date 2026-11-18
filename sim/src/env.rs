@@ -351,6 +351,10 @@ pub struct Params {
     /// Share of duels on a server whose throws take on the thrower's motion
     /// (`ServerCfg::throw_carry`).
     pub throw_carry_prob: f64,
+    /// Above 0, the agents' teachers say what they would have chosen
+    /// around a potion thrown with a turn (`agent::Teacher`,
+    /// `Env::teach`), for training to imitate.
+    pub teach: f64,
     /// Share of the players that start with potions of Speed at hand whose
     /// potions of it are in the inventory instead, as most players carry
     /// them: to drink one it has to be brought down first.
@@ -465,6 +469,7 @@ impl Default for Params {
             inv_near_dist: 4.5,
             league_steal: 0.0,
             throw_carry_prob: 0.0,
+            teach: 0.0,
             drinks_stowed: 0.0,
         }
     }
@@ -593,6 +598,7 @@ impl Params {
             123 => self.inv_near_dist = v,
             124 => self.league_steal = v,
             125 => self.throw_carry_prob = v,
+            126 => self.teach = v,
             113 => self.extreme_share = v,
             114 => self.w_shake = v as f32,
             115 => self.pot_strict_prob = v,
@@ -880,6 +886,9 @@ pub struct Env {
     /// way on the last tick made.
     steal: bool,
     pub overridden: bool,
+    /// What the teacher of the agent that made the last tick would have
+    /// chosen on it, -1 for each control it has no opinion on.
+    pub teach: [i32; ACT_HEADS],
     /// Whether each player's inventory was open on its last tick.
     was_open: [bool; 2],
     /// Each player's view after its last tick, its last turn sideways and
@@ -1329,6 +1338,7 @@ impl Env {
             off_run: [0; 2],
             steal: false,
             overridden: false,
+            teach: [-1; ACT_HEADS],
             over: false,
         };
         e.begin();
@@ -1766,8 +1776,10 @@ impl Env {
     pub fn step(&mut self, action: &[i32]) -> usize {
         let id = self.pending;
         let duel = self.duel();
+        self.ag[id].teacher.on = self.params.teach > 0.0;
         let mut inp = self.ag[id].keys(&self.m.c[id], &self.m.world, &duel, action, &mut self.rng);
         self.overridden = id == 1 && self.steal && !self.ag[1].busy() && inp.inv == 0 && steal_keys(&self.m.c[1], self.m.ccfg.mouse_f1 as f64 * 0.15, &mut inp);
+        self.teach = self.ag[id].teacher.teach;
         let out = self.m.client_tick(id, &inp);
         self.account(id, &inp, &out);
         let mut round_done = id == 1;
@@ -2118,6 +2130,14 @@ impl VecEnv {
     pub fn overridden(&self, out: &mut [u8]) {
         for (o, e) in out.iter_mut().zip(&self.envs) {
             *o = e.overridden as u8;
+        }
+    }
+
+    /// Per environment, what the teacher of the agent that made the last
+    /// tick would have chosen on it (`Env::teach`), ACT_HEADS numbers each.
+    pub fn teach(&self, out: &mut [i32]) {
+        for (o, e) in out.chunks_mut(ACT_HEADS).zip(&self.envs) {
+            o.copy_from_slice(&e.teach);
         }
     }
 
