@@ -391,6 +391,12 @@ pub struct Params {
     /// What dying costs on top of losing the duel (`w_win`): not dying is
     /// worth more than killing.
     pub w_death: f32,
+    /// Taken, in hits, from the thrower of a pearl when it throws it, and
+    /// given back if the other player dies within `pearl_kill_s` seconds:
+    /// a pearl is for a kill, not for its own sake. It never pays more
+    /// than it costs.
+    pub w_pearl_cost: f32,
+    pub pearl_kill_s: f64,
     /// Share of new duels that are a retry of one the first player lost,
     /// from a few seconds before its death (as GT Sophy trained on its
     /// mistakes): the same moment of the same duel, played again. Each lost
@@ -536,6 +542,8 @@ impl Default for Params {
             gank_prob: 0.0,
             gank_max: 1.0,
             w_death: 0.0,
+            w_pearl_cost: 0.0,
+            pearl_kill_s: 10.0,
             retry_prob: 0.0,
             league_steal: 0.0,
             throw_carry_prob: 0.0,
@@ -682,6 +690,8 @@ impl Params {
             138 => self.gank_prob = v,
             139 => self.w_death = v as f32,
             140 => self.gank_max = v,
+            141 => self.w_pearl_cost = v as f32,
+            142 => self.pearl_kill_s = v,
             132 => self.retry_prob = v,
             113 => self.extreme_share = v,
             114 => self.w_shake = v as f32,
@@ -972,6 +982,7 @@ struct Moment {
     combo: [u32; 2],
     ping_ms: [f64; 2],
     landed: Option<(usize, i32)>,
+    pearl_kill: [i32; 2],
     since_block: [i32; 2],
     pot_since: [i32; 2],
     pot_back: [bool; 2],
@@ -1020,6 +1031,9 @@ pub struct Env {
     /// The thrower of the last pearl that landed, and the server ticks left
     /// in which the next hit is counted for or against that pearl.
     landed: Option<(usize, i32)>,
+    /// Server ticks left in which a death of the other player gives each
+    /// player back what its last pearl cost (`w_pearl_cost`).
+    pearl_kill: [i32; 2],
     /// Own ticks since each player last had its sword up; 0 while it is.
     since_block: [i32; 2],
     /// Ticks since each player's last potion throw, whether its crosshair
@@ -1511,6 +1525,7 @@ impl Env {
             stash_priv: [[0.0; PRIV_DIM]; 2],
             ping_ms: ping,
             landed: None,
+            pearl_kill: [0; 2],
             since_block: [1000; 2],
             pot_since: [1000; 2],
             was_open: [false; 2],
@@ -1548,6 +1563,7 @@ impl Env {
             combo: self.combo,
             ping_ms: self.ping_ms,
             landed: self.landed,
+            pearl_kill: self.pearl_kill,
             since_block: self.since_block,
             pot_since: self.pot_since,
             pot_back: self.pot_back,
@@ -1571,6 +1587,7 @@ impl Env {
         self.combo = k.combo;
         self.ping_ms = k.ping_ms;
         self.landed = k.landed;
+        self.pearl_kill = k.pearl_kill;
         self.since_block = k.since_block;
         self.pot_since = k.pot_since;
         self.pot_back = k.pot_back;
@@ -1652,6 +1669,7 @@ impl Env {
         self.ep = Stats::default();
         self.bot_state = BotState::default();
         self.landed = None;
+        self.pearl_kill = [0; 2];
         self.since_block = [1000; 2];
         self.pot_since = [1000; 2];
         self.was_open = [false; 2];
@@ -1749,6 +1767,10 @@ impl Env {
                         }
                     } else {
                         self.rew_acc[a] += self.params.w_win;
+                        if self.pearl_kill[a] > 0 {
+                            self.rew_acc[a] += self.params.w_pearl_cost;
+                            self.pearl_kill[a] = 0;
+                        }
                     }
                 }
             }
@@ -2060,6 +2082,8 @@ impl Env {
         self.was_open[id] = open;
         if out.threw {
             self.ep.pearls[id] += 1.0;
+            self.rew_acc[id] -= self.params.w_pearl_cost;
+            self.pearl_kill[id] = (self.params.pearl_kill_s * 20.0).round().max(1.0) as i32;
             let o = &self.m.s.p[1 - id];
             let potting = o.in_hand().0 == Item::Potion || self.m.s.thrown.iter().any(|t| t.thrower == 1 - id && t.kind == Kind::Potion && !t.dead);
             let (a, b) = (&self.m.s.p[id].l.body.pos, &o.l.body.pos);
@@ -2155,6 +2179,9 @@ impl Env {
         if round_done {
             if let Some((who, left)) = self.landed {
                 self.landed = if left > 1 { Some((who, left - 1)) } else { None };
+            }
+            for a in 0..2 {
+                self.pearl_kill[a] = (self.pearl_kill[a] - 1).max(0);
             }
             self.ticks_left -= 1;
             self.change_damage();

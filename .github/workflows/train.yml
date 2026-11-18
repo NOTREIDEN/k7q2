@@ -46,6 +46,7 @@ on:
           --param terrain_prob=0.5 --param terrain_amount=0.8 --param retry_prob=0.25 --param terrain_gap_prob=0.4
           --param w_hp_pot=8 --param hp_pot_scale=4 --param opp_strength_prob=0.2 --param opp_strength_max=3
           --param gank_prob=0.2 --param gank_max=6 --param w_death=5
+          --param w_pearl_cost=1 --param pearl_kill_s=10
       previous:
         description: Id of the run to continue from (empty starts from seed/stage1.pt)
         default: ""

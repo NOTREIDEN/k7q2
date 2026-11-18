@@ -283,3 +283,42 @@ fn bots_answer_a_combo_with_a_pearl_to_the_side_or_the_back() {
     assert!(n > 80.0, "{n} pearls");
     assert!(near / n > 0.6, "{near} of {n}");
 }
+
+/// What player 0 is paid in a duel where it throws one pearl straight
+/// down and, if `kill`, the other player dies two seconds later.
+fn paid_for_a_pearl(cost: f32, kill: bool, window_s: f64) -> (f32, u8) {
+    let mut p = params();
+    p.w_pearl_cost = cost;
+    p.pearl_kill_s = window_s;
+    let mut e = Env::new(Mode::SelfPlay, p, 9);
+    run(&mut e, 8, |_, _| with(6, 20));
+    run(&mut e, 1, |_, _| with(8, 1));
+    run(&mut e, 40, |_, _| IDLE);
+    assert_eq!(e.episode().pearls[0], 1.0);
+    if kill {
+        e.m.s.p[1].set_health(0.0);
+    }
+    run(&mut e, 2, |_, _| IDLE);
+    while e.pending != 0 {
+        e.step(&IDLE);
+    }
+    let (mut o, mut pv) = ([0.0f32; OBS_DIM], [0.0f32; pvpsim::env::PRIV_DIM]);
+    e.take_outcome(&mut o, &mut pv)
+}
+
+#[test]
+fn a_pearl_costs_what_it_is_set_to_unless_the_other_player_dies_soon_after() {
+    let (free, d0) = paid_for_a_pearl(0.0, false, 10.0);
+    let (paid, d1) = paid_for_a_pearl(1.0, false, 10.0);
+    assert_eq!((d0, d1), (0, 0));
+    assert!((free - paid - 1.0).abs() < 1e-4, "free {free} paid {paid}");
+    // A kill within the window gives it all back, and no more.
+    let (free, d0) = paid_for_a_pearl(0.0, true, 10.0);
+    let (paid, d1) = paid_for_a_pearl(1.0, true, 10.0);
+    assert_eq!((d0, d1), (1, 1));
+    assert!((free - paid).abs() < 1e-4, "free {free} paid {paid}");
+    // After the window it stays paid.
+    let (free, _) = paid_for_a_pearl(0.0, true, 1.0);
+    let (paid, _) = paid_for_a_pearl(1.0, true, 1.0);
+    assert!((free - paid - 1.0).abs() < 1e-4, "free {free} paid {paid}");
+}
