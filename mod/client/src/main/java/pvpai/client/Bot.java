@@ -13,6 +13,7 @@ import net.minecraft.network.play.server.S13PacketDestroyEntities;
 import net.minecraft.network.play.server.S14PacketEntity;
 import net.minecraft.network.play.server.S18PacketEntityTeleport;
 import net.minecraft.network.play.server.S19PacketEntityStatus;
+import net.minecraft.util.MathHelper;
 import pvpai.core.Agent;
 import pvpai.core.Blocks;
 import pvpai.core.Book;
@@ -34,7 +35,7 @@ public final class Bot implements Wire.Tap {
     }
 
     private final Minecraft mc;
-    private final EntityOtherPlayerMP other;
+    private EntityOtherPlayerMP other;
     private final Duel duel;
     private final Chooser chooser;
     private final Agent agent;
@@ -47,6 +48,11 @@ public final class Bot implements Wire.Tap {
     /** What the keys of the tick that runs turned the view by, in degrees. */
     private float turnedYaw, turnedPitch;
     private final Random rng = new Random();
+    /** Ticks left in which the view turns to a new opponent the way a hand would, in place of the policy's turn. */
+    private int glide;
+    private static final int GLIDE_TICKS = 12;
+    /** Degrees to the new opponent at which the policy takes the view back. */
+    private static final float GLIDE_DONE = 8.0F;
     private final float[] obs = new float[Agent.OBS_DIM];
 
     /** The click delay as the last tick left it. */
@@ -81,6 +87,46 @@ public final class Bot implements Wire.Tap {
 
     public EntityOtherPlayerMP other() {
         return other;
+    }
+
+    /**
+     * Another player is the opponent from now on: what was counted of the
+     * one before is let go, the hit is reckoned for its armour, and the
+     * view turns to it over a few ticks.
+     */
+    void target(EntityOtherPlayerMP o) {
+        other = o;
+        book.newOpponent(o.hurtTime);
+        if (agent != null) {
+            agent.newOpponent();
+        }
+        duel.hitHealth = Scout.hitHealth(mc.thePlayer, o, layout);
+        glide = GLIDE_TICKS;
+    }
+
+    /**
+     * The turn of this tick toward a new opponent, eased: about half of
+     * what is left, at least two degrees and at most thirty-five, until the
+     * crosshair is near it.
+     */
+    private void glide(EntityPlayerSP me) {
+        double dx = other.posX - me.posX, dz = other.posZ - me.posZ;
+        double dy = other.posY + other.getEyeHeight() * 0.8 - (me.posY + me.getEyeHeight());
+        float yaw = (float) (Math.atan2(dz, dx) * 180.0 / Math.PI) - 90.0F;
+        float pitch = (float) -(Math.atan2(dy, Math.sqrt(dx * dx + dz * dz)) * 180.0 / Math.PI);
+        float ey = MathHelper.wrapAngleTo180_float(yaw - me.rotationYaw), ep = pitch - me.rotationPitch;
+        if (Math.abs(ey) < GLIDE_DONE && Math.abs(ep) < GLIDE_DONE) {
+            glide = 0;
+            return;
+        }
+        float deg = 0.15F * Hands.TRAINED_FACTOR;
+        pressed.dx = Math.round(ease(ey) / deg);
+        pressed.dy = Math.round(ease(ep) / deg);
+    }
+
+    private static float ease(float e) {
+        float a = Math.abs(e);
+        return Math.signum(e) * Math.min(Math.max(a * 0.45F, Math.min(a, 2.0F)), 35.0F);
     }
 
     Layout layout() {
@@ -196,6 +242,12 @@ public final class Bot implements Wire.Tap {
             pressed.slotKey = Inv.SLOT_SWORD + 1;
             pressed.attack = false;
             pressed.useItem = false;
+        }
+        if (glide > 0) {
+            glide--;
+            if (requestedInventory == 0 && !view.invOpen && agent != null && !agent.busy()) {
+                glide(player);
+            }
         }
         press(other);
         return requestedInventory;

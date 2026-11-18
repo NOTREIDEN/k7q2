@@ -1,11 +1,28 @@
 package pvpai.client;
 
+import java.lang.reflect.Method;
+import java.util.Arrays;
+import java.util.HashMap;
+import java.util.Map;
+import net.minecraft.block.Block;
+import net.minecraft.block.BlockFlowerPot;
+import net.minecraft.block.BlockJukebox;
+import net.minecraft.block.BlockPistonMoving;
+import net.minecraft.block.BlockRedstoneOre;
+import net.minecraft.block.BlockStairs;
+import net.minecraft.block.BlockTNT;
+import net.minecraft.block.state.IBlockState;
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.gui.inventory.GuiInventory;
 import net.minecraft.client.settings.GameSettings;
 import net.minecraft.client.settings.KeyBinding;
 import net.minecraft.entity.Entity;
+import net.minecraft.entity.player.EntityPlayer;
+import net.minecraft.item.ItemStack;
+import net.minecraft.util.BlockPos;
+import net.minecraft.util.EnumFacing;
 import net.minecraft.util.MovingObjectPosition;
+import net.minecraft.world.World;
 import pvpai.core.Inv;
 import pvpai.core.Keys;
 
@@ -105,13 +122,6 @@ final class Hands {
         if (k.slotKey > 0) {
             KeyBinding.onTick(gs.keyBindsHotbar[layout.real[k.slotKey - 1]].getKeyCode());
         }
-        // The right button: a press when it goes down, then held.
-        if (k.useItem && (!useDown || k.useAgain)) {
-            KeyBinding.onTick(gs.keyBindUseItem.getKeyCode());
-        }
-        key(gs.keyBindUseItem, k.useItem);
-        useDown = k.useItem;
-
         // The policy can add several horizontal turns in one tick. Apply the
         // shortest turn to the same heading before rounding to mouse counts.
         k.dx %= TRAINED_COUNTS_PER_TURN;
@@ -125,21 +135,84 @@ final class Hands {
                 mc.thePlayer.setAngles((float) n[0] * f1, -((float) n[1] * f1));
             }
         }
+        boolean sneak = false;
         if (opponent != null) {
             mc.thePlayer.setRotationYawHead(mc.thePlayer.rotationYaw);
-            if (k.attack) {
+            // The item in hand for this tick's right click, once the number key is taken.
+            ItemStack held = mc.thePlayer.inventory.mainInventory[k.slotKey > 0 ? layout.real[k.slotKey - 1] : mc.thePlayer.inventory.currentItem];
+            int kind = Reader.item(held);
+            boolean useNow = held != null && k.useItem && !mc.thePlayer.isUsingItem();
+            // A throw, a drink or a meal can come on the next tick: the sneak has to be on a tick before.
+            boolean useSoon = !mc.thePlayer.isUsingItem() && (kind == Inv.POTION || kind == Inv.DRINK || kind == Inv.PEARL || kind == Inv.FOOD);
+            if (k.attack || useNow || useSoon) {
+                // Where the crosshair is now that the view has turned: the clicks of this tick go there.
                 mc.entityRenderer.getMouseOver(1.0F);
-                MovingObjectPosition hit = mc.objectMouseOver;
+            }
+            MovingObjectPosition hit = mc.objectMouseOver;
+            if (k.attack) {
                 k.attack = hit != null && hit.typeOfHit == MovingObjectPosition.MovingObjectType.ENTITY
                     && hit.entityHit == opponent;
             }
+            if ((useNow || useSoon) && hit != null && hit.typeOfHit == MovingObjectPosition.MovingObjectType.BLOCK
+                    && takesClick(mc.theWorld.getBlockState(hit.getBlockPos()))) {
+                // A crafting table, a chest, a furnace, a door, a fence...
+                // would take the right click and open or turn, unless the
+                // player sneaks: the game sees the sneak from the tick after
+                // the key goes down, so a click that cannot go yet waits.
+                sneak = true;
+                if (useNow && !mc.thePlayer.isSneaking()) {
+                    k.useItem = false;
+                }
+            }
         }
+        key(gs.keyBindSneak, sneak);
+        // The right button: a press when it goes down, then held.
+        if (k.useItem && (!useDown || k.useAgain)) {
+            KeyBinding.onTick(gs.keyBindUseItem.getKeyCode());
+        }
+        key(gs.keyBindUseItem, k.useItem);
+        useDown = k.useItem;
         // A left click is a press let go at once: the button is never left down.
         if (k.attack) {
             for (int n = 0; n <= k.extraClicks; n++) {
                 KeyBinding.onTick(gs.keyBindAttack.getKeyCode());
             }
         }
+    }
+
+    /** The arguments of the block's right click (onBlockActivated), whatever its name in the running game. */
+    private static final Class<?>[] ACTIVATED = {World.class, BlockPos.class, IBlockState.class, EntityPlayer.class, EnumFacing.class, float.class, float.class, float.class};
+    private static final Map<Class<?>, Boolean> TAKES = new HashMap<Class<?>, Boolean>();
+
+    /**
+     * Whether a right click on this block goes to the block and not to the
+     * item in hand, unless the player sneaks: every block that has its own
+     * right click, also of other mods, but those whose own gives the click
+     * back with a sword, a potion, a pearl or food in hand.
+     */
+    static boolean takesClick(IBlockState state) {
+        Block b = state.getBlock();
+        if (b instanceof BlockTNT || b instanceof BlockRedstoneOre || b instanceof BlockStairs
+                || b instanceof BlockFlowerPot || b instanceof BlockPistonMoving) {
+            return false;
+        }
+        if (b instanceof BlockJukebox) {
+            return state.getValue(BlockJukebox.HAS_RECORD).booleanValue();
+        }
+        Boolean known = TAKES.get(b.getClass());
+        if (known == null) {
+            known = Boolean.FALSE;
+            for (Class<?> c = b.getClass(); c != null && c != Block.class && !known.booleanValue(); c = c.getSuperclass()) {
+                for (Method m : c.getDeclaredMethods()) {
+                    if (m.getReturnType() == boolean.class && Arrays.equals(m.getParameterTypes(), ACTIVATED)) {
+                        known = Boolean.TRUE;
+                        break;
+                    }
+                }
+            }
+            TAKES.put(b.getClass(), known);
+        }
+        return known.booleanValue();
     }
 
     /** Lets every key go. */

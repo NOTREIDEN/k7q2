@@ -93,6 +93,20 @@ public final class Rig {
     static final int SPEED_SECONDS = Integer.getInteger("duel.speedsecs", 60), FOOD = Integer.getInteger("duel.food", 20);
     /** Half the side of the arena and the height of its floor, as in training. */
     static final int HALF = 24, FLOOR = 4;
+    /** duel.floor=mesas: blocks that open under the feet and at the walls. */
+    static final boolean MESAS = "mesas".equals(System.getProperty("duel.floor", ""));
+    static int screens;
+    /**
+     * duel.extra: players more, with no client, that the server moves to
+     * the one that joins from sides of their own while a round lasts.
+     * duel.extramode: pegan (they hit it with a stone sword) or quietos
+     * (they stand by it and hit nobody). They cannot die.
+     */
+    static final int EXTRA = Integer.getInteger("duel.extra", 0);
+    static final boolean EXTRA_HIT = !"quietos".equals(System.getProperty("duel.extramode", "pegan"));
+    static final java.util.List<EntityPlayerMP> extras = new java.util.ArrayList<EntityPlayerMP>();
+    static final java.util.List<io.netty.channel.embedded.EmbeddedChannel> extraChannels = new java.util.ArrayList<io.netty.channel.embedded.EmbeddedChannel>();
+    static String lastTarget;
     /** Server ticks between two pearls of a player. */
     static final int PEARL_WAIT = 320;
     static final int HEAL_II = 16421, SPEED_II = 8226;
@@ -245,7 +259,13 @@ public final class Rig {
             }
         } else {
             deadFor = 0;
-            if (mc.currentScreen != null && !(mc.currentScreen instanceof GuiInventory && on())) mc.displayGuiScreen(null);
+            if (mc.currentScreen != null && !(mc.currentScreen instanceof GuiInventory && on())) {
+                if (!(mc.currentScreen instanceof GuiInventory) && !(mc.currentScreen instanceof net.minecraft.client.gui.GuiChat)) {
+                    screens++;
+                    say("a screen opened: " + mc.currentScreen.getClass().getSimpleName() + " (" + screens + " so far)");
+                }
+                mc.displayGuiScreen(null);
+            }
         }
         if (halt) {
             halt = false;
@@ -278,6 +298,14 @@ public final class Rig {
             String why = session.tickStart();
             if (why != null) say(why);
             started = on();
+            if (on() && session.bot() != null) {
+                String t = session.bot().other().getName();
+                if (cticks % 10 == 0) say("players: " + session.targets() + "target " + t);
+                if (!t.equals(lastTarget)) {
+                    say("target: " + t + " at " + System.currentTimeMillis() + " (" + session.switches() + " switches)");
+                    lastTarget = t;
+                }
+            }
         }
         if (!HOST) notePotions(mc);
     }
@@ -454,6 +482,21 @@ public final class Rig {
                     w.setBlockState(new BlockPos(HALF, y, i), Blocks.stonebrick.getDefaultState());
                 }
             }
+            if (MESAS) {
+                // A floor of crafting tables and furnaces, and chests and furnaces at the foot of the walls.
+                for (int x = -HALF; x < HALF; x++) {
+                    for (int z = -HALF; z < HALF; z++) {
+                        w.setBlockState(new BlockPos(x, FLOOR - 1, z), ((x + z) & 1) == 0 ? Blocks.crafting_table.getDefaultState() : Blocks.furnace.getDefaultState());
+                    }
+                }
+                for (int i = -HALF; i < HALF; i++) {
+                    net.minecraft.block.state.IBlockState c = (i & 1) == 0 ? Blocks.chest.getDefaultState() : Blocks.furnace.getDefaultState();
+                    w.setBlockState(new BlockPos(i, FLOOR, -HALF - 1), c);
+                    w.setBlockState(new BlockPos(i, FLOOR, HALF), c);
+                    w.setBlockState(new BlockPos(-HALF - 1, FLOOR, i), c);
+                    w.setBlockState(new BlockPos(HALF, FLOOR, i), c);
+                }
+            }
             w.setSpawnPoint(new BlockPos(0, FLOOR, 0));
             if (KB.equals("servidor")) {
                 profile.kind = Profile.HIT;
@@ -480,7 +523,8 @@ public final class Rig {
     }
 
     static EntityPlayerMP[] two(MinecraftServer server) {
-        java.util.List<EntityPlayerMP> l = server.getConfigurationManager().getPlayerList();
+        java.util.List<EntityPlayerMP> l = new java.util.ArrayList<EntityPlayerMP>(server.getConfigurationManager().getPlayerList());
+        l.removeAll(extras);
         if (l.size() != 2) return null;
         EntityPlayerMP a = l.get(0), b = l.get(1);
         // The host second.
@@ -535,6 +579,7 @@ public final class Rig {
                     phaseAt = stick;
                 }
             } else if (phase == 2) {
+                moveExtras(server, p[0], since);
                 // As long as it lives: a death empties the inventory.
                 for (int i = 0; i < 2; i++) {
                     if (p[i].isEntityAlive()) lastLeft[i] = left(p[i]);
@@ -564,6 +609,7 @@ public final class Rig {
                     }
                     phase = 3;
                     phaseAt = stick;
+                    dropExtras(server);
                 }
             } else if (phase == 3) {
                 if (since > 100) {
@@ -581,6 +627,67 @@ public final class Rig {
             say("server failed: " + t);
             Runtime.getRuntime().halt(3);
         }
+    }
+
+    static EntityPlayerMP extra(MinecraftServer server, String name, double x, double z) {
+        WorldServer w = server.worldServerForDimension(0);
+        com.mojang.authlib.GameProfile gp = new com.mojang.authlib.GameProfile(
+            java.util.UUID.nameUUIDFromBytes(("OfflinePlayer:" + name).getBytes(java.nio.charset.StandardCharsets.UTF_8)), name);
+        EntityPlayerMP e = new EntityPlayerMP(server, w, gp, new net.minecraft.server.management.ItemInWorldManager(w));
+        net.minecraft.network.NetworkManager nm = new net.minecraft.network.NetworkManager(net.minecraft.network.EnumPacketDirection.SERVERBOUND);
+        io.netty.channel.embedded.EmbeddedChannel ch = new io.netty.channel.embedded.EmbeddedChannel(nm);
+        nm.setConnectionState(net.minecraft.network.EnumConnectionState.PLAY);
+        server.getConfigurationManager().initializeConnectionToPlayer(nm, e);
+        e.setGameType(WorldSettings.GameType.SURVIVAL);
+        e.inventory.mainInventory[0] = new ItemStack(Items.stone_sword);
+        e.inventory.currentItem = 0;
+        e.playerNetServerHandler.setPlayerLocation(x, FLOOR, z, 0.0F, 0.0F);
+        extras.add(e);
+        extraChannels.add(ch);
+        return e;
+    }
+
+    /** The extra players on a tick of a round: to their side of the one that joins, facing it, and hitting it. */
+    static void moveExtras(MinecraftServer server, EntityPlayerMP to, long since) {
+        if (EXTRA <= 0) return;
+        if (extras.isEmpty()) {
+            for (int i = 0; i < EXTRA; i++) {
+                double a = 2.0 * Math.PI * i / EXTRA;
+                extra(server, "Gank" + (i + 1), to.posX + 6.0 * Math.cos(a), to.posZ + 6.0 * Math.sin(a));
+            }
+            say(EXTRA + " more players come in, " + (EXTRA_HIT ? "hitting" : "standing by"));
+        }
+        for (io.netty.channel.embedded.EmbeddedChannel ch : extraChannels) ch.outboundMessages().clear();
+        for (int i = 0; i < extras.size(); i++) {
+            EntityPlayerMP e = extras.get(i);
+            e.setHealth(20.0F);
+            e.getFoodStats().setFoodLevel(20);
+            // Each on its own side, the sides going slowly round.
+            double a = 2.0 * Math.PI * i / extras.size() + since * 0.004 * (i % 2 == 0 ? 1 : -1);
+            double r = EXTRA_HIT ? 2.4 : 2.8;
+            double gx = to.posX + r * Math.cos(a), gz = to.posZ + r * Math.sin(a);
+            gx = Math.max(-HALF + 0.5, Math.min(HALF - 0.5, gx));
+            gz = Math.max(-HALF + 0.5, Math.min(HALF - 0.5, gz));
+            double dx = gx - e.posX, dz = gz - e.posZ, d = Math.sqrt(dx * dx + dz * dz), step = Math.min(d, 0.28);
+            double nx = d > 1.0E-6 ? e.posX + dx / d * step : e.posX, nz = d > 1.0E-6 ? e.posZ + dz / d * step : e.posZ;
+            float yaw = (float) (Math.atan2(to.posZ - nz, to.posX - nx) * 180.0 / Math.PI) - 90.0F;
+            e.setPositionAndRotation(nx, FLOOR, nz, yaw, 0.0F);
+            e.rotationYawHead = yaw;
+            e.onGround = true;
+            e.onUpdateEntity();
+            e.setPositionAndRotation(nx, FLOOR, nz, yaw, 0.0F);
+            double far = e.getDistanceToEntity(to);
+            if (EXTRA_HIT && since > 40 && far < 3.2 && (since + 7 * i) % (11 + 2 * i) == 0 && to.isEntityAlive()) {
+                e.swingItem();
+                e.attackTargetEntityWithCurrentItem(to);
+            }
+        }
+    }
+
+    static void dropExtras(MinecraftServer server) {
+        for (EntityPlayerMP e : extras) server.getConfigurationManager().playerLoggedOut(e);
+        extras.clear();
+        extraChannels.clear();
     }
 
     static final String[] lastLeft = new String[2];

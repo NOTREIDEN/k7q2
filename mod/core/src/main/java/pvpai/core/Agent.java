@@ -302,6 +302,22 @@ public final strictfp class Agent {
         prev = inp.copy();
     }
 
+    /**
+     * Another player is the opponent from now on: what it counted of the
+     * one before (its hits in a row on it, how long it was seen drinking,
+     * its last pearl) is not this one's.
+     */
+    public void newOpponent() {
+        comboOwn = 0;
+        oppUseTicks = 0;
+        oppPearlAge = 100000;
+    }
+
+    /** Whether it is in the middle of a throw, a drink, a meal or the inventory, whose keys must not be changed. */
+    public boolean busy() {
+        return potionStage != 0 || pearlStage != 0 || turned > 0 || consume != 0 || refill != 0;
+    }
+
     /** Time passes while the inventory waits for a server reply. */
     public void inventoryWaitTick() {
         if (pearlWait > 0) {

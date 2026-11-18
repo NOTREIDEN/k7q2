@@ -65,6 +65,17 @@ public final strictfp class Book {
         }
     }
 
+    /**
+     * Another player is the opponent from now on, with this much left of
+     * its hurt animation (10 just hit, 0 none): what was counted of the
+     * one before is not this one's.
+     */
+    public void newOpponent(int hurtTime) {
+        otherSinceHurt = hurtTime > 0 ? Math.max(0, 10 - hurtTime) : 1000;
+        otherSinceJump = 1000;
+        potionsSeen = 0;
+    }
+
     /** The server put its own player somewhere. */
     public void moved() {
         sinceMoved = 0;

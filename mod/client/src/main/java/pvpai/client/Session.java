@@ -41,6 +41,8 @@ public final class Session implements Wire.Tap {
     private final Policy policy;
     private final Random draws = new Random();
     private final InventoryRefill refill = new InventoryRefill();
+    private Targets targets = new Targets();
+    private int switches;
     private Bot bot;
     private Duel duel;
     private EntityPlayerSP me;
@@ -70,8 +72,19 @@ public final class Session implements Wire.Tap {
         return duel;
     }
 
+    /** The players about as the choice of opponent sees them, for a log. */
+    public String targets() {
+        return targets.describe(mc);
+    }
+
+    /** How many times it went over to another opponent in this duel. */
+    public int switches() {
+        return switches;
+    }
+
     /**
-     * Put the agent at the keys for a duel against the nearest player.
+     * Put the agent at the keys for a duel against the player it picks
+     * ({@link Targets}): the nearest, or the one in front of it.
      * Returns a line for the player; {@link #on} says whether it worked.
      */
     public String start(Settings s) {
@@ -79,7 +92,9 @@ public final class Session implements Wire.Tap {
         if (mc.thePlayer == null || mc.theWorld == null || mc.getNetHandler() == null) {
             return "PvP AI: no hay partida.";
         }
-        EntityOtherPlayerMP other = Reader.nearest(mc);
+        targets = new Targets();
+        switches = 0;
+        EntityOtherPlayerMP other = targets.choose(mc, null);
         if (other == null) {
             return "PvP AI: no hay ningun rival a la vista.";
         }
@@ -219,6 +234,14 @@ public final class Session implements Wire.Tap {
     public String tickStart() {
         started = false;
         openingInventory = false;
+        if (bot != null && mc.thePlayer == me && mc.theWorld == world && mc.getNetHandler() != null && !mc.isGamePaused()) {
+            targets.tick(mc);
+            EntityOtherPlayerMP next = targets.choose(mc, bot.other());
+            if (next != null && next != bot.other()) {
+                bot.target(next);
+                switches++;
+            }
+        }
         String why = check();
         if (why != null) {
             stop();
