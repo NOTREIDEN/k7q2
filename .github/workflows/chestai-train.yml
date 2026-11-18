@@ -1,0 +1,107 @@
+name: chestai-train
+
+# The chest-farming agent (folder chestai/), apart from the PvP agent: it
+# starts when a commit whose message has "[chestai]" changes chestai/run.json
+# on its branch. Its weights go to the branch "chestai-weights" and the
+# machines exchange weights through "chestai-sync/m<i>", so nothing of the
+# PvP runs is touched.
+on:
+  push:
+    branches: [claude/project-thread-v5n15f]
+    paths: ["chestai/run.json"]
+
+permissions:
+  contents: write
+
+concurrency:
+  group: chestai
+  cancel-in-progress: false
+
+jobs:
+  plan:
+    if: contains(github.event.head_commit.message, '[chestai]')
+    runs-on: ubuntu-latest
+    outputs:
+      ids: ${{ steps.p.outputs.ids }}
+      cfg: ${{ steps.p.outputs.cfg }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: p
+        run: |
+          python3 - <<'PY' >> "$GITHUB_OUTPUT"
+          import json
+          c = json.load(open("chestai/run.json"))
+          print("ids=" + json.dumps(list(range(int(c["machines"])))))
+          print("cfg=" + json.dumps(c))
+          PY
+
+  train:
+    needs: plan
+    runs-on: ubuntu-latest
+    timeout-minutes: 340
+    strategy:
+      fail-fast: false
+      matrix:
+        machine: ${{ fromJSON(needs.plan.outputs.ids) }}
+    defaults:
+      run:
+        working-directory: chestai
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/cache@v4
+        with:
+          path: chestai/chestsim/target
+          key: chestai-chestsim-${{ hashFiles('chestai/chestsim/Cargo.toml', 'chestai/chestsim/src/**') }}
+      - run: cd chestsim && cargo build --release
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install --index-url https://download.pytorch.org/whl/cpu torch && pip install numpy
+      - name: Starting weights
+        env:
+          FILE: ${{ fromJSON(needs.plan.outputs.cfg).init_file }}
+        run: mkdir -p init && cp "$FILE" init/init.pt
+      - name: Train
+        env:
+          CFG: ${{ needs.plan.outputs.cfg }}
+          MACHINE: ${{ matrix.machine }}
+        run: |
+          # "until" (UTC) shortens the run so that it ends by then even if a machine starts late.
+          M=$(python3 -c "
+          import json, os, datetime as d
+          c = json.loads(os.environ['CFG'])
+          m = int(c['minutes'])
+          if c.get('until'):
+              end = d.datetime.fromisoformat(c['until'].replace('Z', '+00:00'))
+              m = min(m, int((end - d.datetime.now(d.timezone.utc)).total_seconds() // 60) - 3)
+          print(max(m, 5))")
+          N=$(python3 -c "import json,os;print(json.loads(os.environ['CFG'])['machines'])")
+          R=$(python3 -c "import json,os;print(json.loads(os.environ['CFG'])['round_minutes'])")
+          A=$(python3 -c "import json,os;print(json.loads(os.environ['CFG'])['args'])")
+          D="$GITHUB_WORKSPACE/chestai"
+          S="$D/share"
+          mkdir -p "$S"
+          cd python
+          python train.py --minutes "$M" --out ../runs/m$MACHINE --init ../init/init.pt --threads 4 \
+            --machine-id "$MACHINE" --machines "$N" --round-minutes "$R" --share-dir "$S" \
+            --sync-cmd "bash $D/sync.sh $S $MACHINE $N {round} $D/runs/m$MACHINE" --seed $MACHINE $A
+      - name: Publish the averaged weights
+        if: matrix.machine == 0 && always()
+        run: |
+          W=/tmp/chestai-pub
+          rm -rf $W && mkdir -p $W
+          cp runs/m0/last.pt $W/latest.pt
+          cp runs/m0/log.jsonl $W/log.jsonl || true
+          cp runs/m0/best.pt $W/best.pt || true
+          cd $W && git init -q
+          git remote add origin "$(git -C "$GITHUB_WORKSPACE" remote get-url origin)"
+          git config http.https://github.com/.extraheader "$(git -C "$GITHUB_WORKSPACE" config --get http.https://github.com/.extraheader)"
+          git config user.name trainer && git config user.email trainer@users.noreply.github.com
+          git checkout -q --orphan chestai-weights
+          git add . && git commit -qm "chest weights of run ${{ github.run_id }}"
+          git push -qf origin HEAD:refs/heads/chestai-weights
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: chestai-m${{ matrix.machine }}
+          path: chestai/runs/m${{ matrix.machine }}

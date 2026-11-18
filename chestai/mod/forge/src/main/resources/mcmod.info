@@ -1,0 +1,8 @@
+[{
+  "modid": "chestai",
+  "name": "Chest AI",
+  "description": "Farmeo de cofres con una red entrenada en un simulador.",
+  "version": "1.0",
+  "mcversion": "1.8.9",
+  "authorList": []
+}]

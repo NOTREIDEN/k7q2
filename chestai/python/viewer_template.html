@@ -1,0 +1,309 @@
+<title>Chest AI Replay</title>
+<meta name="claude:viewport-fit-sides" content="cover">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Chakra+Petch:wght@500;600&family=IBM+Plex+Sans:wght@400;500&family=IBM+Plex+Mono:wght@400;500&display=swap">
+<style>
+/* Layout: a tactical replay board. The map is the page; a narrow instrument column beside it, stacked under it on a phone. */
+:root {
+  --bg: #eef1f4;
+  --panel: #ffffff;
+  --ink: #17202b;
+  --muted: #5b6878;
+  --line: #d5dbe3;
+  --accent: #2f6fd6;
+  --good: #1f9d55;
+  --warn: #c98a06;
+  --bad: #d23f3f;
+  --display: "Chakra Petch", "Segoe UI", system-ui, sans-serif;
+  --body: "IBM Plex Sans", system-ui, -apple-system, sans-serif;
+  --mono: "IBM Plex Mono", ui-monospace, "SFMono-Regular", Menlo, monospace;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #11161d; --panel: #18202a; --ink: #e4e9ef; --muted: #93a0b0; --line: #2a3542;
+    --accent: #6ea3ff; --good: #45c47c; --warn: #e6b23a; --bad: #ff6b6b; color-scheme: dark;
+  }
+}
+:root[data-theme="dark"] {
+  --bg: #11161d; --panel: #18202a; --ink: #e4e9ef; --muted: #93a0b0; --line: #2a3542;
+  --accent: #6ea3ff; --good: #45c47c; --warn: #e6b23a; --bad: #ff6b6b; color-scheme: dark;
+}
+* { box-sizing: border-box; }
+body {
+  background: var(--bg); color: var(--ink); font-family: var(--body); font-size: 14px; line-height: 1.45;
+  padding-left: max(16px, env(safe-area-inset-left, 0px)); padding-right: max(16px, env(safe-area-inset-right, 0px));
+  padding-block: 20px 28px;
+}
+.wrap { max-width: 1180px; margin: 0 auto; display: grid; gap: 16px; }
+header { display: flex; flex-wrap: wrap; align-items: end; justify-content: space-between; gap: 12px; }
+h1 { font-family: var(--display); font-weight: 600; font-size: 26px; letter-spacing: 0.02em; margin: 0; text-wrap: balance; }
+.sub { color: var(--muted); margin: 2px 0 0; max-width: 62ch; }
+select, button {
+  font: 500 13px var(--body); color: var(--ink); background: var(--panel); border: 1px solid var(--line);
+  border-radius: 6px; padding: 7px 10px; cursor: pointer;
+}
+button:focus-visible, select:focus-visible, input:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+button.on { background: var(--accent); color: var(--panel); border-color: var(--accent); }
+.board { display: grid; grid-template-columns: minmax(0, 1fr) 300px; gap: 16px; align-items: start; }
+@media (max-width: 860px) { .board { grid-template-columns: minmax(0, 1fr); } }
+.mapbox { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 10px; min-width: 0; }
+canvas { display: block; width: 100%; max-width: 100%; aspect-ratio: 1 / 1; border-radius: 6px; image-rendering: pixelated; }
+.controls { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-top: 10px; }
+.controls input[type=range] { flex: 1 1 160px; min-width: 0; accent-color: var(--accent); }
+.clock { font-family: var(--mono); font-variant-numeric: tabular-nums; color: var(--muted); min-width: 92px; text-align: right; }
+aside { display: grid; gap: 12px; min-width: 0; }
+.card { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 12px 14px; display: grid; gap: 8px; }
+.label { font-family: var(--display); font-size: 12px; letter-spacing: 0.08em; text-transform: uppercase; color: var(--muted); }
+.stats { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; }
+.stat b { display: block; font-family: var(--mono); font-size: 22px; font-weight: 500; font-variant-numeric: tabular-nums; }
+.stat span { color: var(--muted); font-size: 12px; }
+.bar { height: 8px; background: var(--line); border-radius: 4px; overflow: hidden; display: flex; }
+.bar i { display: block; height: 100%; }
+.row { display: flex; justify-content: space-between; gap: 8px; font-family: var(--mono); font-size: 12.5px; font-variant-numeric: tabular-nums; }
+.chests { display: grid; gap: 4px; max-height: 240px; overflow-y: auto; }
+.pill { font-family: var(--mono); font-size: 11.5px; padding: 1px 7px; border-radius: 999px; border: 1px solid currentColor; }
+.legend { display: grid; grid-template-columns: 1fr 1fr; gap: 4px 10px; font-size: 12.5px; }
+.legend span { display: flex; align-items: center; gap: 6px; }
+.dot { width: 10px; height: 10px; border-radius: 50%; display: inline-block; flex: none; }
+.sq { width: 10px; height: 10px; border-radius: 2px; display: inline-block; flex: none; }
+.note { color: var(--muted); font-size: 12.5px; }
+@media (prefers-reduced-motion: reduce) { * { scroll-behavior: auto; } }
+</style>
+
+<div class="wrap">
+  <header>
+    <div>
+      <h1>Chest AI Replay</h1>
+      <p class="sub">Partidas del simulador vistas desde arriba: el bot (flecha azul) recorre los cofres, despierta las oleadas a 12 bloques y tiene 10 segundos para matar los 5 mobs antes de que el cofre se reinicie.</p>
+    </div>
+    <label class="note" for="ep">Partida
+      <select id="ep"></select>
+    </label>
+  </header>
+
+  <div class="board">
+    <div class="mapbox">
+      <canvas id="map" width="768" height="768" aria-label="Mapa de la partida visto desde arriba"></canvas>
+      <div class="controls">
+        <button id="play" type="button">Pausa</button>
+        <button type="button" class="spd" data-s="1">1×</button>
+        <button type="button" class="spd on" data-s="2">2×</button>
+        <button type="button" class="spd" data-s="4">4×</button>
+        <button type="button" class="spd" data-s="8">8×</button>
+        <input id="seek" type="range" min="0" max="0" value="0" aria-label="Momento de la partida">
+        <span class="clock" id="clock">0:00</span>
+      </div>
+    </div>
+
+    <aside>
+      <div class="card">
+        <div class="label">Marcador</div>
+        <div class="stats">
+          <div class="stat"><b id="claims">0</b><span>reclamados</span></div>
+          <div class="stat"><b id="kills">0</b><span>mobs muertos</span></div>
+          <div class="stat"><b id="resets">0</b><span>reinicios</span></div>
+        </div>
+      </div>
+      <div class="card">
+        <div class="label">Jugador</div>
+        <div class="bar" title="Vida y absorción"><i id="hpbar" style="background: var(--bad)"></i><i id="absbar" style="background: var(--warn)"></i></div>
+        <div class="row"><span>vida</span><span id="hp">20</span></div>
+        <div class="row"><span>en la mano</span><span id="slot">espada</span></div>
+      </div>
+      <div class="card">
+        <div class="label">Cofres</div>
+        <div class="chests" id="chests"></div>
+      </div>
+      <div class="card">
+        <div class="label">Referencias</div>
+        <div class="legend">
+          <span><i class="dot" style="background:#3fbf5a"></i>zombi</span>
+          <span><i class="dot" style="background:#8a5a2b"></i>jinete con arco</span>
+          <span><i class="dot" style="background:#f4f7fa;border:1px solid #9aa"></i>gólem de nieve</span>
+          <span><i class="dot" style="background:#a35ce0"></i>mob en la cabeza</span>
+          <span><i class="sq" style="background:#e8eef3;border:1px solid #9aa"></i>cofre en espera</span>
+          <span><i class="sq" style="background:#f2c230"></i>cofre listo</span>
+          <span><i class="sq" style="background:#e5484d"></i>oleada activa</span>
+          <span><i class="sq" style="background:#36c46b"></i>para reclamar</span>
+          <span><i class="dot" style="background:#ff8c1a"></i>otro jugador</span>
+          <span><i class="dot" style="background:#ffffff;border:1px solid #333"></i>flecha propia</span>
+        </div>
+        <p class="note">El círculo tenue alrededor de cada cofre es el radio de 12 bloques que despierta la oleada. Más claro es más alto.</p>
+      </div>
+    </aside>
+  </div>
+</div>
+
+<script>
+const EPISODES = __EPISODES__;
+const KIND = ["#3fbf5a", "#8a5a2b", "#f4f7fa", "#a35ce0"];
+const STATE = ["#e8eef3", "#f2c230", "#e5484d", "#36c46b"];
+const STATE_NAME = ["en espera", "listo", "oleada", "reclamar"];
+const SLOT = ["espada", "arco", "manzana", "perla", "poción"];
+const cv = document.getElementById("map"), ctx = cv.getContext("2d");
+const seek = document.getElementById("seek"), playBtn = document.getElementById("play");
+let ep = null, ground = null, frame = 0, playing = true, speed = 2, acc = 0, last = 0;
+
+const sel = document.getElementById("ep");
+EPISODES.forEach((e, i) => {
+  const o = document.createElement("option");
+  o.value = i;
+  o.textContent = e.label;
+  sel.appendChild(o);
+});
+sel.addEventListener("change", () => load(+sel.value));
+
+function load(i) {
+  ep = EPISODES[i];
+  const m = ep.map, sx = m.sx, sz = m.sz;
+  let lo = 1e9, hi = -1e9;
+  for (const h of m.h) { lo = Math.min(lo, h); hi = Math.max(hi, h); }
+  const off = document.createElement("canvas");
+  off.width = sx; off.height = sz;
+  const oc = off.getContext("2d"), img = oc.createImageData(sx, sz);
+  for (let z = 0; z < sz; z++) for (let x = 0; x < sx; x++) {
+    const k = z * sx + x, h = m.h[k];
+    const t = hi > lo ? (h - lo) / (hi - lo) : 0.5;
+    // Shade by the slope toward the north-west, so ridges read.
+    const hn = m.h[Math.max(0, z - 1) * sx + Math.max(0, x - 1)];
+    const sh = Math.max(-0.18, Math.min(0.18, (h - hn) * 0.06));
+    let r, g, b;
+    if (m.water[k]) { r = 52; g = 110; b = 190; }
+    else if (t > 0.72) { r = 150 + 70 * t; g = 145 + 70 * t; b = 135 + 70 * t; }
+    else { r = 70 + 90 * t; g = 120 + 70 * t; b = 60 + 40 * t; }
+    const f = 1 + sh;
+    img.data[k * 4] = r * f; img.data[k * 4 + 1] = g * f; img.data[k * 4 + 2] = b * f; img.data[k * 4 + 3] = 255;
+  }
+  oc.putImageData(img, 0, 0);
+  ground = off;
+  seek.max = ep.frames.length - 1;
+  frame = 0;
+  seek.value = 0;
+  draw();
+}
+
+function draw() {
+  const f = ep.frames[frame], m = ep.map, s = cv.width / m.sx;
+  ctx.imageSmoothingEnabled = false;
+  ctx.drawImage(ground, 0, 0, cv.width, cv.height);
+  const P = (x, z) => [x * s, z * s];
+  // Spawn radius and chests.
+  f.chests.forEach((c) => {
+    const [x, y] = P(c[0] + 0.5, c[2] + 0.5);
+    ctx.strokeStyle = c[3] === 2 ? "rgba(229,72,77,0.55)" : "rgba(255,255,255,0.22)";
+    ctx.lineWidth = 1.5;
+    ctx.beginPath(); ctx.arc(x, y, 12 * s, 0, Math.PI * 2); ctx.stroke();
+  });
+  f.chests.forEach((c) => {
+    const [x, y] = P(c[0], c[2]);
+    ctx.fillStyle = STATE[c[3]];
+    ctx.strokeStyle = "#1b222b";
+    ctx.lineWidth = 1.5;
+    ctx.fillRect(x - s * 0.3, y - s * 0.3, s * 1.6, s * 1.6);
+    ctx.strokeRect(x - s * 0.3, y - s * 0.3, s * 1.6, s * 1.6);
+    if (c[3] === 2) {
+      // What is left of the 10 seconds.
+      ctx.strokeStyle = "#fff";
+      ctx.lineWidth = 2.5;
+      ctx.beginPath();
+      ctx.arc(x + s * 0.5, y + s * 0.5, s * 1.6, -Math.PI / 2, -Math.PI / 2 + Math.PI * 2 * (c[5] / 200));
+      ctx.stroke();
+    } else if (c[3] === 0 && c[4] > 0) {
+      ctx.fillStyle = "#fff";
+      ctx.font = `500 ${Math.max(10, s * 1.1)}px "IBM Plex Mono", monospace`;
+      ctx.fillText(c[4] + "s", x + s * 1.5, y - s * 0.2);
+    }
+  });
+  // Player trail.
+  ctx.strokeStyle = "rgba(90,160,255,0.7)";
+  ctx.lineWidth = 2;
+  ctx.beginPath();
+  for (let i = Math.max(0, frame - 60); i <= frame; i++) {
+    const p = ep.frames[i].p, [x, y] = P(p[0], p[2]);
+    i === Math.max(0, frame - 60) ? ctx.moveTo(x, y) : ctx.lineTo(x, y);
+  }
+  ctx.stroke();
+  // Mobs.
+  f.mobs.forEach((mb) => {
+    const [x, y] = P(mb[0], mb[2]);
+    ctx.fillStyle = mb[7] > 0 ? "#ff3b3b" : KIND[mb[3]];
+    ctx.strokeStyle = "#111";
+    ctx.lineWidth = 1;
+    ctx.beginPath(); ctx.arc(x, y, Math.max(4, s * (mb[3] === 1 ? 0.75 : 0.5)), 0, Math.PI * 2); ctx.fill(); ctx.stroke();
+    const w = s * 1.6, frac = Math.max(0, mb[4] / Math.max(1, mb[5]));
+    ctx.fillStyle = "#111"; ctx.fillRect(x - w / 2, y - s * 1.1, w, 3);
+    ctx.fillStyle = "#4cd964"; ctx.fillRect(x - w / 2, y - s * 1.1, w * frac, 3);
+  });
+  // Projectiles.
+  f.projs.forEach((q) => {
+    const [x, y] = P(q[0], q[2]);
+    ctx.fillStyle = q[4] === -1 ? "#ffffff" : q[3] === 1 ? "#cfe8ff" : "#2a1a0a";
+    ctx.strokeStyle = "#333";
+    ctx.beginPath(); ctx.arc(x, y, Math.max(2, s * 0.22), 0, Math.PI * 2); ctx.fill(); ctx.stroke();
+  });
+  // Other players.
+  f.rivals.forEach((r) => {
+    const [x, y] = P(r[0], r[2]);
+    ctx.fillStyle = "#ff8c1a"; ctx.strokeStyle = "#111";
+    ctx.beginPath(); ctx.arc(x, y, s * 0.6, 0, Math.PI * 2); ctx.fill(); ctx.stroke();
+  });
+  // The bot: an arrow along its view.
+  const p = f.p, [px, py] = P(p[0], p[2]), a = p[3] * Math.PI / 180;
+  const dx = -Math.sin(a), dz = Math.cos(a), L = s * 1.6;
+  ctx.fillStyle = "#2f7bff"; ctx.strokeStyle = "#fff"; ctx.lineWidth = 2;
+  ctx.beginPath();
+  ctx.moveTo(px + dx * L, py + dz * L);
+  ctx.lineTo(px - dx * L * 0.6 - dz * L * 0.6, py - dz * L * 0.6 + dx * L * 0.6);
+  ctx.lineTo(px - dx * L * 0.25, py - dz * L * 0.25);
+  ctx.lineTo(px - dx * L * 0.6 + dz * L * 0.6, py - dz * L * 0.6 - dx * L * 0.6);
+  ctx.closePath(); ctx.fill(); ctx.stroke();
+
+  // Instruments.
+  const secs = Math.floor(f.t / 20);
+  document.getElementById("clock").textContent = `${Math.floor(secs / 60)}:${String(secs % 60).padStart(2, "0")}`;
+  document.getElementById("claims").textContent = f.claims;
+  document.getElementById("kills").textContent = f.kills;
+  document.getElementById("resets").textContent = f.resets;
+  document.getElementById("hp").textContent = f.hp.toFixed(1) + (f.abs > 0 ? ` + ${f.abs.toFixed(0)}` : "");
+  document.getElementById("hpbar").style.width = (f.hp / 24 * 100) + "%";
+  document.getElementById("absbar").style.width = (f.abs / 24 * 100) + "%";
+  document.getElementById("slot").textContent = SLOT[f.slot] + (f.using ? " (usando)" : "");
+  const list = document.getElementById("chests");
+  list.innerHTML = "";
+  f.chests.map((c, i) => [c, i, Math.hypot(c[0] + 0.5 - p[0], c[2] + 0.5 - p[2])]).sort((a, b) => a[2] - b[2]).forEach(([c, i, d]) => {
+    const row = document.createElement("div");
+    row.className = "row";
+    const what = c[3] === 0 ? `${c[4]}s` : c[3] === 2 ? `${(c[5] / 20).toFixed(1)}s` : "";
+    row.innerHTML = `<span>#${i + 1} a ${d.toFixed(0)} m</span><span class="pill" style="color:${c[3] === 0 ? "var(--muted)" : c[3] === 1 ? "var(--warn)" : c[3] === 2 ? "var(--bad)" : "var(--good)"}">${STATE_NAME[c[3]]} ${what}</span>`;
+    list.appendChild(row);
+  });
+  seek.value = frame;
+}
+
+function tick(ts) {
+  if (playing && ep) {
+    acc += (ts - (last || ts)) / 1000 * 20 * speed / ep.every;
+    while (acc >= 1) {
+      acc -= 1;
+      if (frame < ep.frames.length - 1) frame++;
+      else playing = false;
+    }
+    draw();
+  }
+  playBtn.textContent = playing ? "Pausa" : "Reproducir";
+  last = ts;
+  requestAnimationFrame(tick);
+}
+playBtn.addEventListener("click", () => {
+  if (!playing && frame >= ep.frames.length - 1) frame = 0;
+  playing = !playing;
+});
+seek.addEventListener("input", () => { frame = +seek.value; draw(); });
+document.querySelectorAll(".spd").forEach((b) => b.addEventListener("click", () => {
+  speed = +b.dataset.s;
+  document.querySelectorAll(".spd").forEach((x) => x.classList.toggle("on", x === b));
+}));
+if (window.matchMedia("(prefers-reduced-motion: reduce)").matches) playing = false;
+load(0);
+requestAnimationFrame(tick);
+</script>

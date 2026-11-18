@@ -1,0 +1,1 @@
+{"machines": 10, "minutes": 300, "until": "2026-11-18T15:00:00Z", "round_minutes": 15, "init_file": "inits/start.pt", "args": "--stage 2 --max-stage 3 --n-envs 256 --horizon 128 --lr 3e-4 --gamma 0.998 --ent 0.001 --log-every 10 --vf-warmup 0 --plr 0.5 --ref ../inits/bc.pt --ref-coef 0.03 --ref-half 400 --eval-episodes 16", "note": "chestai run 1"}
