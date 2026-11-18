@@ -35,7 +35,7 @@ pub const FOOD_TO_SPRINT: i32 = 6;
 pub const SHAKE_DEG: f32 = 6.0;
 pub const SHAKE_TICKS: i32 = 2;
 pub const PRIV_DIM: usize = 71;
-pub const STATS_DIM: usize = 88;
+pub const STATS_DIM: usize = 94;
 /// Floats per player and in total written by `Env::write_view`.
 pub const VIEW_PLAYER: usize = 45;
 pub const VIEW_DIM: usize = 2 * VIEW_PLAYER + 24;
@@ -340,6 +340,21 @@ pub struct Params {
     /// block or a sprint.
     pub w_inv_near: f32,
     pub inv_near_dist: f64,
+    /// What it costs, in hits, to get a potion of Speed down from the
+    /// inventory that is not needed: with another one already in the
+    /// hotbar, or with more Speed left than `drink_window_s`. The slot it
+    /// takes could hold a healing potion, and the click a hit.
+    pub w_speed_refill: f32,
+    /// Share of the duels against scripted bots fought against the
+    /// hardest one: level 4 that presses and pots as the best players do
+    /// (`BotParams::perfect_pot`), on the server itself (0 to 15 ms), with
+    /// 3.0 to 3.4 blocks of reach and 0 to 40 % of the knockback.
+    pub insane_prob: f64,
+    /// Paid, in hits, to the thrower of a pearl that landed when the next
+    /// hit within two seconds is its own, and taken from it when it is the
+    /// other player's: a pearl is for getting at the other one (at its
+    /// potion, out of its combo, on with one's own), not for its own sake.
+    pub w_pearl_next: f32,
     /// In self-play, the share of duels in which player 1 goes for the
     /// other player's potions: while that player holds a potion, has one in
     /// the air or is under 12 health, it runs straight at it (`steal_keys`).
@@ -467,6 +482,9 @@ impl Default for Params {
             w_slow: 0.0,
             w_inv_near: 0.0,
             inv_near_dist: 4.5,
+            w_speed_refill: 0.0,
+            insane_prob: 0.0,
+            w_pearl_next: 0.0,
             league_steal: 0.0,
             throw_carry_prob: 0.0,
             teach: 0.0,
@@ -599,6 +617,9 @@ impl Params {
             124 => self.league_steal = v,
             125 => self.throw_carry_prob = v,
             126 => self.teach = v,
+            127 => self.w_speed_refill = v as f32,
+            128 => self.insane_prob = v,
+            129 => self.w_pearl_next = v as f32,
             113 => self.extreme_share = v,
             114 => self.w_shake = v as f32,
             115 => self.pot_strict_prob = v,
@@ -695,6 +716,15 @@ pub struct Stats {
     /// Degrees of turning the view that the next turn undid (see
     /// `Params::w_shake`), without the limit on what one turn counts.
     pub shake: [f64; 2],
+    /// Potions of Speed got down that were not needed (`w_speed_refill`),
+    /// ticks of the inventory open while the player could not be hurt
+    /// (the hurt time after a hit), and pearls thrown with a reason: the
+    /// other player has a healing potion in hand or in the air, or has hit
+    /// this one twice or more in a row, or this one has, with the other
+    /// out of reach.
+    pub speed_waste: [f64; 2],
+    pub inv_hurt: [f64; 2],
+    pub pearl_sense: [f64; 2],
 }
 
 impl Stats {
@@ -746,6 +776,9 @@ impl Stats {
             self.inv_ticks[a] += o.inv_ticks[a];
             self.inv_hit[a] += o.inv_hit[a];
             self.shake[a] += o.shake[a];
+            self.speed_waste[a] += o.speed_waste[a];
+            self.inv_hurt[a] += o.inv_hurt[a];
+            self.pearl_sense[a] += o.pearl_sense[a];
         }
     }
     pub fn write(&self, out: &mut [f64]) {
@@ -838,6 +871,12 @@ impl Stats {
             self.inv_hit[1],
             self.shake[0],
             self.shake[1],
+            self.speed_waste[0],
+            self.speed_waste[1],
+            self.inv_hurt[0],
+            self.inv_hurt[1],
+            self.pearl_sense[0],
+            self.pearl_sense[1],
         ];
         for (o, x) in out.iter_mut().zip(v.iter()) {
             *o = *x;
@@ -951,6 +990,9 @@ pub fn new_duel(p: &Params, rng: &mut Rng, mode: Mode) -> (Match, [f64; 2], BotP
     } else {
         0
     };
+    // A duel against the hardest bot there is (`Params::insane_prob`):
+    // drawn only when asked for.
+    let insane = mode == Mode::Bot && lesson == 0 && p.insane_prob > 0.0 && rng.chance(p.insane_prob);
     let (d_lo, d_hi) = match lesson {
         0 => (p.start_dist_min, p.start_dist_max),
         5 | 6 => (2.5, 5.0),
@@ -1013,6 +1055,9 @@ pub fn new_duel(p: &Params, rng: &mut Rng, mode: Mode) -> (Match, [f64; 2], BotP
     for i in 0..2 {
         let (lo, hi) = if i == 0 && p.agent_ping_min_ms >= 0.0 {
             (p.agent_ping_min_ms, p.agent_ping_max_ms)
+        } else if insane {
+            // A bot on the server itself.
+            (0.0, 15.0)
         } else {
             (p.ping_min_ms, p.ping_max_ms)
         };
@@ -1241,7 +1286,9 @@ pub fn new_duel(p: &Params, rng: &mut Rng, mode: Mode) -> (Match, [f64; 2], BotP
             }
         }
     }
-    if rng.chance(p.opp_edge_prob) {
+    if insane {
+        m.c[1].edge = Edge { reach: rng.range(3.0, 3.4), kb_taken: rng.range(0.0, 0.4), backtrack: 0 };
+    } else if rng.chance(p.opp_edge_prob) {
         let ms = rng.range(p.opp_backtrack_ms[0], p.opp_backtrack_ms[1].max(p.opp_backtrack_ms[0]));
         m.c[1].edge = Edge {
             reach: rng.range(p.opp_reach[0], p.opp_reach[1].max(p.opp_reach[0])),
@@ -1269,7 +1316,9 @@ pub fn new_duel(p: &Params, rng: &mut Rng, mode: Mode) -> (Match, [f64; 2], BotP
         // Hitting the other player does not clear the way out.
         m.c[1].edge.kb_taken = m.c[1].edge.kb_taken.min(rng.range(0.2, 0.7));
     }
-    let mut bot = if mode == Mode::Bot {
+    let mut bot = if insane {
+        BotParams { presser: true, perfect_pot: true, max_turn: 180.0, aim_noise: 0.1, ..BotParams::level(4) }
+    } else if mode == Mode::Bot {
         let lo = p.bot_level[0].round() as i64;
         let hi = (p.bot_level[1].round() as i64).max(lo);
         BotParams::level((lo + (rng.next_u64() % (hi - lo + 1) as u64) as i64) as u8)
@@ -1293,10 +1342,14 @@ pub fn new_duel(p: &Params, rng: &mut Rng, mode: Mode) -> (Match, [f64; 2], BotP
     if p.bot_runner > 0.0 {
         bot.runner = rng.chance(p.bot_runner);
     }
-    if p.bot_presser > 0.0 {
+    if p.bot_presser > 0.0 && !insane {
         bot.presser = !bot.runner && rng.chance(p.bot_presser);
     }
+    if insane {
+        bot.runner = false;
+    }
     bot.circler = lesson == 5;
+    bot.carry = m.s.cfg.throw_carry;
     (m, ping, bot, lesson)
 }
 
@@ -1458,10 +1511,13 @@ impl Env {
         }
         if let Some((thrower, _)) = self.landed.take() {
             let first = self.m.s.hits[0];
+            let w = self.params.w_pearl_next;
             if first.attacker == thrower {
                 self.ep.pearl_won[thrower] += 1.0;
+                self.rew_acc[thrower] += w;
             } else {
                 self.ep.pearl_lost[thrower] += 1.0;
+                self.rew_acc[thrower] -= w;
             }
         }
         let (wh, wt) = (self.params.w_hit, self.params.w_taken);
@@ -1623,11 +1679,26 @@ impl Env {
         if p.w_slow != 0.0 && sp.speed_ticks <= 0 && (sp.drinks != 0 || sp.rows.count(Item::Drink) > 0) {
             r -= p.w_slow;
         }
-        if p.w_inv_near != 0.0 && self.m.c[id].lp.inv_open {
+        // In the hurt time after a hit the player can take no other, nor
+        // its knockback: a moment for the inventory even next to the
+        // opponent.
+        let safe = self.m.s.p[id].hurt_resistant_time > 10;
+        if p.w_inv_near != 0.0 && self.m.c[id].lp.inv_open && !safe {
             let (a, b) = (&self.m.s.p[id].l.body.pos, &self.m.s.p[1 - id].l.body.pos);
             if (a[0] - b[0]).hypot(a[2] - b[2]) < p.inv_near_dist {
                 r -= p.w_inv_near;
             }
+        }
+        if out.moved == Some(Item::Drink) {
+            let lp = &self.m.c[id].lp;
+            let left = self.m.s.p[id].speed_ticks;
+            if lp.drinks.count_ones() >= 2 || left > self.duel().drink_window() {
+                r -= p.w_speed_refill;
+                self.ep.speed_waste[id] += 1.0;
+            }
+        }
+        if self.m.c[id].lp.inv_open && safe {
+            self.ep.inv_hurt[id] += 1.0;
         }
         // A turn of the view that takes back the one before it.
         let view = [self.m.c[id].lp.l.yaw, self.m.c[id].lp.l.pitch];
@@ -1735,6 +1806,13 @@ impl Env {
         self.was_open[id] = open;
         if out.threw {
             self.ep.pearls[id] += 1.0;
+            let o = &self.m.s.p[1 - id];
+            let potting = o.in_hand().0 == Item::Potion || self.m.s.thrown.iter().any(|t| t.thrower == 1 - id && t.kind == Kind::Potion && !t.dead);
+            let (a, b) = (&self.m.s.p[id].l.body.pos, &o.l.body.pos);
+            let apart = (a[0] - b[0]).hypot(a[2] - b[2]) > 3.0;
+            if potting || self.combo[1 - id] >= 2 || (self.combo[id] >= 2 && apart) {
+                self.ep.pearl_sense[id] += 1.0;
+            }
         }
         let duel = self.duel();
         self.ag[id].ticked(&self.m.c[id], &duel, inp, out);

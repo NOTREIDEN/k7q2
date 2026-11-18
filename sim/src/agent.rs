@@ -240,7 +240,7 @@ const SPREAD_WEIGHTS: [f64; 9] = [
 ];
 /// The ticks of its own run the teacher aims over, the pitches it tries
 /// (90 down to 20, a degree apart), and the most ticks it runs for.
-const RUN_TICKS: usize = 16;
+pub const RUN_TICKS: usize = 16;
 const AIM_PITCHES: usize = 71;
 const MOVE_TICKS: i32 = 14;
 
@@ -389,51 +389,18 @@ impl Agent {
 
     /// The teacher's pitch for a potion thrown on the tick after one that
     /// turns the view to `yaw`, with the player sprinting along that view
-    /// (`teacher_run`), and the ticks that potion flies. Of the pitches
-    /// from straight down to 20 degrees under level, in steps of one, the
-    /// one whose potion gives this player the most health on average over
-    /// the little the server throws off the view at random, then breaks
-    /// soonest, then gives the opponent the least. On a server that adds
-    /// the thrower's movement, or one it is not yet known of, half and
-    /// half, with that movement.
+    /// (`run_feet`), and the ticks that potion flies (`aim_potion`). On a
+    /// server that adds the thrower's movement, or one it is not yet known
+    /// of, half and half, with that movement.
     fn teacher_aim(&self, c: &Client, world: &World, yaw: f32) -> (f32, i32) {
-        let run = teacher_run(c, world, yaw);
+        let run = run_feet(c, world, yaw);
         let other = self.potion_feet(c, -1, self.lag + 2, true);
-        let v = Kind::Potion.speed() as f64;
-        let b = c.lp.l.body.pos;
-        let moved = [run[0][0] - b[0], run[0][2] - b[2]];
         let ways: &[f64] = match self.carry {
             1 => &[1.0],
             0 => &[0.0],
             _ => &[0.0, 1.0],
         };
-        let feet = |j: usize, t: i32| if j == 0 { run[((t + 1).max(0) as usize).min(RUN_TICKS - 1)] } else { other(1, t) };
-        let mut out = [(0i32, 0.0f64, 0.0f64); AIM_PITCHES];
-        for (k, o) in out.iter_mut().enumerate() {
-            let (from, dir) = throw_heading(Kind::Potion, run[0], yaw, 90.0f32 - k as f32);
-            let (mut sum, mut opp, mut all) = (0.0f64, 0.0f64, 0.0f64);
-            for (q, &p) in SPREAD_WEIGHTS.iter().enumerate() {
-                let z = (q as f64 - 4.0) * 0.5;
-                for &w in ways {
-                    let m = [dir[0] * v + w * moved[0], (dir[1] + z * THROW_SPREAD) * v, dir[2] * v + w * moved[1]];
-                    let (_, ticks, heal) = potion_outcome(world, from, m, 0, 0, &feet);
-                    o.0 = o.0.max(ticks);
-                    sum += p * heal[0] as f64;
-                    opp += p * heal[1] as f64;
-                    all += p;
-                }
-            }
-            *o = (o.0, sum / all, opp / all);
-        }
-        let mut best = 0usize;
-        for k in 1..AIM_PITCHES {
-            let (b, o) = (out[best], out[k]);
-            let same = (o.1 - b.1).abs() <= 1e-9;
-            if (o.1 > b.1 && !same) || (same && (o.0 < b.0 || (o.0 == b.0 && o.2 < b.2))) {
-                best = k;
-            }
-        }
-        (90.0f32 - best as f32, out[best].0)
+        aim_potion(c, world, yaw, &run, ways, |t| other(1, t))
     }
 
     /// Called after the client has made its tick with `inp`, with what
@@ -1184,7 +1151,7 @@ impl Agent {
 /// Of W, S, A, D and their pairs, the keys that take a player looking at
 /// `yaw` closest to the way `dir` (x and z, of length one), as forward
 /// and strafe (1, 0 or -1).
-fn walk_along(yaw: f32, dir: [f64; 2]) -> (i8, i8) {
+pub fn walk_along(yaw: f32, dir: [f64; 2]) -> (i8, i8) {
     let f = yaw * mth::PI_F / 180.0f32;
     let (sn, cs) = (mth::sin(f) as f64, mth::cos(f) as f64);
     let mut best = (f64::MIN, 0i8, 0i8);
@@ -1206,10 +1173,10 @@ fn walk_along(yaw: f32, dir: [f64; 2]) -> (i8, i8) {
 /// Where a player that turns its view to `yaw` on the tick to come will
 /// stand after that tick and after each of the next, as its own client can
 /// work out: sprinting along that view for two ticks, then walking on the
-/// same way (`walk_along`). The pull of its keys and the friction of the
+/// same way (`walk_along`), as the teacher plays it. The pull of its keys and the friction of the
 /// ground or the air on the motion it has, the fall to the ground under
 /// it, and a wall in its way.
-fn teacher_run(c: &Client, world: &World, yaw: f32) -> [V3; RUN_TICKS] {
+pub fn run_feet(c: &Client, world: &World, yaw: f32) -> [V3; RUN_TICKS] {
     let l = &c.lp.l;
     let (mut pos, mut m, mut on_ground) = (l.body.pos, l.body.motion, l.body.on_ground);
     let floor = match world.ray_trace_blocks([pos[0], pos[1] + 0.1, pos[2]], [pos[0], pos[1] - 6.0, pos[2]], false) {
@@ -1254,6 +1221,49 @@ fn teacher_run(c: &Client, world: &World, yaw: f32) -> [V3; RUN_TICKS] {
         *at = pos;
     }
     out
+}
+
+/// The pitch for a potion thrown on the tick after one that turns the
+/// view of the player of `c` to `yaw`, with that player then where `run`
+/// says (after the turn's tick and each one after) and the other one where
+/// `other` says at each tick, and the ticks that potion flies. Of the
+/// pitches from straight down to 20 degrees under level, in steps of one,
+/// the one whose potion gives the thrower the most health on average over
+/// the little the server throws off the view at random and over `ways`
+/// (how much of the thrower's movement the server adds, 0 or 1), then
+/// breaks soonest, then gives the other one the least. Used by the
+/// teacher and by the scripted bots that pot well.
+pub fn aim_potion(c: &Client, world: &World, yaw: f32, run: &[V3; RUN_TICKS], ways: &[f64], other: impl Fn(i32) -> V3) -> (f32, i32) {
+    let v = Kind::Potion.speed() as f64;
+    let b = c.lp.l.body.pos;
+    let moved = [run[0][0] - b[0], run[0][2] - b[2]];
+    let feet = |j: usize, t: i32| if j == 0 { run[((t + 1).max(0) as usize).min(RUN_TICKS - 1)] } else { other(t) };
+    let mut out = [(0i32, 0.0f64, 0.0f64); AIM_PITCHES];
+    for (k, o) in out.iter_mut().enumerate() {
+        let (from, dir) = throw_heading(Kind::Potion, run[0], yaw, 90.0f32 - k as f32);
+        let (mut sum, mut opp, mut all) = (0.0f64, 0.0f64, 0.0f64);
+        for (q, &p) in SPREAD_WEIGHTS.iter().enumerate() {
+            let z = (q as f64 - 4.0) * 0.5;
+            for &w in ways {
+                let m = [dir[0] * v + w * moved[0], (dir[1] + z * THROW_SPREAD) * v, dir[2] * v + w * moved[1]];
+                let (_, ticks, heal) = potion_outcome(world, from, m, 0, 0, &feet);
+                o.0 = o.0.max(ticks);
+                sum += p * heal[0] as f64;
+                opp += p * heal[1] as f64;
+                all += p;
+            }
+        }
+        *o = (o.0, sum / all, opp / all);
+    }
+    let mut best = 0usize;
+    for k in 1..AIM_PITCHES {
+        let (b, o) = (out[best], out[k]);
+        let same = (o.1 - b.1).abs() <= 1e-9;
+        if (o.1 > b.1 && !same) || (same && (o.0 < b.0 || (o.0 == b.0 && o.2 < b.2))) {
+            best = k;
+        }
+    }
+    (90.0f32 - best as f32, out[best].0)
 }
 
 /// The mouse counts of a turn by `deg` degrees, to the nearest.

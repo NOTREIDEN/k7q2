@@ -33,7 +33,7 @@ on:
           --param refill_prob=0.5 --param w_stock=2 --param lesson_prob=0.5
           --param lesson_dist_min=12 --param lesson_dist_max=28
           --param w_miss=1.5 --param w_pot_time=0.1
-          --param agent_ping_min_ms=0 --param agent_ping_max_ms=220
+          --param agent_ping_min_ms=60 --param agent_ping_max_ms=260
           --param lessons=511 --param extreme_share=0.75 --param bot_runner=0.15
           --param w_shake=0.1 --param w_waste=2.5 --param pot_strict_prob=0.3
           --param w_gift=3 --param w_hungry=0.05 --param w_slow=0.05
@@ -41,6 +41,8 @@ on:
           --param w_inv_near=0.5 --param throw_carry_prob=0.5 --param league_steal=0.3
           --league-param league_steal=0.5 --turn-drill 0.5
           --teach-coef 1 --teach-full-until 15640 --teach-until 16130
+          --param insane_prob=0.35 --param w_speed_refill=1 --param w_pearl_next=0.5
+          --param inv_near_dist=3 --param ep_ticks_max=2400
       previous:
         description: Id of the run to continue from (empty starts from seed/stage1.pt)
         default: ""

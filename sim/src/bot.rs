@@ -70,6 +70,13 @@ pub struct BotParams {
     /// near heals both, and its hits knock the thrower away from where the
     /// potion breaks.
     pub presser: bool,
+    /// It pots as the best players do: the pitch worked out from its own
+    /// run for a potion that lands on it (`agent::aim_potion`), turned
+    /// away and sprinting if the opponent is near, then backing into it
+    /// with its view on the opponent until it breaks. `carry` is whether
+    /// the server adds the thrower's movement to the throw.
+    pub perfect_pot: bool,
+    pub carry: bool,
 }
 
 impl BotParams {
@@ -95,6 +102,8 @@ impl BotParams {
                 runner: false,
                 circler: false,
                 presser: false,
+                perfect_pot: false,
+                carry: false,
             },
             2 => BotParams {
                 level,
@@ -116,6 +125,8 @@ impl BotParams {
                 runner: false,
                 circler: false,
                 presser: false,
+                perfect_pot: false,
+                carry: false,
             },
             3 => BotParams {
                 level,
@@ -137,6 +148,8 @@ impl BotParams {
                 runner: false,
                 circler: false,
                 presser: false,
+                perfect_pot: false,
+                carry: false,
             },
             _ => BotParams {
                 level: 4,
@@ -158,6 +171,8 @@ impl BotParams {
                 runner: false,
                 circler: false,
                 presser: false,
+                perfect_pot: false,
+                carry: false,
             },
         }
     }
@@ -231,6 +246,12 @@ pub struct BotState {
     inv_keep: u32,
     /// A runner on the run (see `BotParams::runner`).
     pub fleeing: bool,
+    /// The potion a perfect potter is throwing: the yaw and pitch it
+    /// throws along, the way it runs, and the ticks it still backs into it.
+    pot_yaw: f64,
+    pot_pitch: f64,
+    pot_dir: [f64; 2],
+    pot_run: i32,
 }
 
 fn gauss(rng: &mut Rng) -> f64 {
@@ -785,7 +806,46 @@ pub fn act(c: &Client, world: &World, cfg: &ClientCfg, p: &BotParams, st: &mut B
             if ready && good_moment && rng.chance(0.35 * p.potion) {
                 st.potion_stage = 1;
                 st.potion_away = st.fleeing || (p.level >= 3 && hdist < 6.0);
+                if p.perfect_pot {
+                    let yaw = if st.potion_away { flee_yaw.unwrap_or(yaw_to + 180.0) } else { lp.l.yaw as f64 };
+                    let run = crate::agent::run_feet(c, world, yaw as f32);
+                    let them = c.rp.pos;
+                    let (pitch, ticks) = crate::agent::aim_potion(c, world, yaw as f32, &run, &[if p.carry { 1.0 } else { 0.0 }], |_| them);
+                    let f = yaw.to_radians();
+                    st.pot_yaw = yaw;
+                    st.pot_pitch = pitch as f64;
+                    st.pot_dir = [-f.sin(), f.cos()];
+                    st.pot_run = ticks + 2;
+                }
             }
+        }
+        1 if p.perfect_pot => {
+            // The turn and the pitch in one tick, sprinting along the view.
+            let dyaw = mth::wrap_deg(st.pot_yaw - lp.l.yaw as f64);
+            let dpitch = st.pot_pitch - lp.l.pitch as f64;
+            inp.dx = (dyaw / deg_per_count).round() as i32;
+            inp.dy = (dpitch / deg_per_count).round() as i32;
+            inp.attack = false;
+            inp.use_item = false;
+            inp.forward = 1;
+            inp.strafe = 0;
+            inp.jump = false;
+            inp.sprint_key = true;
+            inp.slot_key = lp.potions.trailing_zeros() as u8 + 1;
+            st.potion_stage = 2;
+        }
+        2 if p.perfect_pot => {
+            inp.slot_key = lp.potions.trailing_zeros() as u8 + 1;
+            inp.use_item = true;
+            inp.attack = false;
+            inp.dx = 0;
+            inp.dy = 0;
+            inp.forward = 1;
+            inp.strafe = 0;
+            inp.jump = false;
+            inp.sprint_key = true;
+            st.potion_stage = 3;
+            st.potion_wait = 10;
         }
         1 => {
             let b = &lp.l.body;
@@ -825,6 +885,16 @@ pub fn act(c: &Client, world: &World, cfg: &ClientCfg, p: &BotParams, st: &mut B
             inp.use_item = false;
             st.potion_stage = 0;
         }
+    }
+    if p.perfect_pot && st.pot_run > 0 && st.potion_stage != 1 && st.potion_stage != 2 {
+        // Backing into its potion, the view back on the opponent.
+        let yaw = (lp.l.yaw as f64 + inp.dx as f64 * deg_per_count) as f32;
+        let (fw, sd) = crate::agent::walk_along(yaw, st.pot_dir);
+        inp.forward = fw;
+        inp.strafe = sd;
+        inp.sprint_key = false;
+        inp.jump = false;
+        st.pot_run -= 1;
     }
 
     // Drinks and meals. When its Speed is over, or nearly for the better

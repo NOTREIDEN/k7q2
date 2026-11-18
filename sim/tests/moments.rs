@@ -643,3 +643,27 @@ fn the_teacher_of_turned_throws_says_what_it_would_do_and_plays_nothing() {
     assert!(last <= 3 + 14, "{last}");
     assert!(seen[last + 1..].iter().all(|t| *t == none));
 }
+
+#[test]
+fn the_insane_bot_pots_onto_itself() {
+    let (mut heal, mut splashes) = (0.0, 0.0);
+    for seed in 0..12 {
+        let mut p = params();
+        p.insane_prob = 1.0;
+        p.start_health = [20.0, 20.0];
+        p.start_hurt = 0.0;
+        p.start_dist_min = 14.0;
+        p.start_dist_max = 14.0;
+        p.throw_carry_prob = if seed % 2 == 0 { 1.0 } else { 0.0 };
+        let mut e = Env::new(Mode::Bot, p, seed);
+        // Hurt, far from an opponent that stands still.
+        e.m.s.p[1].health = 3.0;
+        e.m.c[1].lp.health = 3.0;
+        e.m.c[0].rp.health = 3.0;
+        run(&mut e, 160, |_| IDLE);
+        heal += e.episode().heal_self[1];
+        splashes += e.episode().splashes[1];
+    }
+    assert!(splashes >= 12.0, "{splashes}");
+    assert!(heal / splashes >= 7.0, "{} a potion over {splashes}", heal / splashes);
+}
