@@ -122,7 +122,7 @@ pub struct Params {
     /// Cost per tick of standing about: less than 1.5 blocks moved in the last 2
     /// seconds and no blow landed in them.
     pub w_idle: f64,
-    /// Cost of spinning: the signed turn averaged over about a second, past 4
+    /// Cost of spinning: the signed turn averaged over about a second, past 3
     /// degrees a tick, so that the view does not go round and round.
     pub w_spin: f64,
 }
@@ -204,7 +204,7 @@ impl Default for Params {
             w_flip: 0.025,
             w_away: 0.01,
             w_idle: 0.03,
-            w_spin: 0.03,
+            w_spin: 0.08,
         }
     }
 }
@@ -869,7 +869,7 @@ impl Env {
         }
         self.last_dyaw = inp.dyaw;
         self.spin += (inp.dyaw - self.spin) / 20.0;
-        let over = (self.spin.abs() - 4.0).max(0.0) as f64 / 6.0;
+        let over = (self.spin.abs() - 3.0).max(0.0) as f64 / 5.0;
         r -= p.w_spin * over * over;
         {
             let pos = self.g.cp.l.body.pos;
