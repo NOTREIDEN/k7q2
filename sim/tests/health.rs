@@ -39,7 +39,13 @@ fn step(m: &mut Match, i0: &Input, i1: &Input) {
 
 /// Player 0 hits once; returns the health player 1 lost.
 fn one_hit(cfg: ServerCfg) -> f32 {
+    one_hit_with(cfg, -1)
+}
+
+/// The same with a Strength of this amplifier on player 0 (-1 for none).
+fn one_hit_with(cfg: ServerCfg, strength: i32) -> f32 {
     let mut m = duel(cfg);
+    m.s.p[0].strength = strength;
     let idle = Input::default();
     for _ in 0..4 {
         step(&mut m, &idle, &idle);
@@ -72,6 +78,15 @@ fn a_bare_player_takes_the_swords_full_damage() {
     assert_eq!(one_hit(real()), 8.0);
     // Sharpness adds 1.25 a level.
     assert_eq!(one_hit(ServerCfg { ench_damage: 5.0 * 1.25, ..real() }), 14.25);
+}
+
+#[test]
+fn strength_multiplies_the_swords_damage_before_the_armour() {
+    // 1 + 1.3 (amplifier + 1): I 2.3, II 3.6, III 4.9 times the sword's 8.
+    for (amp, k) in [(0, 2.3f32), (1, 3.6), (2, 4.9)] {
+        let lost = one_hit_with(ServerCfg { armor: 20, ..real() }, amp);
+        assert!((lost - 1.6 * k).abs() < 1e-3, "{amp} {lost}");
+    }
 }
 
 #[test]

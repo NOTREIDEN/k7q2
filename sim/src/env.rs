@@ -372,6 +372,13 @@ pub struct Params {
     /// best as it was.
     pub w_hp_pot: f32,
     pub hp_pot_scale: f32,
+    /// Share of duels in which the second player gets Strength part way
+    /// through, out of nothing as far as the first can tell (a drink it did
+    /// not see, a command), from the start to two thirds of the duel: every
+    /// hit of it costs 2.3, 3.6 or 4.9 times as much from then on. The
+    /// level is drawn evenly from I to `opp_strength_max`.
+    pub opp_strength_prob: f64,
+    pub opp_strength_max: f64,
     /// Share of new duels that are a retry of one the first player lost,
     /// from a few seconds before its death (as GT Sophy trained on its
     /// mistakes): the same moment of the same duel, played again. Each lost
@@ -512,6 +519,8 @@ impl Default for Params {
             terrain_gap_prob: 0.0,
             w_hp_pot: 0.0,
             hp_pot_scale: 4.0,
+            opp_strength_prob: 0.0,
+            opp_strength_max: 3.0,
             retry_prob: 0.0,
             league_steal: 0.0,
             throw_carry_prob: 0.0,
@@ -653,6 +662,8 @@ impl Params {
             133 => self.terrain_gap_prob = v,
             134 => self.w_hp_pot = v as f32,
             135 => self.hp_pot_scale = v as f32,
+            136 => self.opp_strength_prob = v,
+            137 => self.opp_strength_max = v,
             132 => self.retry_prob = v,
             113 => self.extreme_share = v,
             114 => self.w_shake = v as f32,
@@ -1020,6 +1031,10 @@ pub struct Env {
     /// from before the first player's deaths with the retries left of each.
     moments: std::collections::VecDeque<Moment>,
     losses: Vec<(Moment, u8)>,
+    /// Tick of the duel at which the second player gets Strength, and its
+    /// amplifier; -1 for none (see `Params::opp_strength_prob`).
+    strength_at: i32,
+    strength_amp: i32,
 }
 
 /// The keys of a player that goes for its opponent's potions, laid over
@@ -1482,6 +1497,8 @@ impl Env {
             over: false,
             moments: std::collections::VecDeque::new(),
             losses: Vec::new(),
+            strength_at: -1,
+            strength_amp: -1,
         };
         e.begin();
         e
@@ -1539,6 +1556,8 @@ impl Env {
         self.ep.retries = 1.0;
         self.over = false;
         self.moments.clear();
+        // A Strength already taken is in the server's state; none comes later.
+        self.strength_at = -1;
         for a in 0..2 {
             self.phi[a] = self.potential(a).0;
         }
@@ -1548,6 +1567,12 @@ impl Env {
         let p = &self.params;
         self.ep_len = self.rng.range(p.ep_ticks_min, p.ep_ticks_max.max(p.ep_ticks_min)).round() as i32;
         self.ticks_left = self.ep_len;
+        self.strength_at = -1;
+        if p.opp_strength_prob > 0.0 && self.rng.chance(p.opp_strength_prob) {
+            let top = p.opp_strength_max.round().clamp(1.0, 3.0) as u64;
+            self.strength_amp = (self.rng.next_u64() % top) as i32;
+            self.strength_at = self.rng.range(0.0, self.ep_len as f64 * 2.0 / 3.0).round() as i32;
+        }
         self.rew_acc = [0.0; 2];
         self.combo = [0; 2];
         self.max_combo = [0; 2];
@@ -2059,6 +2084,10 @@ impl Env {
                 self.landed = if left > 1 { Some((who, left - 1)) } else { None };
             }
             self.ticks_left -= 1;
+            if self.strength_at >= 0 && self.ep_len - self.ticks_left >= self.strength_at {
+                self.m.s.p[1].strength = self.strength_amp;
+                self.strength_at = -1;
+            }
             if self.m.world.terrain().is_some() {
                 self.ep.terrain_ticks[0] += 1.0;
                 self.ep.terrain_ticks[1] += 1.0;

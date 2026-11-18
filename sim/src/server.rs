@@ -483,6 +483,10 @@ pub struct ServerPlayer {
     pub meals_done: u32,
     /// Damage value of the sword: the hits that have cost it durability.
     pub sword_wear: u32,
+    /// Amplifier of a Strength effect on this player, -1 for none: the
+    /// effect's modifier of `generic.attackDamage` multiplies the total by
+    /// `1 + 1.3 (amplifier + 1)` (`PotionAttackDamage`, operation 2).
+    pub strength: i32,
     /// `previousEquipment[0]`: what this player held when it was last
     /// updated. The damage of its attacks comes from this item, and the
     /// other player is told when it changes.
@@ -561,6 +565,7 @@ impl ServerPlayer {
             drinks_done: 0,
             meals_done: 0,
             sword_wear: 0,
+            strength: -1,
             equip: (Item::Sword, 0),
             gone: Vec::new(),
             pearl_wait: 0,
@@ -1540,6 +1545,9 @@ impl Server {
         // what is in hand now.
         let sword_now = self.p[a].in_hand().0 == Item::Sword;
         let mut f = if self.p[a].equip.0 == Item::Sword { self.cfg.damage } else { 1.0 };
+        if self.p[a].strength >= 0 {
+            f = (f as f64 * (1.0 + 1.3 * (self.p[a].strength + 1) as f64)) as f32;
+        }
         let f1 = if sword_now { self.cfg.ench_damage } else { 0.0 };
         let ench = if sword_now { self.cfg.kb_ench } else { 0 };
         let sprinting = self.p[a].l.sprinting;

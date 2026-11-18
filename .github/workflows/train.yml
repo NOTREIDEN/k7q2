@@ -44,7 +44,7 @@ on:
           --param insane_prob=0.35 --param w_speed_refill=1 --param w_pearl_next=0.5
           --param inv_near_dist=3 --param ep_ticks_max=2400
           --param terrain_prob=0.5 --param terrain_amount=0.8 --param retry_prob=0.25 --param terrain_gap_prob=0.4
-          --param w_hp_pot=8 --param hp_pot_scale=4
+          --param w_hp_pot=8 --param hp_pot_scale=4 --param opp_strength_prob=0.2 --param opp_strength_max=3
       previous:
         description: Id of the run to continue from (empty starts from seed/stage1.pt)
         default: ""
