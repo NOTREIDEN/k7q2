@@ -363,6 +363,15 @@ pub struct Params {
     /// Of the duels on terrain, the share with a strip open to the void
     /// across the way from one player to the other (`terrain::build`).
     pub terrain_gap_prob: f64,
+    /// Health in the shaping potential (`Env::potential`): `w_hp_pot`
+    /// times `-exp(-h / hp_pot_scale)` of the player's own health, less the
+    /// same of the opponent's. A point of health counts the more the lower
+    /// the health it comes from or goes to, so a potion with little health
+    /// left, or a hit kept off then, pays at once what it is worth to the
+    /// win that comes seconds later; as a potential it leaves which play is
+    /// best as it was.
+    pub w_hp_pot: f32,
+    pub hp_pot_scale: f32,
     /// Share of new duels that are a retry of one the first player lost,
     /// from a few seconds before its death (as GT Sophy trained on its
     /// mistakes): the same moment of the same duel, played again. Each lost
@@ -501,6 +510,8 @@ impl Default for Params {
             terrain_prob: 0.0,
             terrain_amount: 0.6,
             terrain_gap_prob: 0.0,
+            w_hp_pot: 0.0,
+            hp_pot_scale: 4.0,
             retry_prob: 0.0,
             league_steal: 0.0,
             throw_carry_prob: 0.0,
@@ -640,6 +651,8 @@ impl Params {
             130 => self.terrain_prob = v,
             131 => self.terrain_amount = v,
             133 => self.terrain_gap_prob = v,
+            134 => self.w_hp_pot = v as f32,
+            135 => self.hp_pot_scale = v as f32,
             132 => self.retry_prob = v,
             113 => self.extreme_share = v,
             114 => self.w_shake = v as f32,
@@ -1759,7 +1772,14 @@ impl Env {
         let dry = (lp.potions == 0 && lp.rows.count(Item::Potion) > 0) as u8
             + (lp.drinks == 0 && lp.speed_amp < 0 && lp.rows.count(Item::Drink) > 0) as u8;
         let stock = -p.w_stock * dry as f32;
-        (p.w_aim * aim as f32 + p.w_range * range as f32 + fast + fed + stock, ang)
+        let health = if p.w_hp_pot != 0.0 {
+            let k = p.hp_pot_scale.max(0.1);
+            let low = |h: f32| -(-h.max(0.0) / k).exp();
+            p.w_hp_pot * (low(sp.health) - low(self.m.s.p[1 - id].health))
+        } else {
+            0.0
+        };
+        (p.w_aim * aim as f32 + p.w_range * range as f32 + fast + fed + stock + health, ang)
     }
 
     /// Is the other player within attack reach of `id`, in `id`'s own view?
