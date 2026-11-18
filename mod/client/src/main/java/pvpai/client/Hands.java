@@ -33,6 +33,7 @@ final class Hands {
      * default (shown as 100 %): the agent's mouse counts are counted there.
      */
     static final float TRAINED_FACTOR = 1.0F;
+    private static final int TRAINED_COUNTS_PER_TURN = 2400;
 
     /** The part of a count each way that the sensitivity that is set could not make yet. */
     private double carryX, carryY;
@@ -110,6 +111,13 @@ final class Hands {
         }
         key(gs.keyBindUseItem, k.useItem);
         useDown = k.useItem;
+
+        // The policy can add several horizontal turns in one tick. Apply the
+        // shortest turn to the same heading before rounding to mouse counts.
+        k.dx %= TRAINED_COUNTS_PER_TURN;
+        if (Math.abs(k.dx) > TRAINED_COUNTS_PER_TURN / 2) {
+            k.dx -= Integer.signum(k.dx) * TRAINED_COUNTS_PER_TURN;
+        }
         if (k.dx != 0 || k.dy != 0) {
             float f1 = mouseFactor(gs);
             int[] n = userCounts(k.dx, k.dy, f1);
