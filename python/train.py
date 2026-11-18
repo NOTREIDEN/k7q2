@@ -344,6 +344,7 @@ def main():
                         # Survival drills: the share of them in which player 0 died.
                         drill_died=st.get("drill_deaths", 0.0) / max(st.get("drills", 0.0), 1.0),
                         drills=st.get("drills", 0.0),
+                        pearl_low=st.get("pearl_low0", 0.0) / max(st["pearls0"], 1.0),
                         deaths_per_min=(st["deaths0"] + st["deaths1"]) / mins0,
                         potions_per_min=st["splashes0"] / mins0,
                         opp_potions_per_min=st["splashes1"] / mins0,
@@ -378,6 +379,7 @@ def main():
                         speed_frac=st["speed_on0"] / st["ticks0"],
                         opp_speed_frac=st["speed_on1"] / max(st["ticks1"], 1.0),
                         fed_frac=st["fed0"] / st["ticks0"],
+                        not_full_frac=st.get("not_full0", 0.0) / st["ticks0"],
                         # The inventory: potions got down from its rows per duel by each
                         # side, per visit, and the hits taken per visit.
                         refills_per_duel=st["refills0"] / st["episodes"],
@@ -408,6 +410,7 @@ def main():
                   f"first {b.get('pearl_first_hit', 0):.2f}/{b.get('opp_pearl_answered', 0):.2f} "
                   f"win {b.get('win_frac', 0):.2f} deaths {b.get('deaths_per_min', 0):.1f} "
                   f"drill-died {b.get('drill_died', 0):.2f} of {b.get('drills', 0):.0f} "
+                  f"pearl-low {b.get('pearl_low', 0):.2f} "
                   f"pot {b.get('potions_per_min', 0):.1f}/{b.get('opp_potions_per_min', 0):.1f} "
                   f"heal {b.get('potion_heal', 0):.1f}/{b.get('opp_potion_heal', 0):.1f} "
                   f"reach {b.get('potion_reach', 0):.1f} gift {b.get('potion_gift', 0):.1f}/{b.get('opp_potion_gift', 0):.1f} "
@@ -418,6 +421,7 @@ def main():
                   f"eat {b.get('meals_per_duel', 0):.2f}/{b.get('opp_meals_per_duel', 0):.2f} "
                   f"done {b.get('sip_done', 0):.2f} sip-hit {b.get('sip_hits_taken', 0):.2f} "
                   f"speed {b.get('speed_frac', 0):.2f}/{b.get('opp_speed_frac', 0):.2f} fed {b.get('fed_frac', 0):.2f} "
+                  f"not-full {b.get('not_full_frac', 0):.2f} "
                   f"refill {b.get('refills_per_duel', 0):.2f}/{b.get('opp_refills_per_duel', 0):.2f} "
                   f"visit {b.get('refills_per_visit', 0):.1f} in {b.get('inv_ticks_per_visit', 0):.1f} "
                   f"inv-hit {b.get('inv_hits_taken', 0):.2f} "

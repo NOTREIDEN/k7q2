@@ -35,7 +35,7 @@ pub const FOOD_TO_SPRINT: i32 = 6;
 pub const SHAKE_DEG: f32 = 6.0;
 pub const SHAKE_TICKS: i32 = 2;
 pub const PRIV_DIM: usize = 71;
-pub const STATS_DIM: usize = 101;
+pub const STATS_DIM: usize = 105;
 /// Floats per player and in total written by `Env::write_view`.
 pub const VIEW_PLAYER: usize = 45;
 pub const VIEW_DIM: usize = 2 * VIEW_PLAYER + 24;
@@ -431,6 +431,36 @@ pub struct Params {
     pub web_prob: f64,
     pub web_amount: f64,
     pub web_trap_prob: f64,
+    /// The food level `w_hungry` asks for (the game heals from 18 on), and
+    /// what it costs a tick to have less than full food, steak at hand,
+    /// while at that level or above: a player who keeps its food full
+    /// eats whenever there is a moment for it.
+    pub food_full: i32,
+    pub w_full: f32,
+    /// Taken from the thrower of a pearl that throws it with less health
+    /// than `pearl_low_hp`, and not given back: the pearl's fall damage
+    /// with little health left is a way to die.
+    pub w_pearl_low: f32,
+    pub pearl_low_hp: f32,
+    /// The longest reach of the hardest bot (`insane_prob`).
+    pub insane_reach_max: f64,
+    /// Taken from a player for every hit it takes while it drinks or eats,
+    /// on top of what the hit costs: a drink or a meal is for a moment
+    /// in which nobody can hit it.
+    pub w_sip_hit: f32,
+    /// Share of the duels that are no lesson in which the first player
+    /// starts this many blocks up in the air, hurt, as when it has been
+    /// knocked off a height: the fall's damage, and the velocity the
+    /// server sends with it, stop it where it lands.
+    pub fall_start_prob: f64,
+    pub fall_start: [f64; 2],
+    /// Share of the duels that are no lesson on a server whose hits hardly
+    /// move anybody, as some have: the plugin's knockback with this much
+    /// across the ground and this much up, so that the players stay on
+    /// top of each other.
+    pub tiny_kb_prob: f64,
+    pub tiny_kb_h: [f64; 2],
+    pub tiny_kb_v: [f64; 2],
     /// Share of new duels that are a retry of one the first player lost,
     /// from a few seconds before its death (as GT Sophy trained on its
     /// mistakes): the same moment of the same duel, played again. Each lost
@@ -590,6 +620,17 @@ impl Default for Params {
             web_prob: 0.0,
             web_amount: 0.6,
             web_trap_prob: 0.3,
+            food_full: FOOD_TO_HEAL,
+            w_full: 0.0,
+            w_pearl_low: 0.0,
+            pearl_low_hp: 8.0,
+            insane_reach_max: 3.4,
+            w_sip_hit: 0.0,
+            fall_start_prob: 0.0,
+            fall_start: [4.0, 9.0],
+            tiny_kb_prob: 0.0,
+            tiny_kb_h: [0.05, 0.25],
+            tiny_kb_v: [0.1, 0.3],
             retry_prob: 0.0,
             league_steal: 0.0,
             throw_carry_prob: 0.0,
@@ -750,6 +791,20 @@ impl Params {
             152 => self.web_prob = v,
             153 => self.web_amount = v,
             154 => self.web_trap_prob = v,
+            155 => self.food_full = v as i32,
+            156 => self.w_full = v as f32,
+            157 => self.w_pearl_low = v as f32,
+            158 => self.pearl_low_hp = v as f32,
+            159 => self.insane_reach_max = v,
+            160 => self.w_sip_hit = v as f32,
+            161 => self.fall_start_prob = v,
+            162 => self.fall_start[0] = v,
+            163 => self.fall_start[1] = v,
+            164 => self.tiny_kb_prob = v,
+            165 => self.tiny_kb_h[0] = v,
+            166 => self.tiny_kb_h[1] = v,
+            167 => self.tiny_kb_v[0] = v,
+            168 => self.tiny_kb_v[1] = v,
             132 => self.retry_prob = v,
             113 => self.extreme_share = v,
             114 => self.w_shake = v as f32,
@@ -865,6 +920,10 @@ pub struct Stats {
     /// first player died.
     pub drills: f64,
     pub drill_deaths: f64,
+    /// Pearls thrown with less health than `pearl_low_hp`.
+    pub pearl_low: [f64; 2],
+    /// Ticks with less than full food (`food_full`) and steak at hand.
+    pub not_full: [f64; 2],
 }
 
 impl Stats {
@@ -925,6 +984,10 @@ impl Stats {
         self.retries += o.retries;
         self.drills += o.drills;
         self.drill_deaths += o.drill_deaths;
+        self.pearl_low[0] += o.pearl_low[0];
+        self.pearl_low[1] += o.pearl_low[1];
+        self.not_full[0] += o.not_full[0];
+        self.not_full[1] += o.not_full[1];
     }
     pub fn write(&self, out: &mut [f64]) {
         let v = [
@@ -1029,6 +1092,10 @@ impl Stats {
             self.retries,
             self.drills,
             self.drill_deaths,
+            self.pearl_low[0],
+            self.pearl_low[1],
+            self.not_full[0],
+            self.not_full[1],
         ];
         for (o, x) in out.iter_mut().zip(v.iter()) {
             *o = *x;
@@ -1269,6 +1336,11 @@ pub fn new_duel(p: &Params, rng: &mut Rng, mode: Mode) -> (Match, [f64; 2], BotP
         let ang = (-sz).atan2(-sx) + rng.range(-0.6, 0.6);
         b = [a[0] + d * ang.cos(), p.floor_y, a[2] + d * ang.sin()];
     }
+    // Drawn only when asked for, so that duels come out as they did.
+    let falling = lesson == 0 && p.fall_start_prob > 0.0 && rng.chance(p.fall_start_prob);
+    if falling {
+        a[1] += rng.range(p.fall_start[0], p.fall_start[1].max(p.fall_start[0]));
+    }
     let face = |from: V3, to: V3, rng: &mut Rng| -> f32 {
         let (yaw, _) = bot::angles_to(from, to);
         (yaw + rng.range(-p.start_yaw_noise, p.start_yaw_noise)) as f32
@@ -1360,6 +1432,23 @@ pub fn new_duel(p: &Params, rng: &mut Rng, mode: Mode) -> (Match, [f64; 2], BotP
         if rng.chance(0.25) {
             max_no_damage = 16 + (rng.next_u64() % 4) as i32;
         }
+    }
+    // Drawn only when asked for, so that duels come out as they did.
+    if lesson == 0 && p.tiny_kb_prob > 0.0 && rng.chance(p.tiny_kb_prob) {
+        let hg = rng.range(p.tiny_kb_h[0], p.tiny_kb_h[1].max(p.tiny_kb_h[0]));
+        let vg = rng.range(p.tiny_kb_v[0], p.tiny_kb_v[1].max(p.tiny_kb_v[0]));
+        kb = KbProfile::VANILLA;
+        plugin = Some(KbPlugin {
+            h_ground: hg,
+            h_air: hg * rng.range(0.8, 1.1),
+            h_sprint: hg * rng.range(0.3, 1.0),
+            v_ground: vg,
+            v_air: vg * rng.range(0.6, 1.0),
+            v_sprint: rng.range(0.0, 0.05),
+            stop_sprint: rng.chance(0.7),
+            y_limit: if rng.chance(0.5) { rng.range(0.5, 1.2) } else { -1.0 },
+            v_after_limit: rng.range(-0.1, 0.0),
+        });
     }
     if lesson == 6 {
         // Hits that hardly move anybody, on the ground or in the air.
@@ -1515,7 +1604,7 @@ pub fn new_duel(p: &Params, rng: &mut Rng, mode: Mode) -> (Match, [f64; 2], BotP
                 m.s.p[i].rows = rows;
                 m.c[i].lp.rows = rows;
             }
-            let hurt = (5..=8).contains(&lesson);
+            let hurt = (5..=8).contains(&lesson) || (falling && i == 0);
             if hurt {
                 n = n.max(3);
             }
@@ -1540,7 +1629,7 @@ pub fn new_duel(p: &Params, rng: &mut Rng, mode: Mode) -> (Match, [f64; 2], BotP
         }
     }
     if insane {
-        m.c[1].edge = Edge { reach: rng.range(3.0, 3.4), kb_taken: rng.range(0.0, 0.4), backtrack: 0 };
+        m.c[1].edge = Edge { reach: rng.range(3.0, p.insane_reach_max.max(3.0)), kb_taken: rng.range(0.0, 0.4), backtrack: 0 };
     } else if rng.chance(p.opp_edge_prob) {
         let ms = rng.range(p.opp_backtrack_ms[0], p.opp_backtrack_ms[1].max(p.opp_backtrack_ms[0]));
         m.c[1].edge = Edge {
@@ -2005,6 +2094,7 @@ impl Env {
             }
             if self.m.c[h.victim].lp.consuming() {
                 self.ep.sip_hit[h.victim] += 1.0;
+                self.rew_acc[h.victim] -= self.params.w_sip_hit;
             }
             if self.m.c[h.victim].lp.inv_open {
                 self.ep.inv_hit[h.victim] += 1.0;
@@ -2154,6 +2244,10 @@ impl Env {
             let short = ((FOOD_TO_HEAL - sp.food.level) as f32 / (FOOD_TO_HEAL - FOOD_TO_SPRINT) as f32).min(1.0);
             r -= p.w_hungry * (0.5 + 0.5 * short);
         }
+        let eating = sp.using_item && sp.use_slot == sp.held && sp.in_hand().0 == Item::Food;
+        if p.w_full != 0.0 && sp.steak > 0 && !eating && sp.food.level >= FOOD_TO_HEAL && sp.food.level < p.food_full {
+            r -= p.w_full;
+        }
         if p.w_slow != 0.0 && sp.speed_ticks <= 0 && (sp.drinks != 0 || sp.rows.count(Item::Drink) > 0) {
             r -= p.w_slow;
         }
@@ -2270,6 +2364,9 @@ impl Env {
         if sp.food.level > 6 {
             self.ep.fed[id] += 1.0;
         }
+        if sp.steak > 0 && sp.food.level < self.params.food_full.max(FOOD_TO_HEAL) {
+            self.ep.not_full[id] += 1.0;
+        }
         // The inventory.
         let open = self.m.c[id].lp.inv_open;
         if open || self.was_open[id] {
@@ -2285,6 +2382,10 @@ impl Env {
         if out.threw {
             self.ep.pearls[id] += 1.0;
             self.rew_acc[id] -= self.params.w_pearl_cost;
+            if self.m.s.p[id].health < self.params.pearl_low_hp {
+                self.rew_acc[id] -= self.params.w_pearl_low;
+                self.ep.pearl_low[id] += 1.0;
+            }
             self.pearl_kill[id] = (self.params.pearl_kill_s * 20.0).round().max(1.0) as i32;
             let o = &self.m.s.p[1 - id];
             let potting = o.in_hand().0 == Item::Potion || self.m.s.thrown.iter().any(|t| t.thrower == 1 - id && t.kind == Kind::Potion && !t.dead);

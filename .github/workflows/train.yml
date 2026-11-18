@@ -26,7 +26,7 @@ on:
           --lr 5e-4 --n-selfplay 96 --n-bot 128 --n-league 96 --bot-min 2 --log-every 50
           --param w_sprint_hit=0.3 --param w_reach_adv=0.03 --param w_combo=0.2
           --param w_close=0.06 --param close_dist=2.2
-          --param kb_random=0.7 --param opp_edge_prob=0.5 --param w_damage=1
+          --param kb_random=0.7 --param opp_edge_prob=0.6 --param w_damage=1
           --param start_dist_max=16 --param health_prob=0.8
           --param speed_end_prob=0.5 --param hunger_prob=0.5
           --param w_speed=5 --param w_fed=5
@@ -35,13 +35,13 @@ on:
           --param w_miss=1.5 --param w_pot_time=0.1
           --param agent_ping_min_ms=60 --param agent_ping_max_ms=260
           --param lessons=511 --param extreme_share=0.75 --param bot_runner=0.3
-          --param w_shake=0.1 --param w_waste=2.5 --param pot_strict_prob=0.3
+          --param w_shake=0.1 --param w_waste=3 --param pot_strict_prob=0.3
           --param w_gift=1.5 --param w_hungry=0.05 --param w_slow=0.05
           --param drinks_stowed=0.6 --param bot_presser=0.5 --param drink_window_s=30
           --param w_inv_near=0.5 --param throw_carry_prob=0.5 --param league_steal=0.3
           --league-param league_steal=0.5 --turn-drill 0.5
           --teach-coef 1 --teach-full-until 13800 --teach-until 14300
-          --param insane_prob=0.35 --param w_speed_refill=1 --param w_pearl_next=0.5
+          --param insane_prob=0.45 --param w_speed_refill=1 --param w_pearl_next=0.5
           --param inv_near_dist=3 --param ep_ticks_max=2400
           --param terrain_prob=0.5 --param terrain_amount=0.8 --param retry_prob=0.25 --param terrain_gap_prob=0.4
           --param w_hp_pot=8 --param hp_pot_scale=4 --param opp_strength_prob=0.2 --param opp_strength_max=3
@@ -50,6 +50,10 @@ on:
           --param drop_prob=0.3 --param drop_min=8 --param drop_max=14
           --param drill_prob=0.2 --league-param drill_self=1 --param drill_seconds=40
           --param web_prob=0.2 --param web_amount=0.6 --param web_trap_prob=0.3
+          --param food_full=20 --param w_full=0.01 --param w_sip_hit=0.5
+          --param w_pearl_low=1 --param pearl_low_hp=8 --param fall_start_prob=0.08
+          --param insane_reach_max=3.6 --param opp_reach_min=3.0 --param opp_reach_max=3.7
+          --param opp_kb_taken_min=0 --param opp_kb_taken_max=1 --param kb_h_min=0.2 --param kb_v_min=0.25
       combo_machines:
         description: How many of the machines play for combos (the last ones; they share weights with the rest)
         default: "3"
@@ -136,10 +140,26 @@ jobs:
           # insane bot, which hits back fast, starting close. Their weights
           # are averaged with the others' as usual, so what they find goes
           # into the one agent.
-          if [ "$MACHINE" -ge $(( MACHINES - ${COMBO:-0} )) ]; then
+          # Before them as many play on servers whose hits hardly move
+          # anybody, close together, and as many again against opponents
+          # with every advantage (the insane bot, reach, no knockback,
+          # Strength), starting hurt, where pearls and potions have to be
+          # timed. The rest play the mix of everything.
+          C=${COMBO:-0}
+          FROM_END=$(( MACHINES - 1 - MACHINE ))
+          if [ "$FROM_END" -lt "$C" ]; then
             EXTRA="$EXTRA --param w_combo=0.5 --param combo_cap=12 --param insane_prob=0.7"
             EXTRA="$EXTRA --param start_dist_max=6 --param drill_prob=0 --param lesson_prob=0.2"
             echo "Combo machine"
+          elif [ "$FROM_END" -lt $(( 2 * C )) ]; then
+            EXTRA="$EXTRA --param tiny_kb_prob=0.85 --param start_dist_max=5 --param w_close=0"
+            EXTRA="$EXTRA --param insane_prob=0.6 --param lesson_prob=0.2"
+            echo "Low knockback machine"
+          elif [ "$FROM_END" -lt $(( 3 * C )) ]; then
+            EXTRA="$EXTRA --param insane_prob=0.8 --param opp_strength_prob=0.4 --param opp_edge_prob=0.9"
+            EXTRA="$EXTRA --param start_hurt=0.4 --param start_health_min=6 --param start_health_max=14"
+            EXTRA="$EXTRA --param w_pearl_next=1 --param lesson_prob=0.35 --param lessons=448"
+            echo "Pressure machine"
           fi
           # Two processes use the four cores better than one. They average
           # their weights every few seconds through a folder in memory. The
