@@ -4,6 +4,8 @@ import net.minecraft.client.Minecraft;
 import net.minecraft.client.gui.inventory.GuiInventory;
 import net.minecraft.client.settings.GameSettings;
 import net.minecraft.client.settings.KeyBinding;
+import net.minecraft.entity.Entity;
+import net.minecraft.util.MovingObjectPosition;
 import pvpai.core.Inv;
 import pvpai.core.Keys;
 
@@ -33,6 +35,7 @@ final class Hands {
      * default (shown as 100 %): the agent's mouse counts are counted there.
      */
     static final float TRAINED_FACTOR = 1.0F;
+    private static final int TRAINED_COUNTS_PER_TURN = 2400;
 
     /** The part of a count each way that the sensitivity that is set could not make yet. */
     private double carryX, carryY;
@@ -56,6 +59,10 @@ final class Hands {
     }
 
     void press(Keys k) {
+        press(k, null);
+    }
+
+    void press(Keys k, Entity opponent) {
         GameSettings gs = mc.gameSettings;
         boolean open = mc.currentScreen instanceof GuiInventory;
         if (open || k.inv != 0) {
@@ -98,23 +105,39 @@ final class Hands {
         if (k.slotKey > 0) {
             KeyBinding.onTick(gs.keyBindsHotbar[layout.real[k.slotKey - 1]].getKeyCode());
         }
-        // A left click is a press let go at once: the button is never left down.
-        if (k.attack) {
-            for (int n = 0; n <= k.extraClicks; n++) {
-                KeyBinding.onTick(gs.keyBindAttack.getKeyCode());
-            }
-        }
         // The right button: a press when it goes down, then held.
         if (k.useItem && (!useDown || k.useAgain)) {
             KeyBinding.onTick(gs.keyBindUseItem.getKeyCode());
         }
         key(gs.keyBindUseItem, k.useItem);
         useDown = k.useItem;
+
+        // The policy can add several horizontal turns in one tick. Apply the
+        // shortest turn to the same heading before rounding to mouse counts.
+        k.dx %= TRAINED_COUNTS_PER_TURN;
+        if (Math.abs(k.dx) > TRAINED_COUNTS_PER_TURN / 2) {
+            k.dx -= Integer.signum(k.dx) * TRAINED_COUNTS_PER_TURN;
+        }
         if (k.dx != 0 || k.dy != 0) {
             float f1 = mouseFactor(gs);
             int[] n = userCounts(k.dx, k.dy, f1);
             if (n[0] != 0 || n[1] != 0) {
                 mc.thePlayer.setAngles((float) n[0] * f1, -((float) n[1] * f1));
+            }
+        }
+        if (opponent != null) {
+            mc.thePlayer.setRotationYawHead(mc.thePlayer.rotationYaw);
+            if (k.attack) {
+                mc.entityRenderer.getMouseOver(1.0F);
+                MovingObjectPosition hit = mc.objectMouseOver;
+                k.attack = hit != null && hit.typeOfHit == MovingObjectPosition.MovingObjectType.ENTITY
+                    && hit.entityHit == opponent;
+            }
+        }
+        // A left click is a press let go at once: the button is never left down.
+        if (k.attack) {
+            for (int n = 0; n <= k.extraClicks; n++) {
+                KeyBinding.onTick(gs.keyBindAttack.getKeyCode());
             }
         }
     }

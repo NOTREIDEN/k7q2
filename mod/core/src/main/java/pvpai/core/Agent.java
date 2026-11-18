@@ -299,6 +299,13 @@ public final strictfp class Agent {
         prev = inp.copy();
     }
 
+    /** Time passes while the inventory waits for a server reply. */
+    public void inventoryWaitTick() {
+        if (pearlWait > 0) {
+            pearlWait--;
+        }
+    }
+
     /** Clicks the player can still make on its next tick. */
     private double clicksAvailable() {
         double r = Math.min(cps / 20.0, 1.0);
@@ -406,6 +413,10 @@ public final strictfp class Agent {
      * belongs to the screen, or null.
      */
     private Keys refillKeys(View v, int choice) {
+        if (refill != 0 && !v.invOpen) {
+            refill = 0;
+            return null;
+        }
         int want = choice == 5 ? Inv.POTION : choice == 6 ? Inv.DRINK : -1;
         Inv.Bar bar = Inv.Bar.of(v);
         int inv;

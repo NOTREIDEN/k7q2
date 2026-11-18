@@ -8,6 +8,8 @@ import net.minecraft.client.entity.EntityPlayerSP;
 import net.minecraft.client.gui.inventory.GuiInventory;
 import net.minecraft.client.multiplayer.WorldClient;
 import net.minecraft.network.NetworkManager;
+import net.minecraft.network.Packet;
+import net.minecraft.network.play.server.S32PacketConfirmTransaction;
 import net.minecraft.util.MouseHelper;
 import pvpai.core.Duel;
 import pvpai.core.Inv;
@@ -19,7 +21,7 @@ import pvpai.core.Policy;
  * loader has to do is call {@link #tickStart} and {@link #tickEnd} around
  * each tick of the client and show the player the lines it gets back.
  */
-public final class Session {
+public final class Session implements Wire.Tap {
     /** Seconds of Speed left at which the agents of training take a drink. */
     private static final double DRINK_WINDOW_S = 30.0;
     /** What stands in for a ping the player list does not say. */
@@ -38,6 +40,7 @@ public final class Session {
     private final Minecraft mc;
     private final Policy policy;
     private final Random draws = new Random();
+    private final InventoryRefill refill = new InventoryRefill();
     private Bot bot;
     private Duel duel;
     private EntityPlayerSP me;
@@ -46,6 +49,8 @@ public final class Session {
     private MouseHelper mouse;
     /** Whether the tick that runs now started with the agent at the keys. */
     private boolean started;
+    private boolean openingInventory;
+    private GuiInventory ownedInventory;
 
     public Session(Minecraft mc, Policy policy) {
         this.mc = mc;
@@ -102,6 +107,7 @@ public final class Session {
             }
         });
         bot.block(s.block);
+        bot.release();
         // The agent starts a duel with its sword in hand. If the player holds
         // something else, the sword is taken up as the wheel of the mouse would.
         int swordAt = bot.layout().real[Inv.SLOT_SWORD];
@@ -112,7 +118,7 @@ public final class Session {
         me = mc.thePlayer;
         world = mc.theWorld;
         manager = mc.getNetHandler().getNetworkManager();
-        Wire.install(mc, manager, bot);
+        Wire.install(mc, manager, this);
         mouse = mc.mouseHelper;
         mc.mouseHelper = new Still();
         started = false;
@@ -156,8 +162,34 @@ public final class Session {
         if (mc.mouseHelper instanceof Still) {
             mc.mouseHelper = mouse;
         }
+        boolean closeInventory = mc.currentScreen instanceof GuiInventory
+            && (ownedInventory == mc.currentScreen || openingInventory)
+            && mc.thePlayer == me && mc.theWorld == world && mc.getNetHandler() != null;
         bot = null;
         started = false;
+        openingInventory = false;
+        ownedInventory = null;
+        refill.reset();
+        if (closeInventory) {
+            me.closeScreen();
+        }
+    }
+
+    @Override
+    public void before(Packet<?> packet) {
+        if (bot != null) {
+            bot.before(packet);
+        }
+    }
+
+    @Override
+    public void after(Packet<?> packet) {
+        if (bot != null) {
+            bot.after(packet);
+            if (packet instanceof S32PacketConfirmTransaction) {
+                refill.confirmed((S32PacketConfirmTransaction) packet);
+            }
+        }
     }
 
     /** Why the agent cannot go on, or null if it can. */
@@ -186,13 +218,44 @@ public final class Session {
      */
     public String tickStart() {
         started = false;
+        openingInventory = false;
         String why = check();
         if (why != null) {
             stop();
             return why;
         }
         if (bot != null && !mc.isGamePaused()) {
-            bot.tickStart(null);
+            if (ownedInventory != mc.currentScreen) {
+                ownedInventory = null;
+            }
+            InventoryRefill.Step step = refill.step(mc.currentScreen, me);
+            switch (step) {
+                case WAIT:
+                case CLOSE:
+                    bot.waitForInventory();
+                    started = true;
+                    if (step == InventoryRefill.Step.CLOSE) {
+                        me.closeScreen();
+                    }
+                    return null;
+                case REJECTED:
+                case TIMED_OUT:
+                    me.closeScreen();
+                    stop();
+                    return step == InventoryRefill.Step.REJECTED
+                        ? "PvP AI apagado: el servidor rechazo el clic de inventario."
+                        : "PvP AI apagado: no llego la confirmacion del clic de inventario.";
+                default:
+                    break;
+            }
+            // In 1.8.9 the targeting ray reads the head yaw. The mouse
+            // changes the camera yaw before vanilla updates the head.
+            me.setRotationYawHead(me.rotationYaw);
+            boolean wasClosed = mc.currentScreen == null;
+            int inventory = bot.tickStartForSession();
+            me.setRotationYawHead(me.rotationYaw);
+            openingInventory = wasClosed && inventory == 1;
+            refill.sent(mc.currentScreen, me.openContainer, inventory >= Inv.SHUT + Inv.WINDOW_ROWS);
             started = true;
         }
         return null;
@@ -201,8 +264,14 @@ public final class Session {
     /** At the end of a tick of the client. */
     public void tickEnd() {
         if (bot != null && started && mc.thePlayer == me && mc.theWorld == world) {
+            if (openingInventory && mc.currentScreen instanceof GuiInventory) {
+                ownedInventory = (GuiInventory) mc.currentScreen;
+            }
             bot.tickEnd();
+            // Keep the targeting ray in step with the interpolated camera.
+            me.prevRotationYawHead = me.prevRotationYaw;
         }
         started = false;
+        openingInventory = false;
     }
 }

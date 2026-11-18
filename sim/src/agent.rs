@@ -611,6 +611,10 @@ impl Agent {
     /// waits a tick. Returns whether the tick belongs to the screen: the
     /// game then takes no other key or button, and none is passed on.
     fn refill_keys(&mut self, c: &Client, choice: i32, inp: &mut Input) -> bool {
+        if self.refill != 0 && !c.lp.inv_open {
+            self.refill = 0;
+            return false;
+        }
         let want = match choice {
             5 => Some(Item::Potion),
             6 => Some(Item::Drink),

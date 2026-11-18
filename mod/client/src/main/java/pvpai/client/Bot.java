@@ -181,6 +181,37 @@ public final class Bot implements Wire.Tap {
         return k;
     }
 
+    /** Applies the tick, leaving an inventory close until its last click is confirmed. */
+    int tickStartForSession() {
+        EntityPlayerSP player = mc.thePlayer;
+        int oldSword = layout.real[Inv.SLOT_SWORD];
+        layout.refresh(player.inventory);
+        look(null);
+        int requestedInventory = pressed.inv;
+        if (requestedInventory >= Inv.SHUT + Inv.WINDOW_ROWS) {
+            pressed.inv -= Inv.SHUT;
+        }
+        if (requestedInventory == 0 && !view.invOpen && layout.sword
+                && player.inventory.currentItem == oldSword && layout.real[Inv.SLOT_SWORD] != oldSword) {
+            pressed.slotKey = Inv.SLOT_SWORD + 1;
+            pressed.attack = false;
+            pressed.useItem = false;
+        }
+        press(other);
+        return requestedInventory;
+    }
+
+    /** Holds the inputs without stopping the agent's game-tick counters. */
+    void waitForInventory() {
+        hands.release();
+        pressed = new Keys();
+        pressed.inv = 1;
+        turnedYaw = turnedPitch = 0.0F;
+        if (agent != null) {
+            agent.inventoryWaitTick();
+        }
+    }
+
     /**
      * Read the client and settle the keys of this tick: the agent's, or
      * the ones handed in if it only keeps its counts. Returns them.
@@ -210,9 +241,13 @@ public final class Bot implements Wire.Tap {
 
     /** Press the keys {@link #look} settled. */
     public void press() {
+        press(null);
+    }
+
+    private void press(Entity opponent) {
         EntityPlayerSP me = mc.thePlayer;
         float yaw = me.rotationYaw, pitch = me.rotationPitch;
-        hands.press(pressed);
+        hands.press(pressed, opponent);
         turnedYaw = me.rotationYaw - yaw;
         turnedPitch = me.rotationPitch - pitch;
     }
@@ -221,7 +256,7 @@ public final class Bot implements Wire.Tap {
     public void tickEnd() {
         EntityPlayerSP me = mc.thePlayer;
         // A tick that belongs to the inventory screen reads no key.
-        boolean screen = view.invOpen || pressed.inv != 0;
+        boolean screen = pressed.inv != 0 || view.invOpen;
         boolean swung = !screen && pressed.attack && !view.usingItem;
         boolean attacked = swung && me.getLastAttackerTime() == ticksBefore;
         int pearls = 0, potions = 0;
