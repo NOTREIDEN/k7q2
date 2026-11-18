@@ -240,11 +240,15 @@ public final class Session implements Wire.Tap {
                     return null;
                 case REJECTED:
                 case TIMED_OUT:
+                    // The game takes this in stride: the client answers the
+                    // refusal and the server sends the inventory again. The
+                    // screen shuts and the agent plays on.
+                    bot.waitForInventory();
+                    started = true;
                     me.closeScreen();
-                    stop();
                     return step == InventoryRefill.Step.REJECTED
-                        ? "PvP AI apagado: el servidor rechazo el clic de inventario."
-                        : "PvP AI apagado: no llego la confirmacion del clic de inventario.";
+                        ? "El servidor rechazo un clic de inventario: cierro el inventario y sigo."
+                        : "No llego la confirmacion de un clic de inventario: cierro el inventario y sigo.";
                 default:
                     break;
             }

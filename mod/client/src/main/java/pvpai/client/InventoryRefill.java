@@ -39,8 +39,13 @@ final class InventoryRefill {
         if (pending) {
             return System.nanoTime() - sentAt >= CONFIRM_TIMEOUT ? Step.TIMED_OUT : Step.WAIT;
         }
-        if (!player.onGround || Math.abs(player.motionX) >= 0.005 || Math.abs(player.motionZ) >= 0.005) {
-            return Step.CLOSE;
+        if (player.isSprinting()) {
+            // The screen has let go of the keys and the sprint ends on the
+            // next tick; the click waits for it. Sliding on, or in the air
+            // after a hit, the clicks go on as in the game and in training:
+            // closing for that only opened the screen again on the next
+            // tick the policy asked for potions, over and over.
+            return Step.WAIT;
         }
         if (accepted) {
             // Give the client a tick to apply the inventory changes before deciding what to move next.
