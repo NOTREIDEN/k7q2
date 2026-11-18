@@ -23,7 +23,7 @@ on:
       args:
         description: Extra options for train.py
         default: >-
-          --lr 5e-4 --n-selfplay 96 --n-bot 128 --n-league 96 --bot-min 2 --log-every 50
+          --lr 5e-4 --n-selfplay 96 --n-bot 128 --n-league 96 --bot-min 2 --log-every 50 --epochs 2
           --param w_sprint_hit=0.3 --param w_reach_adv=0.03 --param w_combo=0.2
           --param w_close=0.06 --param close_dist=2.2
           --param kb_random=0.7 --param opp_edge_prob=0.6 --param w_damage=1

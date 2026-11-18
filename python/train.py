@@ -18,7 +18,7 @@ import torch
 from pvpai.env import BOT, SELF_PLAY, VecEnv
 from pvpai.league import League
 from pvpai.model import Policy, load_policy, restart_choices
-from pvpai.ppo import RunningScale, Stream, ppo_update
+from pvpai.ppo import RunningScale, Stream, choose_together, ppo_update
 
 
 def main():
@@ -185,12 +185,14 @@ def main():
 
     drill_rng = np.random.default_rng(args.seed * 1000 + args.machine_id * 37 + args.worker_id)
 
-    def pick(k, obs, priv):
-        """The agent's next action; player 1 of self-play is never drilled."""
-        a = streams[k].choose(policy, obs, priv)
+    def drilled(k, a):
+        """The agent's next action with the drill; player 1 of self-play is never drilled."""
         if args.turn_drill > 0 and k != "sp1":
             a = streams[k].drill(a, args.turn_drill, drill_rng)
         return a
+
+    def pick(k, obs, priv):
+        return drilled(k, streams[k].choose(policy, obs, priv))
 
     # Player 0 of every duel is the first to act.
     acts = {}
@@ -220,6 +222,7 @@ def main():
         t0 = time.time()
         while not all(s.full() for s in streams.values()):
             vsc = vs.scale
+            later = []
             if "sp" in envs:
                 e = envs["sp"]
                 e.step(acts["sp0"])  # player 0 ticks; player 1 is next
@@ -232,14 +235,14 @@ def main():
                     streams["sp1"].taught(e.teach())
                 streams["sp1"].disown(e.overridden())
                 streams["sp0"].close(policy, e.rew, e.done, e.fobs, e.fpriv, g, vsc, e.obs)
-                acts["sp0"] = pick("sp0", e.obs, e.priv)
+                later.append(("sp0", e))
             if "bot" in envs:
                 e = envs["bot"]
                 e.step(acts["bot"])
                 if teaching:
                     streams["bot"].taught(e.teach())
                 streams["bot"].close(policy, e.rew, e.done, e.fobs, e.fpriv, g, vsc, e.obs)
-                acts["bot"] = pick("bot", e.obs, e.priv)
+                later.append(("bot", e))
             for gi in range(groups):
                 k = f"lg{gi}"
                 e = envs[k]
@@ -248,7 +251,10 @@ def main():
                     streams[k].taught(e.teach())
                 e.step(league.act(gi, e.obs, e.priv, e.done))  # it ticks; the agent is next
                 streams[k].close(policy, e.rew, e.done, e.fobs, e.fpriv, g, vsc, e.obs)
-                acts[k] = pick(k, e.obs, e.priv)
+                later.append((k, e))
+            # The agent's next move in all of those duels, in one pass of the network.
+            for (k, _), a in zip(later, choose_together(policy, [(streams[k], e.obs, e.priv) for k, e in later])):
+                acts[k] = drilled(k, a)
         t1 = time.time()
         info = ppo_update(policy, opt, list(streams.values()), vs, cfg)
         # The teacher's weight for the next round of samples, and its

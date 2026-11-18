@@ -126,6 +126,29 @@ class Stream:
         return adv, adv + val
 
 
+def choose_together(policy, picks):
+    """`Stream.choose` for several streams, [(stream, obs, priv), ...], in
+    one pass of the network: the same kind of choices at a fraction of the
+    cost of a pass for each. Returns each stream's actions."""
+    if not picks:
+        return []
+    obs = [torch.from_numpy(o).clone() for _, o, _ in picks]
+    priv = [torch.from_numpy(p).clone() for _, _, p in picks]
+    before = [s.state for s, _, _ in picks]
+    state = (torch.cat([b[0] for b in before]), torch.cat([b[1] for b in before]))
+    act, logp, val, after = policy.act(torch.cat(obs), torch.cat(priv), state, per_head=True)
+    out, i = [], 0
+    for (s, _, _), o, p, b in zip(picks, obs, priv, before):
+        j = i + s.n
+        s.state = (after[0][i:j], after[1][i:j])
+        s.pend = (o, p, act[i:j], logp[i:j], val[i:j], b)
+        s.pend_own = torch.ones(s.n, act.shape[-1])
+        s.pend_teach = None
+        out.append(act[i:j].numpy().astype(np.int32))
+        i = j
+    return out
+
+
 class RunningScale:
     """Running standard deviation of returns, used to keep value targets
     near unit size."""

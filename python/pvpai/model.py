@@ -164,6 +164,81 @@ class Policy(nn.Module):
     def logits(self, h):
         return [head(h) for head in self.heads]
 
+    # All the controls at once. The heads stay separate layers (the stored
+    # weights and the mod read them so), but their weights are used as one
+    # matrix, and the choices of every control are laid side by side in a
+    # padded block [..., heads, widest], the padding so unlikely that it is
+    # never picked and adds nothing to a sum. One matrix product, one
+    # softmax and one draw for all twelve controls cost a tenth of twelve
+    # of each through torch.distributions, which was most of the time it
+    # took to play a tick.
+    PAD = -1.0e9
+
+    def _layout(self, device):
+        key = (tuple(self.act_dims), device)
+        if getattr(self, "_lay_key", None) != key:
+            widest = max(self.act_dims)
+            cols = torch.cat([torch.arange(d) + i * widest for i, d in enumerate(self.act_dims)]).to(device)
+            self._lay = (widest, cols)
+            self._lay_key = key
+        return self._lay
+
+    def _head_matrix(self, grad):
+        """The weights and biases of every head stacked, for one product.
+        Without gradients the stack is kept until any of them changes."""
+        if grad:
+            return (torch.cat([hd.weight for hd in self.heads], 0), torch.cat([hd.bias for hd in self.heads], 0))
+        ver = tuple((hd.weight.data_ptr(), hd.weight._version, hd.bias.data_ptr(), hd.bias._version) for hd in self.heads)
+        if getattr(self, "_hm_ver", None) != ver:
+            with torch.no_grad():
+                self._hm = (torch.cat([hd.weight for hd in self.heads], 0).detach(), torch.cat([hd.bias for hd in self.heads], 0).detach())
+            self._hm_ver = ver
+        return self._hm
+
+    def padded_logp(self, h):
+        """Log-probabilities of every choice of every control, [..., heads,
+        widest], the padding at `PAD` or below."""
+        w, b = self._head_matrix(torch.is_grad_enabled())
+        flat = torch.nn.functional.linear(h, w, b)
+        widest, cols = self._layout(flat.device)
+        lead = flat.shape[:-1]
+        H = len(self.act_dims)
+        block = torch.full(lead + (H * widest,), self.PAD, dtype=flat.dtype, device=flat.device)
+        block = block.index_copy(-1, cols, flat).view(lead + (H, widest))
+        return torch.log_softmax(block, -1)
+
+    def _segments(self, device):
+        """For each choice, the control it belongs to; where each control's
+        choices start; and the matrix that adds up each control's choices."""
+        key = (tuple(self.act_dims), device)
+        if getattr(self, "_seg_key", None) != key:
+            dims = self.act_dims
+            head_of = torch.cat([torch.full((d,), i, dtype=torch.long) for i, d in enumerate(dims)]).to(device)
+            start = torch.tensor([sum(dims[:i]) for i in range(len(dims))], dtype=torch.long, device=device)
+            sums = torch.nn.functional.one_hot(head_of, len(dims)).float()
+            self._seg = (head_of, start, sums)
+            self._seg_key = key
+        return self._seg
+
+    def flat_logp(self, h):
+        """Log-probabilities of every choice of every control side by side,
+        [..., all choices], the controls one after another in order: the
+        numbers of `padded_logp` without its padding, which costs a third of
+        the time to learn from. Each control's choices are shifted by their
+        largest before the exponent, so that none overflows or vanishes; the
+        shift cancels out and carries no gradient."""
+        w, b = self._head_matrix(torch.is_grad_enabled())
+        flat = torch.nn.functional.linear(h, w, b)
+        head_of, _, sums = self._segments(flat.device)
+        lead = flat.shape[:-1]
+        x = flat.reshape(-1, flat.shape[-1])
+        with torch.no_grad():
+            top = torch.full((x.shape[0], len(self.act_dims)), -math.inf, dtype=x.dtype, device=x.device)
+            top = top.scatter_reduce(-1, head_of.expand(x.shape[0], -1), x.detach(), "amax")
+        shifted = x - top.index_select(-1, head_of)
+        lse = torch.log(torch.exp(shifted) @ sums.to(x.dtype))
+        return (shifted - lse.index_select(-1, head_of)).view(lead + (flat.shape[-1],))
+
     def value(self, h, priv):
         return self.vf(torch.cat([h, self.penc(priv)], dim=-1)).squeeze(-1)
 
@@ -171,14 +246,16 @@ class Policy(nn.Module):
     def act(self, obs, priv, state, deterministic=False, per_head=False):
         """With `per_head`, the log-prob of each control apart [B, heads]."""
         h, state = self.core(obs, state)
-        acts, logps = [], []
-        for lg in self.logits(h):
-            d = torch.distributions.Categorical(logits=lg)
-            a = lg.argmax(-1) if deterministic else d.sample()
-            acts.append(a)
-            logps.append(d.log_prob(a))
-        logp = torch.stack(logps, -1)
-        return torch.stack(acts, -1), logp if per_head else logp.sum(-1), self.value(h, priv), state
+        lp = self.padded_logp(h)
+        if deterministic:
+            a = lp.argmax(-1)
+        else:
+            # The largest of the log-probabilities each with a Gumbel draw
+            # added is a draw from the categorical distribution.
+            u = torch.rand_like(lp).clamp_(1e-20, 1.0)
+            a = (lp - torch.log(-torch.log(u))).argmax(-1)
+        logp = lp.gather(-1, a.unsqueeze(-1)).squeeze(-1)
+        return a, logp if per_head else logp.sum(-1), self.value(h, priv), state
 
     def evaluate_seq(self, obs, priv, actions, state, done, per_head=False, teach=None):
         """Log-prob, entropy and value for stored sequences [T, B, ...];
@@ -186,16 +263,15 @@ class Policy(nn.Module):
         With `teach` (choices like `actions`, -1 for none), the log-prob of
         those choices per control as well, 0 where there is none."""
         hs = self.core_seq(obs, state, done)
-        logps, tlogps, ent = [], [], 0.0
-        for i, lg in enumerate(self.logits(hs)):
-            d = torch.distributions.Categorical(logits=lg)
-            logps.append(d.log_prob(actions[..., i]))
-            if teach is not None:
-                tlogps.append(d.log_prob(teach[..., i].clamp(min=0)) * (teach[..., i] >= 0))
-            ent = ent + d.entropy()
-        logp = torch.stack(logps, -1)
+        lp = self.flat_logp(hs)
+        _, start, _ = self._segments(lp.device)
+        logp = lp.gather(-1, actions + start)
+        ent = -(lp.exp() * lp).sum(-1)
         out = (logp if per_head else logp.sum(-1), ent, self.value(hs, priv))
-        return out + (torch.stack(tlogps, -1),) if teach is not None else out
+        if teach is None:
+            return out
+        tlogp = lp.gather(-1, teach.clamp(min=0) + start) * (teach >= 0)
+        return out + (tlogp,)
 
 
 def fit_state(sd, policy, still=False):
