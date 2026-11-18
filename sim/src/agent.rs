@@ -11,10 +11,10 @@ use crate::bot;
 use crate::client::{pearl_landing, pearl_preview, thrown_flight, Client, ClientCfg, ClientThrown, Input, TickOut, INV_SHUT};
 use crate::mth::{self, Rng};
 use crate::net::{refill_click, shift_click, Item, Kind, SLOT_FOOD, SLOT_PEARL, SLOT_SWORD, USE_TICKS, WINDOW_BAR};
-use crate::server::{splash_heal, throw_heading, MAX_HEALTH, POTION_HEAL, THROW_SPREAD};
+use crate::server::{splash_heal, throw_heading, MAX_HEALTH, POTION_HEAL};
 use crate::world::{RayHit, World};
 
-pub const ACT_HEADS: usize = 11;
+pub const ACT_HEADS: usize = 12;
 /// forward, strafe, jump, sprint key, attack, yaw bin, pitch bin, right
 /// mouse button (block with the sword), throw a pearl, and what to do with
 /// the rest of the hotbar: nothing, throw a healing potion, drink the
@@ -41,24 +41,16 @@ pub const ACT_HEADS: usize = 11;
 ///
 /// The control of the rest of the hotbar has three more choices: a healing
 /// potion thrown with a turn, behind the player or to its right or left
-/// (`BAR_TURNS`): what a player does who turns away, pots ahead of its own
-/// run and turns back to the opponent at once. Tick one: the turn of the
-/// view, added to what the policy asked of the yaw, with the number key of
-/// the potion, W and the sprint key, and a look down at the pitch at which
-/// the potion will break nearest to where the player will be by then
-/// (`Agent::run_aim`: the run it is about to make and the flight of the
-/// potion, worked out for each pitch). Tick two: the right click, which
-/// throws along the view the server has by then. Tick three: the turn back,
-/// the pitch with it, and the mouse is the policy's again; a potion asked
-/// for on that tick is thrown first along the same view, and the turn back
-/// comes a tick later. From the turn back until the potion breaks the
-/// player keeps going the way it ran, with whichever of W, S, A and D and
-/// their pairs takes it closest to that way for where it looks, without
-/// sprint or jump, and asks nothing else of the hotbar. A hit taken while
-/// the potion flies knocks the player towards one thrown behind it and away
-/// from one thrown ahead. Which way to turn, or not to, and when, is the
-/// policy's to learn.
-pub const ACT_DIMS: [i32; ACT_HEADS] = [3, 3, 2, 2, 2, 31, 29, 2, 2, 10, 6];
+/// (`BAR_TURNS`), what a player does who turns away to pot. Tick one: the
+/// turn of the view, added to what the policy asked of the yaw, with the
+/// number key of the potion, and the view's pitch set to the one the last
+/// control asks for (`throw_pitch`: straight down to 20 degrees under
+/// level, two degrees apart). Tick two: the right click, which throws
+/// along the view the server has by then, and nothing else of the hotbar.
+/// The keys, the mouse from tick two on, which pitch to throw at, where
+/// to go while the potion flies, when to turn back, and which way to turn
+/// or not to, are the policy's to learn.
+pub const ACT_DIMS: [i32; ACT_HEADS] = [3, 3, 2, 2, 2, 31, 29, 2, 2, 10, 6, THROW_PITCHES as i32];
 /// The first of the choices of the hotbar control that throw a potion with
 /// a turn, and the mouse counts of each one's turn: half a turn, a quarter
 /// to the right, a quarter to the left.
@@ -66,12 +58,17 @@ pub const BAR_TURN: i32 = 7;
 pub const BAR_TURNS: [i32; 3] = [1200, 600, -600];
 /// The degrees of one mouse count.
 pub const COUNT_DEG: f32 = 0.15;
-/// The ticks of its own run that a potion thrown with a turn is aimed
-/// over, and the most the run goes on for.
-pub const RUN_TICKS: usize = 16;
-/// Pitches `Agent::run_aim` tries: 90 down to 20, a degree apart.
-const AIM_PITCHES: usize = 71;
-const MOVE_TICKS: i32 = 14;
+/// The pitches a potion thrown with a turn can be thrown at: choice k of
+/// the last control is `90 - 2 k` degrees.
+pub const THROW_PITCHES: usize = 36;
+
+/// The pitch of choice `k` of the last control.
+pub fn throw_pitch(k: i32) -> f32 {
+    90.0f32 - 2.0f32 * (k.clamp(0, THROW_PITCHES as i32 - 1) as f32)
+}
+/// Ticks after the turn of a potion thrown with a turn that observation
+/// 152 counts down.
+const TURN_SHOWN: i32 = 8;
 /// Mouse counts a flick adds to the yaw of its tick.
 pub const FLICK_BINS: [i32; 6] = [0, -300, 300, -600, 600, 1200];
 /// Mouse counts per tick. One count is 0.15 degrees at sensitivity 0.5.
@@ -146,15 +143,8 @@ pub struct Agent {
     potion_stage: u8,
     asked_potion: bool,
     /// A potion thrown with a turn: ticks since the turn, the tick of the
-    /// turn being 1, and 0 when there is none; the last tick of the view
-    /// turned and the last of the run; the mouse counts of the turn, the
-    /// pitch from before it, and the way the player runs.
+    /// turn being 1, and 0 when there is none or it is `TURN_SHOWN` ago.
     turned: i32,
-    view_until: i32,
-    move_until: i32,
-    turned_by: i32,
-    turned_pitch: f32,
-    run_dir: [f64; 2],
     /// Own ticks since its last potion throw.
     since_throw: i32,
     /// Where it stood after each of its last ticks, newest first, and the
@@ -207,13 +197,6 @@ pub struct Agent {
     probe: Option<([f64; 2], [f64; 2], i32)>,
 }
 
-/// How likely the gaussian of a throw is to come out at each of the
-/// deviations `run_aim` tries, from two under to two over in halves
-/// (`exp(-z * z / 2)`, written out to be the same everywhere).
-const SPREAD_WEIGHTS: [f64; 9] = [
-    0.1353352832366127, 0.32465246735834974, 0.6065306597126334, 0.8824969025845955, 1.0, 0.8824969025845955, 0.6065306597126334, 0.32465246735834974, 0.1353352832366127,
-];
-
 /// The least movement across the ground in a tick with which a potion of
 /// its own tells whether the server adds it to the throw.
 const CARRY_MOVED: f64 = 0.08;
@@ -233,11 +216,6 @@ impl Agent {
             potion_stage: 0,
             asked_potion: false,
             turned: 0,
-            view_until: 0,
-            move_until: 0,
-            turned_by: 0,
-            turned_pitch: 0.0,
-            run_dir: [0.0; 2],
             since_throw: 1000,
             trail: [feet; TRAIL],
             lag: (ping_ms[0] / 50.0).floor() as i32 + 1,
@@ -280,43 +258,23 @@ impl Agent {
     /// the whole tick; otherwise a drink or a meal, a potion and a pearl
     /// are laid over the plain keys in that order, and the click rate comes
     /// last.
-    pub fn keys(&mut self, c: &Client, world: &World, duel: &Duel, action: &[i32], rng: &mut Rng) -> Input {
+    pub fn keys(&mut self, c: &Client, _world: &World, duel: &Duel, action: &[i32], rng: &mut Rng) -> Input {
         let mut inp = decode_action(action);
         let mut bar = if action.len() > 9 { action[9] } else { 0 };
         if self.turned > 0 {
-            // A potion thrown with a turn is on its way: the view stays
-            // turned for the click, then turns back, and the player keeps
-            // going the way it ran until the potion is down.
             self.turned += 1;
-            let asked = bar == 1 || bar >= BAR_TURN;
-            if self.turned == self.view_until + 1 && asked && self.view_until == 2 {
-                // A second potion along the same view, a tick later.
-                self.view_until += 1;
-                self.move_until = (self.move_until + 1).min(MOVE_TICKS);
-            }
-            if self.turned <= self.view_until {
-                inp.dx = 0;
-                inp.dy = 0;
-                run_ahead(&mut inp);
-                bar = if asked { 1 } else { 0 };
-            } else {
-                if self.turned == self.view_until + 1 {
-                    inp.dx = -self.turned_by;
-                    inp.dy = counts(self.turned_pitch - c.lp.l.pitch);
-                }
-                if self.turned <= self.move_until {
-                    let yaw = (c.lp.l.yaw as f64 + inp.dx as f64 * 0.15) as f32;
-                    run_away(&mut inp, yaw, self.run_dir);
-                } else {
-                    self.turned = 0;
-                }
+            if self.turned == 2 {
+                // The click of a potion thrown with a turn: nothing else of the hotbar.
                 bar = 0;
+            } else if self.turned > TURN_SHOWN {
+                self.turned = 0;
             }
         }
         let turn = if bar >= BAR_TURN { BAR_TURNS[((bar - BAR_TURN) as usize).min(BAR_TURNS.len() - 1)] } else { 0 };
         if !self.refill_keys(c, bar, &mut inp) {
             self.consume_keys(c, duel, bar, &mut inp);
-            self.potion_keys(c, world, bar == 1 || turn != 0, turn, &mut inp);
+            let pitch = throw_pitch(if action.len() > 11 { action[11] } else { 0 });
+            self.potion_keys(c, bar == 1 || turn != 0, turn, pitch, &mut inp);
             self.pearl_keys(c, action.len() > 8 && action[8] != 0, &mut inp);
             self.limit_clicks(&mut inp, rng);
         }
@@ -352,11 +310,11 @@ impl Agent {
     /// Whether a throw, a drink or a meal, the inventory or the run after a
     /// turned throw has the keys.
     pub fn busy(&self) -> bool {
-        self.potion_stage != 0 || self.pearl_stage != 0 || self.consume != 0 || self.refill != 0 || self.turned > 0
+        self.potion_stage != 0 || self.pearl_stage != 0 || self.consume != 0 || self.refill != 0
     }
 
     pub fn turned(&self) -> bool {
-        self.turned > 0 && self.turned <= self.view_until
+        self.turned == 1 || self.turned == 2
     }
 
     /// Clicks the player can still make on its next tick.
@@ -551,61 +509,6 @@ impl Agent {
         true
     }
 
-    /// The pitch for a potion thrown on the tick after next by a player
-    /// that turns its view to `yaw` on the next and runs along it (see
-    /// `run_feet`), and the ticks that potion flies. Of the pitches from
-    /// straight down to 20 degrees under level, in steps of one, the one
-    /// whose potion gives this player the most health on average over the
-    /// little the server throws off the view at random, then breaks
-    /// soonest, then gives the opponent the least. On a server that adds
-    /// the thrower's movement, or one it is not yet known of, half and
-    /// half, with that movement.
-    fn run_aim(&self, c: &Client, world: &World, yaw: f32) -> (f32, i32) {
-        let run = run_feet(c, world, yaw);
-        let other = self.potion_feet(c, -1, self.lag + 2, true);
-        let v = Kind::Potion.speed() as f64;
-        // The click goes out after the turn's tick, with its movement on a
-        // server that adds it; not yet known, the pitch has to do for both.
-        let b = c.lp.l.body.pos;
-        let moved = [run[0][0] - b[0], run[0][2] - b[2]];
-        let ways: &[f64] = match self.carry {
-            1 => &[1.0],
-            0 => &[0.0],
-            _ => &[0.0, 1.0],
-        };
-        let feet = |j: usize, t: i32| if j == 0 { run[((t + 1).max(0) as usize).min(RUN_TICKS - 1)] } else { other(1, t) };
-        // The server adds to the up and down of the direction a gaussian of
-        // 0.0075, which decides the tick the potion breaks on: the heal of
-        // each pitch on average over that, from two deviations under to two
-        // over in halves, each as likely as the gaussian has it.
-        let mut out = [(0i32, 0.0f64, 0.0f64); AIM_PITCHES];
-        for (k, o) in out.iter_mut().enumerate() {
-            let (from, dir) = throw_heading(Kind::Potion, run[0], yaw, 90.0f32 - k as f32);
-            let (mut sum, mut opp, mut all) = (0.0f64, 0.0f64, 0.0f64);
-            for (q, &p) in SPREAD_WEIGHTS.iter().enumerate() {
-                let z = (q as f64 - 4.0) * 0.5;
-                for &w in ways {
-                    let m = [dir[0] * v + w * moved[0], (dir[1] + z * THROW_SPREAD) * v, dir[2] * v + w * moved[1]];
-                    let (_, ticks, heal) = potion_outcome(world, from, m, 0, 0, &feet);
-                    o.0 = o.0.max(ticks);
-                    sum += p * heal[0] as f64;
-                    opp += p * heal[1] as f64;
-                    all += p;
-                }
-            }
-            *o = (o.0, sum / all, opp / all);
-        }
-        let mut best = 0usize;
-        for k in 1..AIM_PITCHES {
-            let (b, o) = (out[best], out[k]);
-            let same = (o.1 - b.1).abs() <= 1e-9;
-            if (o.1 > b.1 && !same) || (same && (o.0 < b.0 || (o.0 == b.0 && o.2 < b.2))) {
-                best = k;
-            }
-        }
-        (90.0f32 - best as f32, out[best].0)
-    }
-
     /// The key presses of a potion throw, as `pearl_keys`: the number key
     /// of the first slot that holds a potion and a right click, which
     /// throws along the view the server already has, then the number key of
@@ -614,31 +517,21 @@ impl Agent {
     /// pressed between the two ticks, and the sword comes back after the
     /// last one. It comes before the pearl when both are asked for. Thrown
     /// with a turn of `turn` mouse counts (see `ACT_DIMS`), the first tick
-    /// turns the view and the click is made on the second; asked for with
-    /// the view already turned, it is a plain throw along that view, and
-    /// the view stays turned a tick longer for it.
-    fn potion_keys(&mut self, c: &Client, world: &World, want: bool, turn: i32, inp: &mut Input) {
+    /// turns the view and sets its pitch to `pitch`, and the click is made
+    /// on the second.
+    fn potion_keys(&mut self, c: &Client, want: bool, turn: i32, pitch: f32, inp: &mut Input) {
         self.asked_potion = want;
         match self.potion_stage {
             0 => {
                 if want && self.potion_ready(c) {
                     inp.slot_key = c.lp.potions.trailing_zeros() as u8 + 1;
                     inp.attack = false;
-                    if turn != 0 && self.turned == 0 {
+                    if turn != 0 {
                         // The turn goes to the server with this tick; the click follows it.
                         inp.dx += turn;
-                        let yaw = (c.lp.l.yaw as f64 + inp.dx as f64 * 0.15) as f32;
-                        let (pitch, ticks) = self.run_aim(c, world, yaw);
                         inp.dy = counts(pitch - c.lp.l.pitch);
-                        run_ahead(inp);
                         self.potion_stage = 1;
                         self.turned = 1;
-                        self.view_until = 2;
-                        self.move_until = (ticks + 2).clamp(3, MOVE_TICKS);
-                        self.turned_by = turn;
-                        self.turned_pitch = c.lp.l.pitch;
-                        let f = yaw * mth::PI_F / 180.0f32;
-                        self.run_dir = [-mth::sin(f) as f64, mth::cos(f) as f64];
                     } else if self.prev_inp.use_item {
                         inp.use_item = false;
                         self.potion_stage = 1;
@@ -1126,9 +1019,9 @@ impl Agent {
         // How much of the server's wait between pearls the opponent still
         // has in front of it, counted from when its last pearl was seen.
         o[151] = ((duel.pearl_cooldown - self.opp_pearl_age).max(0) as f32 / cd).min(1.0);
-        // A potion thrown with a turn: the ticks left until the run with
-        // it is over.
-        o[152] = if self.turned > 0 { (self.move_until - self.turned + 1) as f32 / 8.0 } else { 0.0 };
+        // A potion thrown with a turn: the ticks left of the first
+        // `TURN_SHOWN` after the turn.
+        o[152] = if self.turned > 0 { (TURN_SHOWN + 1 - self.turned) as f32 / TURN_SHOWN as f32 } else { 0.0 };
         // Whether its throws take on its movement: not seen yet, no, yes.
         o[153] = [0.5, 0.0, 1.0][(self.carry + 1) as usize];
     }
@@ -1137,95 +1030,6 @@ impl Agent {
 /// The mouse counts of a turn by `deg` degrees, to the nearest.
 fn counts(deg: f32) -> i32 {
     (deg / COUNT_DEG + 0.5).floor() as i32
-}
-
-/// The keys of a player that runs straight along its view with its right
-/// button up.
-fn run_ahead(inp: &mut Input) {
-    inp.forward = 1;
-    inp.strafe = 0;
-    inp.jump = false;
-    inp.sprint_key = true;
-    inp.use_item = false;
-}
-
-/// The keys that take a player looking at `yaw` closest to the way `dir`
-/// (x and z, of length one): of W, S, A, D and their pairs, without the
-/// sprint key, the jump or the right button.
-fn run_away(inp: &mut Input, yaw: f32, dir: [f64; 2]) {
-    let f = yaw * mth::PI_F / 180.0f32;
-    let (sn, cs) = (mth::sin(f) as f64, mth::cos(f) as f64);
-    let mut best = (f64::MIN, 0i8, 0i8);
-    for fw in [1i8, 0, -1] {
-        for st in [0i8, 1, -1] {
-            if fw == 0 && st == 0 {
-                continue;
-            }
-            let (x, z) = (st as f64 * cs - fw as f64 * sn, fw as f64 * cs + st as f64 * sn);
-            let d = (x * dir[0] + z * dir[1]) / (x * x + z * z).sqrt();
-            if d > best.0 + 1e-9 {
-                best = (d, fw, st);
-            }
-        }
-    }
-    inp.forward = best.1;
-    inp.strafe = best.2;
-    inp.sprint_key = false;
-    inp.jump = false;
-    inp.use_item = false;
-}
-
-/// Where a player that turns its view to `yaw` on the tick to come will
-/// stand after that tick and after each of the next, as its own client can
-/// work out: sprinting along that view for two ticks, then walking on the
-/// same way (see `run_away`). The pull of its keys and the friction of the
-/// ground or the air on the motion it has, the fall to the ground under
-/// it, and a wall in its way.
-pub fn run_feet(c: &Client, world: &World, yaw: f32) -> [V3; RUN_TICKS] {
-    let l = &c.lp.l;
-    let (mut pos, mut m, mut on_ground) = (l.body.pos, l.body.motion, l.body.on_ground);
-    let floor = match world.ray_trace_blocks([pos[0], pos[1] + 0.1, pos[2]], [pos[0], pos[1] - 6.0, pos[2]], false) {
-        RayHit::Block(h) => h[1],
-        _ => pos[1] - 6.0,
-    };
-    // The speed it has with the sprint it will have: on with food enough,
-    // off without, and off once it walks.
-    let sprint = c.lp.food > 6;
-    let run = l.attr.value() * if sprint == l.sprinting { 1.0 } else if sprint { 1.3 } else { 1.0 / 1.3 };
-    let walk = if sprint { run / 1.3 } else { run };
-    let f = yaw * mth::PI_F / 180.0f32;
-    let dir = [-mth::sin(f) as f64, mth::cos(f) as f64];
-    let mut out = [pos; RUN_TICKS];
-    for (q, at) in out.iter_mut().enumerate() {
-        let sprinting = sprint && q < 2;
-        let a = if on_ground { (if q < 2 { run } else { walk }) * 0.98 } else if sprinting { 0.026 * 0.98 } else { 0.02 * 0.98 };
-        m[0] += dir[0] * a;
-        m[2] += dir[1] * a;
-        let step = (m[0] * m[0] + m[2] * m[2]).sqrt();
-        if step > 1e-9 {
-            let reach = 1.0 + 0.3 / step;
-            let (from, to) = ([pos[0], pos[1] + 0.5, pos[2]], [pos[0] + m[0] * reach, pos[1] + 0.5, pos[2] + m[2] * reach]);
-            if world.clear_path(from, to) || !matches!(world.ray_trace_blocks(from, to, false), RayHit::Block(_)) {
-                pos[0] += m[0];
-                pos[2] += m[2];
-            } else {
-                m[0] = 0.0;
-                m[2] = 0.0;
-            }
-        }
-        let fr = if on_ground { 0.546 } else { 0.91 };
-        pos[1] += m[1];
-        on_ground = pos[1] <= floor;
-        if on_ground {
-            pos[1] = floor;
-            m[1] = 0.0;
-        }
-        m[1] = (m[1] - 0.08) * 0.98;
-        m[0] *= fr;
-        m[2] *= fr;
-        *at = pos;
-    }
-    out
 }
 
 pub fn decode_action(a: &[i32]) -> Input {

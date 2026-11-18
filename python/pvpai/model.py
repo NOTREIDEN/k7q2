@@ -61,6 +61,10 @@ RESTART_CHOICES = {"drink-eat": ((9, 2, -4.0), (9, 3, -4.0))}
 # in four and healed 7 instead of 8, and the fleet let them die; with that
 # mended they start over as the plain throw does in `COPY_OF`.
 RESTART_CHOICES["turned-potions"] = ((9, 7, -2.0, 1), (9, 8, -2.0, 1), (9, 9, -2.0, 1))
+# The pitch of a potion thrown with a turn and the run after it became the
+# policy's own (the pitch is the last control, new, and starts even over
+# its choices): the turned throws start over once more to be tried with it.
+RESTART_CHOICES["learned-turn"] = ((9, 7, -2.0, 1), (9, 8, -2.0, 1), (9, 9, -2.0, 1))
 
 
 def start_bias(head, n):
@@ -161,25 +165,29 @@ class Policy(nn.Module):
         return self.vf(torch.cat([h, self.penc(priv)], dim=-1)).squeeze(-1)
 
     @torch.no_grad()
-    def act(self, obs, priv, state, deterministic=False):
+    def act(self, obs, priv, state, deterministic=False, per_head=False):
+        """With `per_head`, the log-prob of each control apart [B, heads]."""
         h, state = self.core(obs, state)
-        acts, logp = [], 0.0
+        acts, logps = [], []
         for lg in self.logits(h):
             d = torch.distributions.Categorical(logits=lg)
             a = lg.argmax(-1) if deterministic else d.sample()
             acts.append(a)
-            logp = logp + d.log_prob(a)
-        return torch.stack(acts, -1), logp, self.value(h, priv), state
+            logps.append(d.log_prob(a))
+        logp = torch.stack(logps, -1)
+        return torch.stack(acts, -1), logp if per_head else logp.sum(-1), self.value(h, priv), state
 
-    def evaluate_seq(self, obs, priv, actions, state, done):
-        """Log-prob, entropy and value for stored sequences [T, B, ...]."""
+    def evaluate_seq(self, obs, priv, actions, state, done, per_head=False):
+        """Log-prob, entropy and value for stored sequences [T, B, ...];
+        with `per_head`, the log-prob of each control apart [T, B, heads]."""
         hs = self.core_seq(obs, state, done)
-        logp, ent = 0.0, 0.0
+        logps, ent = [], 0.0
         for i, lg in enumerate(self.logits(hs)):
             d = torch.distributions.Categorical(logits=lg)
-            logp = logp + d.log_prob(actions[..., i])
+            logps.append(d.log_prob(actions[..., i]))
             ent = ent + d.entropy()
-        return logp, ent, self.value(hs, priv)
+        logp = torch.stack(logps, -1)
+        return logp if per_head else logp.sum(-1), ent, self.value(hs, priv)
 
 
 def fit_state(sd, policy, still=False):

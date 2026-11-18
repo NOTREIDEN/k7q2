@@ -100,6 +100,7 @@ def _load(path):
     lib.pvp_vec_take_stats.argtypes = [ctypes.c_void_p, ctypes.POINTER(ctypes.c_double)]
     lib.pvp_act_dims.argtypes = [ctypes.POINTER(ctypes.c_int32)]
     lib.pvp_vec_view.argtypes = [ctypes.c_void_p, ctypes.c_int32, f32p]
+    lib.pvp_vec_overridden.argtypes = [ctypes.c_void_p, ctypes.POINTER(ctypes.c_uint8)]
     return lib
 
 
@@ -160,6 +161,14 @@ class VecEnv:
             self.done.ctypes.data_as(ctypes.POINTER(ctypes.c_uint8)),
             self._f(self.fobs), self._f(self.fpriv),
         )
+
+    def overridden(self):
+        """Per duel, whether the keys of the action just made were laid
+        over by others (player 1 going for the potions, see the parameter
+        league_steal): that tick was not the policy's."""
+        out = np.zeros(self.n, np.uint8)
+        self.lib.pvp_vec_overridden(self.h, out.ctypes.data_as(ctypes.POINTER(ctypes.c_uint8)))
+        return out
 
     def view(self, index=0):
         """Snapshot of one duel for drawing it: VIEW_PLAYER fields for each

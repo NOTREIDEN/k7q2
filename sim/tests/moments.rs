@@ -1,9 +1,12 @@
 //! Half turns of the view, what the opponent's last pearl tells, and what
 //! it costs to heal the opponent, to fight on hungry and to stay slow.
+use pvpsim::agent::{throw_pitch, THROW_PITCHES};
 use pvpsim::env::{Env, Mode, Params, ACT_DIMS, ACT_HEADS, BAR_TURN, BAR_TURNS, FLICK_BINS, OBS_DIM, PRIV_DIM, YAW_BINS};
+use pvpsim::net::Kind;
+use pvpsim::server::throw_heading;
 
 /// Stand still, mouse at rest, no button down.
-const IDLE: [i32; ACT_HEADS] = [0, 0, 0, 0, 0, 13, 10, 0, 0, 0, 0];
+const IDLE: [i32; ACT_HEADS] = [0, 0, 0, 0, 0, 13, 10, 0, 0, 0, 0, 0];
 /// The pitch choice that looks down the fastest of the first set.
 const DOWN: i32 = 26;
 
@@ -110,9 +113,11 @@ fn a_flick_is_added_to_the_yaw_of_its_tick() {
 }
 
 #[test]
-fn a_potion_thrown_with_a_turn_lands_on_the_runner_and_the_view_comes_back() {
+fn a_potion_thrown_with_a_turn_takes_the_pitch_asked_for_and_the_rest_is_the_policys() {
     assert_eq!(ACT_DIMS[9], 10);
+    assert_eq!(ACT_DIMS[11], THROW_PITCHES as i32);
     assert_eq!((BAR_TURN, BAR_TURNS), (7, [1200, 600, -600]));
+    assert_eq!((throw_pitch(0), throw_pitch(10), throw_pitch(35), throw_pitch(99)), (90.0, 70.0, 20.0, 20.0));
     let yaw = |e: &Env| e.m.c[0].lp.l.yaw;
     let pitch = |e: &Env| e.m.c[0].lp.l.pitch;
     let shown = |e: &Env| {
@@ -121,69 +126,59 @@ fn a_potion_thrown_with_a_turn_lands_on_the_runner_and_the_view_comes_back() {
         o[152]
     };
     for (k, turn) in [(0usize, 180.0f32), (1, 90.0), (2, -90.0)] {
-        let mut e = Env::new(Mode::SelfPlay, params(), 3);
-        let (at, up) = (yaw(&e), pitch(&e));
-        let start = e.m.s.p[0].l.body.pos;
-        let (health, other) = (e.m.s.p[0].health, e.m.s.p[1].health);
-        assert_eq!(shown(&e), 0.0);
-        // The tick of the choice turns the view, looks down and takes the
-        // potion in hand; nothing is thrown with it.
-        run(&mut e, 1, |_| with(9, BAR_TURN + k as i32));
-        assert!((yaw(&e) - at - turn).abs() < 1e-3, "{} from {at}", yaw(&e));
-        let down = pitch(&e);
-        assert!(down > 20.0 && down <= 90.0, "{down}");
-        assert_eq!(e.m.s.potion_throws[0], 0);
-        assert!(shown(&e) > 0.0);
-        // The click, whatever is asked of the mouse or the inventory.
-        let busy = |_| {
-            let mut a = with(5, 26);
-            a[6] = 0;
-            a[10] = 5;
-            a[9] = 5;
-            a[1] = 1;
-            a
-        };
-        run(&mut e, 1, busy);
-        assert!((yaw(&e) - at - turn).abs() < 1e-3 && pitch(&e) == down);
-        // The next tick turns the view back, and from then on the mouse is
-        // the policy's while the player keeps going the way it ran.
-        run(&mut e, 1, |_| IDLE);
-        assert!((yaw(&e) - at).abs() < 1e-3 && (pitch(&e) - up).abs() < 0.2, "{} {} from {at} {up}", yaw(&e), pitch(&e));
-        let mut ticks = 3;
-        while shown(&e) > 0.0 {
-            let was = yaw(&e);
+        for choice in [0, 10, 35] {
+            let mut e = Env::new(Mode::SelfPlay, params(), 3);
+            let at = yaw(&e);
+            assert_eq!(shown(&e), 0.0);
+            // The tick of the choice turns the view, sets the pitch asked
+            // for and takes the potion in hand; nothing is thrown with it.
+            run(&mut e, 1, |_| {
+                let mut a = with(9, BAR_TURN + k as i32);
+                a[11] = choice;
+                a
+            });
+            assert!((yaw(&e) - at - turn).abs() < 1e-3, "{} from {at}", yaw(&e));
+            let (ty, tp) = (yaw(&e), pitch(&e));
+            assert!((tp - throw_pitch(choice)).abs() <= 0.08, "{tp} for {}", throw_pitch(choice));
+            assert_eq!(e.m.s.potion_throws[0], 0);
+            assert!(shown(&e) > 0.0);
+            // The click; the mouse and the keys are the policy's, and
+            // nothing else of the hotbar is done on it.
+            let busy = |_| {
+                let mut a = with(5, 26);
+                a[6] = 0;
+                a[10] = 5;
+                a[9] = 5;
+                a[1] = 1;
+                a
+            };
             run(&mut e, 1, busy);
-            ticks += 1;
             let want = (YAW_BINS[26] + FLICK_BINS[5]) as f32 * 0.15;
-            assert!((yaw(&e) - was - want).abs() < 1e-2, "tick {ticks}: {} from {was}", yaw(&e));
+            assert!((yaw(&e) - ty - want).abs() < 1e-2, "{} from {ty}", yaw(&e));
+            assert!(pitch(&e) < tp);
             assert!(!e.m.c[0].lp.inv_open);
-            assert!(ticks < 18);
+            // The potion goes along the view of the turn, as the server had it.
+            let mut aim = None;
+            for _ in 0..12 {
+                run(&mut e, 1, |_| IDLE);
+                if aim.is_none() && e.m.s.potion_throws[0] == 1 {
+                    aim = e.m.s.thrown.iter().find(|t| t.thrower == 0).map(|t| t.aim);
+                }
+            }
+            let aim = aim.expect("the potion was seen when thrown");
+            let (_, dir) = throw_heading(Kind::Potion, e.m.s.p[0].l.body.pos, ty, tp);
+            for i in 0..3 {
+                assert!((aim[i] - dir[i] * Kind::Potion.speed() as f64).abs() < 1e-6, "{aim:?} against {dir:?}");
+            }
+            // The observation of the turn counts down and is gone.
+            run(&mut e, 4, |_| IDLE);
+            assert_eq!(shown(&e), 0.0);
+            assert_eq!(e.m.s.potion_throws[0], 1);
         }
-        run(&mut e, 6, |_| IDLE);
-        let pos = e.m.s.p[0].l.body.pos;
-        let ran = (pos[0] - start[0]).hypot(pos[2] - start[2]);
-        assert_eq!(e.m.s.potion_throws[0], 1);
-        assert_eq!(e.m.c[0].lp.potions.count_ones(), 6);
-        // It came down on the player that ran, and not on the one far away;
-        // with the mouse spun this far the keys follow the run only to the
-        // nearest of eight ways (see the next test for a still mouse).
-        assert!(e.m.s.p[0].health >= health + 7.0, "turn {turn}: {health} to {} after {ticks} ticks and {ran:.1} blocks", e.m.s.p[0].health);
-        assert_eq!(e.m.s.p[1].health, other);
-        assert!(ran > 1.0, "{ran}");
     }
-    // A potion asked for on the tick after the click follows the first
-    // along the same view, and the view comes back a tick later.
-    let mut e = Env::new(Mode::SelfPlay, params(), 3);
-    let at = yaw(&e);
-    run(&mut e, 2, |_| with(9, BAR_TURN));
-    run(&mut e, 1, |_| with(9, 1));
-    assert!((yaw(&e) - at - 180.0).abs() < 1e-3);
-    run(&mut e, 1, |_| IDLE);
-    assert!((yaw(&e) - at).abs() < 1e-3);
-    run(&mut e, 20, |_| IDLE);
-    assert_eq!(e.m.s.potion_throws[0], 2);
     // The plain throw of the same start does not turn.
     let mut e = Env::new(Mode::SelfPlay, params(), 3);
+    let at = yaw(&e);
     run(&mut e, 1, |_| with(9, 1));
     run(&mut e, 12, |_| IDLE);
     assert!((yaw(&e) - at).abs() < 1e-3);
@@ -495,30 +490,60 @@ fn a_player_that_goes_for_potions_runs_at_a_hurt_opponent_and_a_plain_one_does_n
 }
 
 #[test]
-fn a_potion_thrown_with_a_turn_and_the_mouse_still_heals_all_eight() {
-    // On a server that throws as the view does and on one that adds the
-    // thrower's movement, known; and not yet known, the most of both.
-    for (carry, knows) in [(0.0, Some(false)), (1.0, Some(true)), (0.0, None), (1.0, None)] {
-        for turn in 0..3 {
-            let (mut full, mut least) = (0, f32::MAX);
-            for seed in 0..20 {
-                let mut p = params();
-                p.start_yaw_noise = 25.0;
-                p.throw_carry_prob = carry;
-                let mut e = Env::new(Mode::SelfPlay, p, seed);
-                if let Some(k) = knows {
-                    e.agent_mut(0).knows_carry(k);
-                }
-                let health = e.m.s.p[0].health;
-                run(&mut e, 1, |_| with(9, BAR_TURN + turn));
-                run(&mut e, 30, |_| IDLE);
-                assert_eq!(e.m.s.potion_throws[0], 1);
-                let gain = e.m.s.p[0].health - health;
-                full += (gain >= 8.0) as i32;
-                least = least.min(gain);
+fn the_ticks_of_a_player_that_goes_for_potions_are_marked_as_not_its_policys() {
+    for steal in [0.0, 1.0] {
+        let mut p = params();
+        p.league_steal = steal;
+        let mut e = Env::new(Mode::SelfPlay, p, 5);
+        assert!(e.m.c[1].rp.health <= 12.0);
+        let (mut fo, mut fp) = ([0.0f32; OBS_DIM], [0.0f32; PRIV_DIM]);
+        let mut marked = 0;
+        for _ in 0..20 {
+            let id = e.pending;
+            e.step(&IDLE);
+            e.take_outcome(&mut fo, &mut fp);
+            if id == 1 {
+                marked += e.overridden as i32;
+            } else {
+                assert!(!e.overridden);
             }
-            let sure = if knows.is_some() || carry == 1.0 { 19 } else { 0 };
-            assert!(full >= sure && least >= 6.0, "carry {carry} {knows:?} turn {turn}: {full} of 20, least {least}");
+        }
+        assert_eq!(marked, if steal > 0.0 { 10 } else { 0 });
+    }
+}
+
+#[test]
+fn for_every_turn_a_pitch_that_heals_all_eight_is_there_to_learn() {
+    // On a server that throws as the view does and on one that adds the
+    // thrower's movement: the player sprints on along the turned view, and
+    // some pitch of the last control heals all eight.
+    for carry in [0.0, 1.0] {
+        for turn in 0..3 {
+            let mut found = 0;
+            for seed in 0..10 {
+                let mut best = f32::MIN;
+                for choice in 0..THROW_PITCHES as i32 {
+                    let mut p = params();
+                    p.start_yaw_noise = 25.0;
+                    p.throw_carry_prob = carry;
+                    let mut e = Env::new(Mode::SelfPlay, p, seed);
+                    let health = e.m.s.p[0].health;
+                    let on = |k: usize| {
+                        let mut a = with(0, 1);
+                        a[3] = 1;
+                        if k == 0 {
+                            a[9] = BAR_TURN + turn;
+                            a[11] = choice;
+                        }
+                        a
+                    };
+                    run(&mut e, 30, on);
+                    assert_eq!(e.m.s.potion_throws[0], 1);
+                    best = best.max(e.m.s.p[0].health - health);
+                }
+                found += (best >= 8.0) as i32;
+            }
+            assert!(found >= 9, "carry {carry} turn {turn}: {found} of 10");
         }
     }
 }

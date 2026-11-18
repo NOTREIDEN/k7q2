@@ -13,7 +13,7 @@
 //! allows for both.
 use pvpsim::env::{Env, Mode, Params, ACT_HEADS, OBS_DIM, PRIV_DIM};
 
-const IDLE: [i32; ACT_HEADS] = [0, 0, 0, 0, 0, 13, 10, 0, 0, 0, 0];
+const IDLE: [i32; ACT_HEADS] = [0, 0, 0, 0, 0, 13, 10, 0, 0, 0, 0, 0];
 /// A quarter turn down in one tick.
 const FLICK_DOWN: i32 = 28;
 const PINGS: [f64; 4] = [20.0, 110.0, 200.0, 290.0];

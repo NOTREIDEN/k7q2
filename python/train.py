@@ -42,6 +42,8 @@ def main():
     ap.add_argument("--minibatches", type=int, default=4)
     ap.add_argument("--epochs", type=int, default=3)
     ap.add_argument("--param", action="append", default=[], help="name=value for the simulator")
+    ap.add_argument("--turn-drill", type=float, default=0.0,
+                    help="share of the agent's potions asked for that are thrown with a turn behind instead, to practise them")
     ap.add_argument("--n-league", type=int, default=0, help="duels against earlier versions of the agent")
     ap.add_argument("--league-dir", default=None, help="folder with the weights of those versions")
     ap.add_argument("--league-groups", type=int, default=4, help="versions played at the same time")
@@ -166,12 +168,21 @@ def main():
         if args.worker_id == 0:
             print(f"start: league of {len(league.members)} earlier versions:", " ".join(n for n, _ in league.table()), flush=True)
 
+    drill_rng = np.random.default_rng(args.seed * 1000 + args.machine_id * 37 + args.worker_id)
+
+    def pick(k, obs, priv):
+        """The agent's next action; player 1 of self-play is never drilled."""
+        a = streams[k].choose(policy, obs, priv)
+        if args.turn_drill > 0 and k != "sp1":
+            a = streams[k].drill(a, args.turn_drill, drill_rng)
+        return a
+
     # Player 0 of every duel is the first to act.
     acts = {}
     for k, e in envs.items():
         obs, priv = e.reset()
         k = "sp0" if k == "sp" else k
-        acts[k] = streams[k].choose(policy, obs, priv)
+        acts[k] = pick(k, obs, priv)
 
     def machine_samples():
         return local.total_samples(total_samples) if local is not None else total_samples
@@ -197,23 +208,24 @@ def main():
             if "sp" in envs:
                 e = envs["sp"]
                 e.step(acts["sp0"])  # player 0 ticks; player 1 is next
-                streams["sp1"].close(policy, e.rew, e.done, e.fobs, e.fpriv, g, vsc)
+                streams["sp1"].close(policy, e.rew, e.done, e.fobs, e.fpriv, g, vsc, e.obs)
                 a1 = streams["sp1"].choose(policy, e.obs, e.priv)
                 e.step(a1)  # player 1 ticks; player 0 is next
-                streams["sp0"].close(policy, e.rew, e.done, e.fobs, e.fpriv, g, vsc)
-                acts["sp0"] = streams["sp0"].choose(policy, e.obs, e.priv)
+                streams["sp1"].disown(e.overridden())
+                streams["sp0"].close(policy, e.rew, e.done, e.fobs, e.fpriv, g, vsc, e.obs)
+                acts["sp0"] = pick("sp0", e.obs, e.priv)
             if "bot" in envs:
                 e = envs["bot"]
                 e.step(acts["bot"])
-                streams["bot"].close(policy, e.rew, e.done, e.fobs, e.fpriv, g, vsc)
-                acts["bot"] = streams["bot"].choose(policy, e.obs, e.priv)
+                streams["bot"].close(policy, e.rew, e.done, e.fobs, e.fpriv, g, vsc, e.obs)
+                acts["bot"] = pick("bot", e.obs, e.priv)
             for gi in range(groups):
                 k = f"lg{gi}"
                 e = envs[k]
                 e.step(acts[k])  # the agent ticks; the earlier version is next
                 e.step(league.act(gi, e.obs, e.priv, e.done))  # it ticks; the agent is next
-                streams[k].close(policy, e.rew, e.done, e.fobs, e.fpriv, g, vsc)
-                acts[k] = streams[k].choose(policy, e.obs, e.priv)
+                streams[k].close(policy, e.rew, e.done, e.fobs, e.fpriv, g, vsc, e.obs)
+                acts[k] = pick(k, e.obs, e.priv)
         t1 = time.time()
         info = ppo_update(policy, opt, list(streams.values()), vs, cfg)
         t2 = time.time()

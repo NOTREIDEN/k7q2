@@ -9,6 +9,11 @@ in ordinary fixed-length sequences."""
 import numpy as np
 import torch
 
+# The pitch of a throw with a turn, and the input that counts down from the
+# tick of the turn (1 on that tick).
+PITCH_HEAD = 11
+TURN_OBS = 152
+
 
 class Stream:
     def __init__(self, name, n, obs_dim, priv_dim, heads, horizon, hidden, learn=True):
@@ -16,10 +21,14 @@ class Stream:
         self.obs = torch.zeros(horizon, n, obs_dim)
         self.priv = torch.zeros(horizon, n, priv_dim)
         self.act = torch.zeros(horizon, n, heads, dtype=torch.long)
-        self.logp = torch.zeros(horizon, n)
+        self.logp = torch.zeros(horizon, n, heads)
         self.val = torch.zeros(horizon, n)
         self.rew = torch.zeros(horizon, n)
         self.done = torch.zeros(horizon, n, dtype=torch.bool)
+        # 1 for each control whose choice stored is the one that was played,
+        # 0 where others laid their keys over it or a drill changed it: those
+        # choices teach the value, not the policy.
+        self.own = torch.ones(horizon, n, heads)
         self.h0 = torch.zeros(n, hidden)
         self.c0 = torch.zeros(n, hidden)
         self.state = (torch.zeros(n, hidden), torch.zeros(n, hidden))
@@ -31,15 +40,36 @@ class Stream:
         obs = torch.from_numpy(obs_np).clone()
         priv = torch.from_numpy(priv_np).clone()
         before = self.state
-        act, logp, val, self.state = policy.act(obs, priv, before)
+        act, logp, val, self.state = policy.act(obs, priv, before, per_head=True)
         self.pend = (obs, priv, act, logp, val, before)
+        self.pend_own = torch.ones(self.n, act.shape[-1])
         return act.numpy().astype(np.int32)
 
-    def close(self, policy, rew_np, done_np, fobs_np, fpriv_np, gamma, vscale):
-        """Store the pending step now that its reward and done flag are known."""
+    def disown(self, overridden_np):
+        """Mark the pending actions whose keys others laid over."""
+        self.pend_own[torch.from_numpy(overridden_np != 0)] = 0.0
+
+    def drill(self, act_np, prob, rng, head=9, asked=1, played=7):
+        """Play some of the pending potions asked for as throws with a turn
+        instead, to practise them: the policy still picks the pitch and
+        everything around the throw, but the choice of throw on those steps
+        is not its own and does not teach it."""
+        rows = (act_np[:, head] == asked) & (rng.random(self.n) < prob)
+        act_np[rows, head] = played
+        self.pend_own[torch.from_numpy(rows), head] = 0.0
+        return act_np
+
+    def close(self, policy, rew_np, done_np, fobs_np, fpriv_np, gamma, vscale, nobs_np=None):
+        """Store the pending step now that its reward and done flag are known.
+        `nobs_np`, the view that follows the step, tells whether it turned
+        for a throw: the pitch chosen for such a throw counts on that step
+        only, and is left out of what the policy learns on the others."""
         if self.pend is None:
             return
         obs, priv, act, logp, val, before = self.pend
+        if nobs_np is not None and self.pend_own.shape[-1] > PITCH_HEAD:
+            after = np.where((done_np != 0)[:, None], fobs_np, nobs_np)
+            self.pend_own[torch.from_numpy(after[:, TURN_OBS] != 1.0), PITCH_HEAD] = 0.0
         rew = torch.from_numpy(rew_np).clone()
         done = torch.from_numpy(done_np != 0)
         if done.any():
@@ -63,6 +93,7 @@ class Stream:
                 self.h0, self.c0 = before[0].clone(), before[1].clone()
             self.obs[t], self.priv[t], self.act[t] = obs, priv, act
             self.logp[t], self.val[t], self.rew[t], self.done[t] = logp, val, rew, done
+            self.own[t] = self.pend_own
             self.t += 1
         self.pend = None
 
@@ -115,6 +146,7 @@ def ppo_update(policy, opt, streams, vs, cfg):
     act = cat([s.act for s, _, _ in parts])
     logp_old = cat([s.logp for s, _, _ in parts])
     done = cat([s.done for s, _, _ in parts])
+    own = cat([s.own for s, _, _ in parts])
     adv = cat([a for _, a, _ in parts])
     ret = cat([r for _, _, r in parts])
     h0 = cat([s.h0 for s, _, _ in parts], 0)
@@ -129,10 +161,13 @@ def ppo_update(policy, opt, streams, vs, cfg):
     for _ in range(cfg["epochs"]):
         perm = torch.randperm(B)
         for mb in perm.chunk(cfg["minibatches"]):
-            logp, ent, v = policy.evaluate_seq(obs[:, mb], priv[:, mb], act[:, mb], (h0[mb], c0[mb]), done[:, mb])
-            ratio = torch.exp(logp - logp_old[:, mb])
-            a = adv[:, mb]
-            pi_loss = -torch.min(ratio * a, torch.clamp(ratio, 1 - cfg["clip"], 1 + cfg["clip"]) * a).mean()
+            logp_h, ent, v = policy.evaluate_seq(obs[:, mb], priv[:, mb], act[:, mb], (h0[mb], c0[mb]), done[:, mb], per_head=True)
+            o = own[:, mb]
+            logp = (logp_h * o).sum(-1)
+            ratio = torch.exp(logp - (logp_old[:, mb] * o).sum(-1))
+            a, w = adv[:, mb], (o.sum(-1) > 0).float()
+            surr = torch.min(ratio * a, torch.clamp(ratio, 1 - cfg["clip"], 1 + cfg["clip"]) * a)
+            pi_loss = -(surr * w).sum() / w.sum().clamp(min=1.0)
             v_loss = 0.5 * (v - ret_n[:, mb]).pow(2).mean()
             entropy = ent.mean()
             loss = pi_loss + cfg["vf_coef"] * v_loss - cfg["ent_coef"] * entropy
@@ -144,7 +179,7 @@ def ppo_update(policy, opt, streams, vs, cfg):
                 stats["pi_loss"] += float(pi_loss)
                 stats["v_loss"] += float(v_loss)
                 stats["entropy"] += float(entropy)
-                stats["kl"] += float((logp_old[:, mb] - logp).mean())
+                stats["kl"] += float(((logp_old[:, mb] * o).sum(-1) - logp).mean())
                 stats["clip_frac"] += float(((ratio - 1).abs() > cfg["clip"]).float().mean())
             n_upd += 1
     out = {k: v / max(n_upd, 1) for k, v in stats.items()}

@@ -88,6 +88,14 @@ pub unsafe extern "C" fn pvp_vec_step(
 }
 
 /// # Safety
+/// `out` must hold one byte per environment.
+#[no_mangle]
+pub unsafe extern "C" fn pvp_vec_overridden(p: *mut VecEnv, out: *mut u8) {
+    let v = &*p;
+    v.overridden(slice::from_raw_parts_mut(out, v.envs.len()));
+}
+
+/// # Safety
 /// `out` must hold `pvp_stats_dim()` doubles.
 #[no_mangle]
 pub unsafe extern "C" fn pvp_vec_take_stats(p: *mut VecEnv, out: *mut f64) {

@@ -340,11 +340,13 @@ pub struct Params {
     /// block or a sprint.
     pub w_inv_near: f32,
     pub inv_near_dist: f64,
-    /// In self-play, the share of duels in which player 1, whose actions
-    /// are not trained on (an earlier version in the league), goes for the
+    /// In self-play, the share of duels in which player 1 goes for the
     /// other player's potions: while that player holds a potion, has one in
     /// the air or is under 12 health, it runs straight at it (`steal_keys`).
     /// A potion thrown at its own feet in front of such a player heals both.
+    /// Its ticks played that way are not its policy's (`Env::overridden`):
+    /// an earlier version in the league is not trained on anyway, and in
+    /// plain self-play those ticks are left out of player 1's training.
     pub league_steal: f64,
     /// Share of duels on a server whose throws take on the thrower's motion
     /// (`ServerCfg::throw_carry`).
@@ -874,8 +876,10 @@ pub struct Env {
     pot_back: [bool; 2],
     off_run: [i32; 2],
     /// Whether player 1 goes for player 0's potions in this duel (see
-    /// `Params::league_steal`).
+    /// `Params::league_steal`), and whether its keys were laid over that
+    /// way on the last tick made.
     steal: bool,
+    pub overridden: bool,
     /// Whether each player's inventory was open on its last tick.
     was_open: [bool; 2],
     /// Each player's view after its last tick, its last turn sideways and
@@ -894,11 +898,11 @@ pub struct Env {
 /// of its own in the air or is under 12 health, the view turned onto it
 /// (at most 60 degrees a tick), W with sprint, no strafe, no right button,
 /// and jumps while it is out of reach. Clicks stay the policy's.
-fn steal_keys(c: &Client, deg_per_count: f64, inp: &mut Input) {
+fn steal_keys(c: &Client, deg_per_count: f64, inp: &mut Input) -> bool {
     let (lp, rp) = (&c.lp, &c.rp);
     let potting = rp.item == Item::Potion || c.thrown.iter().any(|e| e.kind == Kind::Potion && !e.mine);
     if lp.inv_open || !(potting || rp.health <= 12.0) {
-        return;
+        return false;
     }
     let (yaw_to, pitch_to) = bot::angles_to(lp.eye(), [rp.pos[0], rp.pos[1] + 1.2, rp.pos[2]]);
     let dyaw = crate::mth::wrap_deg(yaw_to - lp.l.yaw as f64).clamp(-60.0, 60.0);
@@ -912,6 +916,7 @@ fn steal_keys(c: &Client, deg_per_count: f64, inp: &mut Input) {
     inp.use_again = false;
     let hdist = (rp.pos[0] - lp.l.body.pos[0]).hypot(rp.pos[2] - lp.l.body.pos[2]);
     inp.jump = hdist > 3.2 && lp.l.body.on_ground;
+    true
 }
 
 pub fn new_match(p: &Params, rng: &mut Rng, mode: Mode) -> (Match, [f64; 2], BotParams) {
@@ -1323,6 +1328,7 @@ impl Env {
             pot_back: [true; 2],
             off_run: [0; 2],
             steal: false,
+            overridden: false,
             over: false,
         };
         e.begin();
@@ -1761,9 +1767,7 @@ impl Env {
         let id = self.pending;
         let duel = self.duel();
         let mut inp = self.ag[id].keys(&self.m.c[id], &self.m.world, &duel, action, &mut self.rng);
-        if id == 1 && self.steal && !self.ag[1].busy() && inp.inv == 0 {
-            steal_keys(&self.m.c[1], self.m.ccfg.mouse_f1 as f64 * 0.15, &mut inp);
-        }
+        self.overridden = id == 1 && self.steal && !self.ag[1].busy() && inp.inv == 0 && steal_keys(&self.m.c[1], self.m.ccfg.mouse_f1 as f64 * 0.15, &mut inp);
         let out = self.m.client_tick(id, &inp);
         self.account(id, &inp, &out);
         let mut round_done = id == 1;
@@ -2107,6 +2111,14 @@ impl VecEnv {
             e.write_priv(pending, &mut privs[i * PRIV_DIM..(i + 1) * PRIV_DIM]);
         }
         pending
+    }
+
+    /// Per environment, 1 if the keys of the action last made were laid
+    /// over by others (`Env::overridden`), else 0.
+    pub fn overridden(&self, out: &mut [u8]) {
+        for (o, e) in out.iter_mut().zip(&self.envs) {
+            *o = e.overridden as u8;
+        }
     }
 
     /// Totals over finished episodes since the last call.

@@ -1,13 +1,16 @@
-//! Potions thrown with a turn, nobody near: where `run_feet` said the
-//! thrower would be, where it was, and where the potion broke.
-//! `cargo run --release --example turn_check -- [SEEDS] [WAY] [CARRY] [KNOWS]`, CARRY
-//! the share of duels on a server that adds the thrower's movement. A fifth
-//! argument, 0 or 1, has the agent know which it is.
-use pvpsim::agent::{run_feet, ACT_HEADS, BAR_TURN, BAR_TURNS, OBS_DIM};
-use pvpsim::aabb::V3;
+//! Potions thrown with a turn, nobody near: for each pitch the last control
+//! can ask for, the health the potion gives with the player then doing one
+//! of a few simple things, to see that a pitch that heals all eight is
+//! there to be learnt.
+//! `cargo run --release --example turn_check -- [SEEDS] [WAY] [CARRY] [AFTER]`,
+//! CARRY the share of duels on a server that adds the thrower's movement,
+//! AFTER what the player does from the click on: 0 stands, 1 runs on along
+//! the turned view with W and sprint, 2 turns back at once and walks back
+//! with S.
+use pvpsim::agent::{throw_pitch, ACT_HEADS, BAR_TURN, OBS_DIM, THROW_PITCHES};
 use pvpsim::env::{Env, Mode, Params, PRIV_DIM};
 
-const IDLE: [i32; ACT_HEADS] = [0, 0, 0, 0, 0, 13, 10, 0, 0, 0, 0];
+const IDLE: [i32; ACT_HEADS] = [0, 0, 0, 0, 0, 13, 10, 0, 0, 0, 0, 0];
 
 fn params() -> Params {
     let mut p = Params::default();
@@ -23,78 +26,64 @@ fn params() -> Params {
     p
 }
 
-fn d3(a: V3, b: V3) -> f64 {
-    ((a[0] - b[0]).powi(2) + (a[1] - b[1]).powi(2) + (a[2] - b[2]).powi(2)).sqrt()
+/// The health one potion thrown at pitch choice `k` gives.
+fn heal(seed: u64, way: i32, carry: f64, after: i32, k: i32) -> f32 {
+    let mut p = params();
+    p.throw_carry_prob = carry;
+    let mut e = Env::new(Mode::SelfPlay, p, seed);
+    let (mut fo, mut fp) = ([0.0f32; OBS_DIM], [0.0f32; PRIV_DIM]);
+    let hp0 = e.m.s.p[0].health;
+    let mut t = 0;
+    while t < 40 {
+        let mut a = IDLE;
+        if e.pending == 0 {
+            if t == 0 {
+                a[9] = way;
+                a[11] = k;
+                // Running from the turn on.
+                a[0] = 1;
+                a[3] = 1;
+            } else {
+                match after {
+                    1 => {
+                        a[0] = 1;
+                        a[3] = 1;
+                    }
+                    2 => {
+                        if t == 2 {
+                            a[10] = 5;
+                        }
+                        a[0] = 2;
+                    }
+                    _ => {}
+                }
+            }
+            t += 1;
+        }
+        e.step(&a);
+        e.take_outcome(&mut fo, &mut fp);
+    }
+    e.m.s.p[0].health - hp0
 }
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
-    let seeds: u64 = args.get(1).and_then(|s| s.parse().ok()).unwrap_or(40);
+    let seeds: u64 = args.get(1).and_then(|s| s.parse().ok()).unwrap_or(20);
     let way: i32 = args.get(2).and_then(|s| s.parse().ok()).unwrap_or(BAR_TURN);
     let carry: f64 = args.get(3).and_then(|s| s.parse().ok()).unwrap_or(0.0);
-    // 0 or 1: the agent takes the server to add movement or not; else it has yet to see.
-    let knows: i32 = args.get(4).and_then(|s| s.parse().ok()).unwrap_or(-1);
-    let (mut fo, mut fp) = ([0.0f32; OBS_DIM], [0.0f32; PRIV_DIM]);
-    let mut eights = 0;
+    let after: i32 = args.get(4).and_then(|s| s.parse().ok()).unwrap_or(1);
+    let mut reach = 0;
+    let mut tally = [0u32; THROW_PITCHES];
     for seed in 0..seeds {
-        let mut p = params();
-        p.throw_carry_prob = carry;
-        let mut e = Env::new(Mode::SelfPlay, p, seed);
-        if knows >= 0 {
-            e.agent_mut(0).knows_carry(knows == 1);
-        }
-        let hp0 = e.m.s.p[0].health;
-        let yaw = e.m.c[0].lp.l.yaw as f64 + BAR_TURNS[(way - BAR_TURN) as usize] as f64 * 0.15;
-        let pred = run_feet(&e.m.c[0], &e.m.world, yaw as f32);
-        let mut srv: Vec<V3> = Vec::new();
-        let mut cli: Vec<V3> = Vec::new();
-        let mut pot: Vec<(V3, i32)> = Vec::new();
-        let mut k = 0;
-        let mut last: Option<(V3, i32)> = None;
-        let mut broke: Option<(V3, i32, usize)> = None;
-        while k < 40 {
-            let a = if e.pending == 0 {
-                let mut a = IDLE;
-                if k == 0 {
-                    a[9] = way;
-                }
-                k += 1;
-                a
-            } else {
-                IDLE
-            };
-            let was0 = e.pending == 0;
-            e.step(&a);
-            e.take_outcome(&mut fo, &mut fp);
-            if was0 {
-                cli.push(e.m.c[0].lp.l.body.pos);
-            }
-            srv.push(e.m.s.p[0].l.body.pos);
-            let now = e.m.s.thrown.iter().find(|t| t.thrower == 0).map(|t| (t.pos, t.ticks_in_air));
-            if let Some(p) = now {
-                pot.push(p);
-            }
-            if broke.is_none() && last.is_some() && now.is_none() {
-                let (at, t) = last.unwrap();
-                broke = Some((at, t, srv.len() - 1));
-            }
-            last = now;
-        }
-        let gain = e.m.s.p[0].health - hp0;
-        eights += (gain >= 7.99) as i32;
-        let Some((at, t, i)) = broke else {
-            println!("seed {seed}: no break, gain {gain}");
-            continue;
-        };
-        // The server's feet at the impact, and which predicted tick is nearest.
-        let feet = srv[i];
-        let (best, bd) = pred.iter().enumerate().map(|(q, p)| (q, d3(*p, feet))).fold((0, 1e9), |a, b| if b.1 < a.1 { b } else { a });
-        println!(
-            "seed {seed:2}: gain {gain:.0}, potion flew {t} ticks, broke {:.2} from the feet (dy {:.2}); feet nearest predicted tick {best} ({bd:.3} off); client ticks {}",
-            d3(at, feet),
-            at[1] - feet[1],
-            cli.len()
-        );
+        let gains: Vec<f32> = (0..THROW_PITCHES as i32).map(|k| heal(seed, way, carry, after, k)).collect();
+        let best = gains.iter().cloned().fold(f32::MIN, f32::max);
+        reach += (best >= 7.99) as i32;
+        let full: Vec<String> = (0..THROW_PITCHES).filter(|&k| gains[k] >= 7.99).map(|k| {
+            tally[k] += 1;
+            format!("{}", throw_pitch(k as i32))
+        }).collect();
+        println!("seed {seed:2}: best {best:.0}; all eight at {}", if full.is_empty() { "none".to_string() } else { full.join(" ") });
     }
-    println!("{eights} of {seeds} healed 8");
+    let common: Vec<String> = (0..THROW_PITCHES).filter(|&k| tally[k] > 0).map(|k| format!("{}:{}", throw_pitch(k as i32), tally[k])).collect();
+    println!("{reach} of {seeds} have a pitch that heals 8; pitch:seeds {}", common.join(" "));
 }
