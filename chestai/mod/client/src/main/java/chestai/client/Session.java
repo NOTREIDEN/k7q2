@@ -236,6 +236,16 @@ public final class Session {
         mostMobs = Math.max(mostMobs, f.mobs.size());
         mem.update(f, first);
         first = false;
+        if (mem.chests.isEmpty()) {
+            // No chest known: nothing to go for, so the keys stay still
+            // instead of the network wandering about with an empty map.
+            hands.release();
+            if (tick == 1 || tick % 600 == 0) {
+                return "Chest AI: no veo ningun cofre de farmeo, espero quieto." + Reader.diag(mc, settings)
+                    + "\nSi el texto del holograma es otro, ponelo en texto_claim de ajustes.txt.";
+            }
+            return null;
+        }
         float[] o = obs.build(f, mem, new WorldGrid(world));
         int[] a = net.act(o, draws, !settings.draw);
         if (DEBUG && tick % 20 == 0) {

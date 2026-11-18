@@ -12,9 +12,9 @@ import java.util.regex.Pattern;
  * at zero is a chest that is ready.
  */
 public final class HoloText {
-    private static final Pattern MIN_SEC = Pattern.compile("(\\d+)\\s*minutes?\\s*(?:and\\s*)?(\\d{1,2})\\s*seconds?", Pattern.CASE_INSENSITIVE);
-    private static final Pattern MIN = Pattern.compile("(\\d+)\\s*minutes?", Pattern.CASE_INSENSITIVE);
-    private static final Pattern SEC = Pattern.compile("(\\d+)\\s*seconds?", Pattern.CASE_INSENSITIVE);
+    private static final Pattern MIN_SEC = Pattern.compile("(\\d+)\\s*(?:minutes?|minutos?|mins?|m)\\b\\s*(?:and\\s*|y\\s*|,\\s*)?(\\d{1,2})\\s*(?:seconds?|segundos?|secs?|segs?|s)\\b", Pattern.CASE_INSENSITIVE);
+    private static final Pattern MIN = Pattern.compile("(\\d+)\\s*(?:minutes?|minutos?|mins?|m)\\b", Pattern.CASE_INSENSITIVE);
+    private static final Pattern SEC = Pattern.compile("(\\d+)\\s*(?:seconds?|segundos?|secs?|segs?|s)\\b", Pattern.CASE_INSENSITIVE);
     private static final Pattern CLOCK = Pattern.compile("(?:^|\\D)(\\d+):(\\d{1,2})(?:\\D|$)");
 
     private HoloText() {
@@ -70,8 +70,11 @@ public final class HoloText {
             if (p.length() == 0) {
                 continue;
             }
-            if (p.contains(claimText)) {
-                return new int[] {Frame.CLAIMABLE, 0};
+            for (String ct : claimText.split(",")) {
+                String t = ct.trim();
+                if (t.length() > 0 && p.contains(t)) {
+                    return new int[] {Frame.CLAIMABLE, 0};
+                }
             }
             if (p.equals("wave defeated")) {
                 continue;

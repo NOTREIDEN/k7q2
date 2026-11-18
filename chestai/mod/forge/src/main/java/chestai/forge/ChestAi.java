@@ -71,7 +71,9 @@ public final class ChestAi {
 
     private static void say(Minecraft mc, String line) {
         if (line != null && mc.ingameGUI != null) {
-            mc.ingameGUI.getChatGUI().printChatMessage(new ChatComponentText(line));
+            for (String one : line.split("\n")) {
+                mc.ingameGUI.getChatGUI().printChatMessage(new ChatComponentText(one));
+            }
         }
     }
 

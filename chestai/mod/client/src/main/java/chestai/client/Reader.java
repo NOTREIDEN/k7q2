@@ -44,7 +44,7 @@ import chestai.core.Pilot;
  */
 final class Reader {
     /** How far under a hologram its chest may be. */
-    private static final int HOLO_DEPTH = 6;
+    private static final int HOLO_DEPTH = 8;
 
     private Reader() {
     }
@@ -56,7 +56,8 @@ final class Reader {
 
     static boolean isChest(World w, BlockPos p) {
         Block b = w.getBlockState(p).getBlock();
-        return b == Blocks.chest || b == Blocks.trapped_chest || b == Blocks.ender_chest;
+        // A chest, or a head made to look like one, as some servers use.
+        return b == Blocks.chest || b == Blocks.trapped_chest || b == Blocks.ender_chest || b == Blocks.skull;
     }
 
     /** The chest under a hologram stand, or null. */
@@ -69,12 +70,40 @@ final class Reader {
                 return p;
             }
         }
+        // A stand set off the chest's centre line.
+        for (int y = y0 + 1; y >= y0 - HOLO_DEPTH; y--) {
+            for (int dx = -1; dx <= 1; dx++) {
+                for (int dz = -1; dz <= 1; dz++) {
+                    BlockPos p = new BlockPos(x + dx, y, z + dz);
+                    if (isChest(w, p)) {
+                        return p;
+                    }
+                }
+            }
+        }
+        // Any other block that can be clicked straight under the hologram (a
+        // resource pack can make anything look like a chest): the first solid one
+        // that is not the ground's grass.
+        for (int y = y0; y >= y0 - HOLO_DEPTH; y--) {
+            BlockPos p = new BlockPos(x, y, z);
+            Block b = w.getBlockState(p).getBlock();
+            if (b.getMaterial() != net.minecraft.block.material.Material.air && b != Blocks.tallgrass && b != Blocks.double_plant
+                && b != Blocks.carpet && b != Blocks.snow_layer) {
+                // The ground itself: the "chest" is something drawn over it (an entity
+                // of the server's), so the spot is the air block on the ground.
+                return b == Blocks.grass || b == Blocks.dirt || b == Blocks.stone ? p.up() : p;
+            }
+        }
         return null;
     }
 
     /** Kind of a mob of a wave, or -1 for an entity that is none. */
     static int kind(Entity e, EntityPlayerSP me, Settings s) {
         if (e instanceof EntityArmorStand || e instanceof EntityPlayer || !(e instanceof EntityLivingBase)) {
+            return -1;
+        }
+        // Invisible ones are the server's own (hologram carriers, markers), never a wave's.
+        if (e.isInvisible()) {
             return -1;
         }
         String name = EntityList.getEntityString(e);
@@ -94,11 +123,17 @@ final class Reader {
         if (e instanceof EntitySnowman) {
             return Frame.GOLEM;
         }
+        if (e instanceof net.minecraft.entity.passive.EntityWolf) {
+            // The wolves of a wave are wild; a tamed one is someone's dog.
+            return ((net.minecraft.entity.passive.EntityWolf) e).isTamed() ? -1 : Frame.ZOMBIE;
+        }
         if (!(e instanceof EntityMob || e instanceof EntitySlime || e instanceof EntityGolem)) {
-            return -1;
+            // Waves can be of passive animals too; those count only near a chest (see read).
+            return passive(e) ? Frame.ZOMBIE : -1;
         }
         if (e instanceof EntitySkeleton) {
-            return Frame.HORSEMAN;
+            // On foot (with armour or a head or not): it comes at the player like a zombie.
+            return Frame.ZOMBIE;
         }
         if (e.width <= 0.5f && e.height <= 1.2f) {
             return Frame.RIDER;
@@ -170,7 +205,7 @@ final class Reader {
             if (ci < 0) {
                 List<String> one = new ArrayList<String>();
                 one.add(e.getCustomNameTag());
-                if (HoloText.parse(one, s.claimText, s.activeColors) == null && !HoloText.plain(e.getCustomNameTag()).toLowerCase(Locale.ROOT).contains("wave")) {
+                if (HoloText.parse(one, s.claimText, s.activeColors) == null && !looksLikeChest(HoloText.plain(e.getCustomNameTag()).toLowerCase(Locale.ROOT))) {
                     continue;
                 }
                 ci = mem.chest(c.getX(), c.getY(), c.getZ());
@@ -248,12 +283,16 @@ final class Reader {
             if (k < 0 || e.isDead) {
                 continue;
             }
+            if (passive(e) && !nearChest(mem, e, 12.0)) {
+                // A farm animal out in the field, not a mob of a chest.
+                continue;
+            }
             EntityLivingBase body = (EntityLivingBase) e;
             EntityLivingBase life = body;
             if (k == Frame.HORSEMAN && e instanceof EntityHorse) {
                 life = (EntityLivingBase) e.riddenByEntity;
             }
-            if (life.getHealth() <= 0.0f) {
+            if (life.getHealth() <= 0.0f && (life.deathTime > 0 || life.isDead)) {
                 continue;
             }
             Frame.Mob m = new Frame.Mob();
@@ -266,7 +305,8 @@ final class Reader {
             m.mx = e.posX - e.lastTickPosX;
             m.my = e.posY - e.lastTickPosY;
             m.mz = e.posZ - e.lastTickPosZ;
-            m.hp = life.getHealth();
+            // A server that hides health sends 0 (or 1): then it counts as unhurt.
+            m.hp = life.getHealth() > 0.0f ? life.getHealth() : life.getMaxHealth();
             m.maxHp = life.getMaxHealth();
             m.hurtTime = Math.max(body.hurtTime, life.hurtTime);
             m.mounted = k == Frame.RIDER && e.ridingEntity == me;
@@ -292,5 +332,79 @@ final class Reader {
             }
         }
         return f;
+    }
+
+    private static final String[] CHEST_WORDS = {"wave", "oleada", "next", "siguiente", "claim", "reclam", "cofre", "chest", "reward", "recompensa"};
+
+    static boolean looksLikeChest(String plain) {
+        for (String w : CHEST_WORDS) {
+            if (plain.contains(w)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /**
+     * For the chat when the agent does not get the place: the named stands
+     * around and whether a chest is under each, and the living things near
+     * that it does not take for wave mobs, by type.
+     */
+    static String diag(net.minecraft.client.Minecraft mc, Settings s) {
+        World w = mc.theWorld;
+        EntityPlayerSP me = mc.thePlayer;
+        StringBuilder b = new StringBuilder();
+        int n = 0;
+        java.util.Set<String> seen = new java.util.HashSet<String>();
+        for (Object o : new ArrayList<Object>(w.loadedEntityList)) {
+            Entity e = (Entity) o;
+            if (!(e instanceof EntityArmorStand) || !e.hasCustomName() || e.getDistanceToEntity(me) > 48) {
+                continue;
+            }
+            String t = HoloText.plain(e.getCustomNameTag());
+            if (!seen.add(t) || n >= 6) {
+                continue;
+            }
+            n++;
+            BlockPos c = chestUnder(w, e);
+            b.append(String.format(Locale.ROOT, "\nHolograma (%d,%d,%d): \"%s\" %s", (int) Math.floor(e.posX), (int) Math.floor(e.posY), (int) Math.floor(e.posZ),
+                t, c == null ? "- sin cofre debajo (bloque: " + w.getBlockState(new BlockPos(e.posX, e.posY - 2, e.posZ)).getBlock().getLocalizedName() + ")" : "- cofre debajo"));
+        }
+        if (n == 0) {
+            b.append("\nNo hay hologramas con nombre a menos de 48 bloques.");
+        }
+        Map<String, Integer> other = new HashMap<String, Integer>();
+        for (Object o : new ArrayList<Object>(w.loadedEntityList)) {
+            Entity e = (Entity) o;
+            if (e == me || e instanceof EntityArmorStand || e instanceof EntityPlayer || !(e instanceof EntityLivingBase) || e.getDistanceToEntity(me) > 24) {
+                continue;
+            }
+            if (kind(e, me, s) < 0 && !(e.ridingEntity != null)) {
+                String k = EntityList.getEntityString(e);
+                k = k == null ? e.getClass().getSimpleName() : k;
+                Integer c = other.get(k);
+                other.put(k, c == null ? 1 : c + 1);
+            }
+        }
+        if (!other.isEmpty()) {
+            b.append("\nSeres cerca que no toma por mobs de oleada: ").append(other);
+        }
+        return b.toString();
+    }
+
+    /** Not a monster: animals, villagers, bats, squid. */
+    static boolean passive(Entity e) {
+        return e instanceof net.minecraft.entity.EntityLiving && !(e instanceof EntityMob || e instanceof EntitySlime || e instanceof EntityGolem)
+            && !(e instanceof net.minecraft.entity.passive.EntityTameable && ((net.minecraft.entity.passive.EntityTameable) e).isTamed());
+    }
+
+    static boolean nearChest(Memory mem, Entity e, double r) {
+        for (Memory.Known k : mem.chests) {
+            double dx = k.cx() - e.posX, dz = k.cz() - e.posZ;
+            if (dx * dx + dz * dz <= r * r) {
+                return true;
+            }
+        }
+        return false;
     }
 }
