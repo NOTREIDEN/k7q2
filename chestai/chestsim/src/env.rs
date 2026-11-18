@@ -122,6 +122,9 @@ pub struct Params {
     /// Cost per tick of standing about: less than 1.5 blocks moved in the last 2
     /// seconds and no blow landed in them.
     pub w_idle: f64,
+    /// Cost of spinning: the signed turn averaged over about a second, past 4
+    /// degrees a tick, so that the view does not go round and round.
+    pub w_spin: f64,
 }
 
 impl Default for Params {
@@ -198,9 +201,10 @@ impl Default for Params {
             rivals_max: 3.0,
             w_rival: 0.01,
             w_turn: 0.004,
-            w_flip: 0.015,
+            w_flip: 0.025,
             w_away: 0.01,
             w_idle: 0.03,
+            w_spin: 0.03,
         }
     }
 }
@@ -231,7 +235,7 @@ params_table!(
     w_horseman, w_golem, w_rider, mob_hp_min, mob_hp_max, mob_dmg_min, mob_dmg_max, mob_kbr_max,
     mob_kb_extra_max, mob_speed_min, mob_speed_max, slow_prob, blind_prob, proj_dmg_max, proj_punch_max,
     extreme_share, gapples_min, gapples_max, pearls_max, potions_max, start_hurt, w_claim, w_kill, w_wave,
-    w_reset, w_dmg, w_hurt, w_death, w_tp, w_waste, w_shape, w_punch, gamma, arrow_self_dmg, rival_prob, rivals_max, w_rival, w_turn, w_flip, w_away, w_idle,
+    w_reset, w_dmg, w_hurt, w_death, w_tp, w_waste, w_shape, w_punch, gamma, arrow_self_dmg, rival_prob, rivals_max, w_rival, w_turn, w_flip, w_away, w_idle, w_spin,
 );
 
 /// What the client remembers of a chest it has seen: the hologram's last
@@ -264,6 +268,7 @@ pub struct Env {
     /// Seed of the next episode's level, if the trainer picked one.
     pub next_seed: Option<u64>,
     last_dyaw: f32,
+    spin: f32,
     idle_from: [f64; 3],
     idle_tick: u64,
     last_hit: u64,
@@ -393,7 +398,7 @@ impl Env {
         let mut rng = Rng::new(seed);
         let (g, ping, holo, extreme, ep) = new_game(&p, &mut rng);
         let n = g.chests.len();
-        let mut e = Env { p, rng, g, known: vec![Known::default(); n], ticks: 0, ep_ticks: ep, ping_ms: ping, holo_range: holo, extreme, last_hp: 20.0, since_hurt: 100, phi: 0.0, stats: [0.0; STATS_DIM], teacher_ate: -1000, next_seed: None, last_dyaw: 0.0, idle_from: [0.0; 3], idle_tick: 0, last_hit: 0 };
+        let mut e = Env { p, rng, g, known: vec![Known::default(); n], ticks: 0, ep_ticks: ep, ping_ms: ping, holo_range: holo, extreme, last_hp: 20.0, since_hurt: 100, phi: 0.0, stats: [0.0; STATS_DIM], teacher_ate: -1000, next_seed: None, last_dyaw: 0.0, spin: 0.0, idle_from: [0.0; 3], idle_tick: 0, last_hit: 0 };
         e.last_hp = e.g.sp.hp;
         e.update_known();
         e.phi = e.potential();
@@ -414,6 +419,7 @@ impl Env {
         self.extreme = extreme;
         self.last_hp = self.g.sp.hp;
         self.last_dyaw = 0.0;
+        self.spin = 0.0;
         self.idle_from = self.g.cp.l.body.pos;
         self.idle_tick = 0;
         self.last_hit = 0;
@@ -862,6 +868,9 @@ impl Env {
             r -= p.w_flip;
         }
         self.last_dyaw = inp.dyaw;
+        self.spin += (inp.dyaw - self.spin) / 20.0;
+        let over = (self.spin.abs() - 4.0).max(0.0) as f64 / 6.0;
+        r -= p.w_spin * over * over;
         {
             let pos = self.g.cp.l.body.pos;
             let mut nearest_active = f64::INFINITY;
