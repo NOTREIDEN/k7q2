@@ -279,6 +279,30 @@ public final class Rig {
             if (why != null) say(why);
             started = on();
         }
+        if (!HOST) notePotions(mc);
+    }
+
+    /** Healing potions in the hotbar on the last tick. */
+    static int barPotions = -1;
+
+    /** A line for every potion of the recorded player that leaves its hotbar
+     *  without a screen open: when (wall clock), with how much health, which
+     *  way it looked and how far the other player was. */
+    static void notePotions(Minecraft mc) {
+        int n = 0;
+        for (int k = 0; k < 9; k++) {
+            ItemStack st = mc.thePlayer.inventory.mainInventory[k];
+            if (st != null && st.getItem() == Items.potionitem && net.minecraft.item.ItemPotion.isSplash(st.getMetadata())) n += st.stackSize;
+        }
+        if (barPotions >= 0 && n == barPotions - 1 && mc.currentScreen == null) {
+            double far = -1;
+            for (Object o : mc.theWorld.playerEntities) {
+                if (o != mc.thePlayer) far = mc.thePlayer.getDistanceToEntity((Entity) o);
+            }
+            say(String.format(Locale.ROOT, "potion at %d: health %.1f, pitch %.0f, yaw %.0f, other %.1f blocks away",
+                System.currentTimeMillis(), mc.thePlayer.getHealth(), mc.thePlayer.rotationPitch, mc.thePlayer.rotationYaw, far));
+        }
+        barPotions = n;
     }
 
     static boolean on() {

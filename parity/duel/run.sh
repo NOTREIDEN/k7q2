@@ -57,6 +57,7 @@ until [ -e "$W/join-in" ]; do
 done
 ffmpeg -loglevel error -y -f x11grab -draw_mouse 0 -framerate 30 -video_size 854x480 -i :93 -c:v libx264 -preset ultrafast -crf 20 -pix_fmt yuv420p "$OUT" > "$W/ffmpeg.log" 2>&1 &
 REC=$!
+date +%s%3N > "$W/rec_start"
 until [ -e "$W/done" ]; do
   sleep 1
   if ! kill -0 "$J1" 2>/dev/null || ! kill -0 "$J2" 2>/dev/null || [ "$(date +%s)" -gt "$END" ]; then echo "stopped early"; break; fi
