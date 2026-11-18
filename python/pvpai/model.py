@@ -62,9 +62,9 @@ RESTART_CHOICES = {"drink-eat": ((9, 2, -4.0), (9, 3, -4.0))}
 # mended they start over as the plain throw does in `COPY_OF`.
 RESTART_CHOICES["turned-potions"] = ((9, 7, -2.0, 1), (9, 8, -2.0, 1), (9, 9, -2.0, 1))
 # The pitch of a potion thrown with a turn and the run after it became the
-# policy's own (the pitch is the last control, new, and starts even over
-# its choices): the turned throws start over once more to be tried with it.
-RESTART_CHOICES["learned-turn"] = ((9, 7, -2.0, 1), (9, 8, -2.0, 1), (9, 9, -2.0, 1))
+# policy's own; the pitch is the last control, new, and starts even over its
+# choices. The turned throws themselves keep what the fleet had learnt of
+# them (two in three on carry servers): drills teach the pitch.
 
 
 def start_bias(head, n):
