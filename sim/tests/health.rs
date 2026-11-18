@@ -90,6 +90,31 @@ fn strength_multiplies_the_swords_damage_before_the_armour() {
 }
 
 #[test]
+fn a_gank_hit_costs_health_and_knocks_back_but_is_no_hit_of_the_duel() {
+    let mut m = duel(real());
+    let idle = Input::default();
+    for _ in 0..4 {
+        step(&mut m, &idle, &idle);
+    }
+    // Someone on player 1's far side, along +z, hits it with the sword.
+    m.s.gank = Some((1, 8.0, [0.0, 1.0]));
+    for _ in 0..3 {
+        step(&mut m, &idle, &idle);
+    }
+    assert_eq!(m.s.p[1].health, 12.0);
+    assert!(m.s.hits.is_empty());
+    // Again within the invulnerable ticks, no harder: nothing.
+    m.s.gank = Some((1, 8.0, [0.0, 1.0]));
+    step(&mut m, &idle, &idle);
+    assert_eq!(m.s.p[1].health, 12.0);
+    // The client was pushed away from the side the hit came from.
+    for _ in 0..6 {
+        step(&mut m, &idle, &idle);
+    }
+    assert!(m.c[1].lp.l.body.pos[2] < 2.5 - 0.3, "{:?}", m.c[1].lp.l.body.pos);
+}
+
+#[test]
 fn diamond_armour_takes_four_fifths() {
     let lost = one_hit(ServerCfg { armor: 20, ..real() });
     assert!((lost - 1.6).abs() < 1e-5, "{lost}");

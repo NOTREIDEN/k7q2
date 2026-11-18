@@ -779,6 +779,10 @@ pub struct Server {
     /// Replaying a recording: the generator the game drew the random part
     /// of Protection from, at the point the recording starts.
     pub ench_rand: Option<JavaRandom>,
+    /// A hit by someone else than the other player, made on the next tick:
+    /// the player hit, the damage before the block and the armour, and the
+    /// horizontal direction from that player to whoever hits it.
+    pub gank: Option<(usize, f32, [f64; 2])>,
 }
 
 /// Packets produced by the server: (destination client, packet).
@@ -802,6 +806,7 @@ impl Server {
             throw_motions: VecDeque::new(),
             spawned: Vec::new(),
             frozen: Vec::new(),
+            gank: None,
             pearl_guard: false,
             ench_rand: None,
         }
@@ -1698,6 +1703,41 @@ impl Server {
         true
     }
 
+    /// A hit on `v` by a third player standing along `dir`, as the game
+    /// makes it: the same invulnerable ticks, block, armour and Protection
+    /// as a hit by the other player, the knockback away from `dir`, sent at
+    /// once to the player hit as an attacking player's hit sends it. It is
+    /// not one of the duel's hits.
+    fn gank_hit(&mut self, v: usize, amount: f32, dir: [f64; 2], rng: &mut Rng, out: &mut Outbox) {
+        let p = &self.p[v];
+        if p.health <= 0.0 || amount <= 0.0 {
+            return;
+        }
+        let saved = p.l.body.motion;
+        let max = self.cfg.max_no_damage;
+        let src = Source::Player(1 - v);
+        if (p.hurt_resistant_time as f32) > max as f32 / 2.0f32 {
+            if amount <= p.last_damage {
+                return;
+            }
+            let extra = amount - p.last_damage;
+            self.damage_entity(v, extra, src, rng);
+            self.p[v].last_damage = amount;
+            return;
+        }
+        self.p[v].last_damage = amount;
+        self.p[v].hurt_resistant_time = max;
+        self.damage_entity(v, amount, src, rng);
+        self.p[v].hurt_time = 10;
+        out.push((1 - v, S2C::Hurt { own: false }));
+        out.push((v, S2C::Hurt { own: true }));
+        self.knock_back(v, dir[0], dir[1]);
+        let enc = encode_velocity(self.p[v].l.body.motion);
+        out.push((v, S2C::Velocity { own: true, v: enc }));
+        self.p[v].velocity_changed = false;
+        self.p[v].l.body.motion = saved;
+    }
+
     /// `EntityPlayer.damageEntity`: the block, the armour, Protection, then
     /// the health. Returns the damage that is left after the block and the
     /// health that was taken in the end.
@@ -1780,6 +1820,9 @@ impl Server {
     /// and potion in the order they were thrown), the entity tracker, then
     /// the network tick.
     pub fn tick(&mut self, world: &World, rng: &mut Rng, out: &mut Outbox) {
+        if let Some((v, amount, dir)) = self.gank.take() {
+            self.gank_hit(v, amount, dir, rng, out);
+        }
         for (i, p) in self.p.iter_mut().enumerate() {
             if p.hurt_resistant_time > 0 {
                 p.hurt_resistant_time -= 1;

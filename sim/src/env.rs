@@ -372,13 +372,23 @@ pub struct Params {
     /// best as it was.
     pub w_hp_pot: f32,
     pub hp_pot_scale: f32,
-    /// Share of duels in which the second player gets Strength part way
-    /// through, out of nothing as far as the first can tell (a drink it did
-    /// not see, a command), from the start to two thirds of the duel: every
-    /// hit of it costs 2.3, 3.6 or 4.9 times as much from then on. The
-    /// level is drawn evenly from I to `opp_strength_max`.
+    /// Share of duels in which the second player's Strength comes and goes
+    /// out of nothing as far as the first can tell (a drink it did not see,
+    /// a command, an effect running out): first somewhere in the first two
+    /// thirds of the duel, then again every 5 to 25 seconds, each time to a
+    /// level drawn evenly from none and I to `opp_strength_max`, so that its
+    /// hits cost 2.3, 3.6 or 4.9 times as much, or the plain hit again.
     pub opp_strength_prob: f64,
     pub opp_strength_max: f64,
+    /// Share of duels in which the first player is ganked now and then:
+    /// someone it cannot see hits it from one side every 10 to 16 ticks for
+    /// 2 to 6 seconds, with the sword of the kit and no Strength, Strength
+    /// I or II, the first time within the first half of the duel and again
+    /// 10 to 40 seconds after each.
+    pub gank_prob: f64,
+    /// What dying costs on top of losing the duel (`w_win`): not dying is
+    /// worth more than killing.
+    pub w_death: f32,
     /// Share of new duels that are a retry of one the first player lost,
     /// from a few seconds before its death (as GT Sophy trained on its
     /// mistakes): the same moment of the same duel, played again. Each lost
@@ -521,6 +531,8 @@ impl Default for Params {
             hp_pot_scale: 4.0,
             opp_strength_prob: 0.0,
             opp_strength_max: 3.0,
+            gank_prob: 0.0,
+            w_death: 0.0,
             retry_prob: 0.0,
             league_steal: 0.0,
             throw_carry_prob: 0.0,
@@ -664,6 +676,8 @@ impl Params {
             135 => self.hp_pot_scale = v as f32,
             136 => self.opp_strength_prob = v,
             137 => self.opp_strength_max = v,
+            138 => self.gank_prob = v,
+            139 => self.w_death = v as f32,
             132 => self.retry_prob = v,
             113 => self.extreme_share = v,
             114 => self.w_shake = v as f32,
@@ -1031,10 +1045,17 @@ pub struct Env {
     /// from before the first player's deaths with the retries left of each.
     moments: std::collections::VecDeque<Moment>,
     losses: Vec<(Moment, u8)>,
-    /// Tick of the duel at which the second player gets Strength, and its
-    /// amplifier; -1 for none (see `Params::opp_strength_prob`).
+    /// Tick of the duel at which the second player's Strength changes next;
+    /// -1 for never (see `Params::opp_strength_prob`).
     strength_at: i32,
-    strength_amp: i32,
+    /// Ganks (see `Params::gank_prob`): the tick the next one starts, -1
+    /// for none; the tick the one under way ends, its next hit, the
+    /// damage of its hits and the direction they come from.
+    gank_next: i32,
+    gank_end: i32,
+    gank_hit: i32,
+    gank_damage: f32,
+    gank_dir: [f64; 2],
 }
 
 /// The keys of a player that goes for its opponent's potions, laid over
@@ -1498,7 +1519,11 @@ impl Env {
             moments: std::collections::VecDeque::new(),
             losses: Vec::new(),
             strength_at: -1,
-            strength_amp: -1,
+            gank_next: -1,
+            gank_end: 0,
+            gank_hit: 0,
+            gank_damage: 0.0,
+            gank_dir: [1.0, 0.0],
         };
         e.begin();
         e
@@ -1556,10 +1581,39 @@ impl Env {
         self.ep.retries = 1.0;
         self.over = false;
         self.moments.clear();
-        // A Strength already taken is in the server's state; none comes later.
+        // A Strength already taken is in the server's state; none comes
+        // later, and no gank.
         self.strength_at = -1;
+        self.gank_next = -1;
+        self.gank_end = 0;
         for a in 0..2 {
             self.phi[a] = self.potential(a).0;
+        }
+    }
+
+    /// The second player's Strength and the ganks of the first, on the
+    /// tick of the duel that just ended.
+    fn change_damage(&mut self) {
+        let now = self.ep_len - self.ticks_left;
+        if self.strength_at >= 0 && now >= self.strength_at {
+            let top = self.params.opp_strength_max.round().clamp(1.0, 3.0) as u64;
+            self.m.s.p[1].strength = (self.rng.next_u64() % (top + 1)) as i32 - 1;
+            self.strength_at = now + self.rng.range(100.0, 500.0).round() as i32;
+        }
+        if now < self.gank_end {
+            if now >= self.gank_hit {
+                self.m.s.gank = Some((0, self.gank_damage, self.gank_dir));
+                self.gank_hit = now + self.rng.range(10.0, 16.0).round() as i32;
+            }
+        } else if self.gank_next >= 0 && now >= self.gank_next {
+            self.gank_end = now + self.rng.range(40.0, 120.0).round() as i32;
+            self.gank_hit = now;
+            let amp = (self.rng.next_u64() % 3) as i32 - 1;
+            let sword = self.m.s.cfg.damage;
+            self.gank_damage = if amp < 0 { sword } else { (sword as f64 * (1.0 + 1.3 * (amp + 1) as f64)) as f32 };
+            let a = self.rng.range(0.0, std::f64::consts::TAU);
+            self.gank_dir = [a.cos(), a.sin()];
+            self.gank_next = self.gank_end + self.rng.range(200.0, 800.0).round() as i32;
         }
     }
 
@@ -1569,9 +1623,12 @@ impl Env {
         self.ticks_left = self.ep_len;
         self.strength_at = -1;
         if p.opp_strength_prob > 0.0 && self.rng.chance(p.opp_strength_prob) {
-            let top = p.opp_strength_max.round().clamp(1.0, 3.0) as u64;
-            self.strength_amp = (self.rng.next_u64() % top) as i32;
             self.strength_at = self.rng.range(0.0, self.ep_len as f64 * 2.0 / 3.0).round() as i32;
+        }
+        self.gank_next = -1;
+        self.gank_end = 0;
+        if p.gank_prob > 0.0 && self.rng.chance(p.gank_prob) {
+            self.gank_next = self.rng.range(0.0, self.ep_len as f64 / 2.0).round() as i32;
         }
         self.rew_acc = [0.0; 2];
         self.combo = [0; 2];
@@ -1669,7 +1726,7 @@ impl Env {
                 self.over = true;
                 for a in 0..2 {
                     if dead[a] {
-                        self.rew_acc[a] -= self.params.w_win;
+                        self.rew_acc[a] -= self.params.w_win + self.params.w_death;
                         self.ep.deaths[a] += 1.0;
                         if self.m.s.p[a].l.body.pos[1] < self.m.world.void_y {
                             self.ep.void_falls[a] += 1.0;
@@ -2084,10 +2141,7 @@ impl Env {
                 self.landed = if left > 1 { Some((who, left - 1)) } else { None };
             }
             self.ticks_left -= 1;
-            if self.strength_at >= 0 && self.ep_len - self.ticks_left >= self.strength_at {
-                self.m.s.p[1].strength = self.strength_amp;
-                self.strength_at = -1;
-            }
+            self.change_damage();
             if self.m.world.terrain().is_some() {
                 self.ep.terrain_ticks[0] += 1.0;
                 self.ep.terrain_ticks[1] += 1.0;
