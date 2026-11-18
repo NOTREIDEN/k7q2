@@ -192,7 +192,11 @@ public final class Session {
             return why;
         }
         if (bot != null && !mc.isGamePaused()) {
+            // In 1.8.9 the targeting ray reads the head yaw. The mouse
+            // changes the camera yaw before vanilla updates the head.
+            me.setRotationYawHead(me.rotationYaw);
             bot.tickStart(null);
+            me.setRotationYawHead(me.rotationYaw);
             started = true;
         }
         return null;
@@ -202,6 +206,8 @@ public final class Session {
     public void tickEnd() {
         if (bot != null && started && mc.thePlayer == me && mc.theWorld == world) {
             bot.tickEnd();
+            // Keep the targeting ray in step with the interpolated camera.
+            me.prevRotationYawHead = me.prevRotationYaw;
         }
         started = false;
     }
