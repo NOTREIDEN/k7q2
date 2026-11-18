@@ -48,6 +48,10 @@ on:
           --param gank_prob=0.2 --param gank_max=6 --param w_death=5
           --param w_pearl_cost=1 --param pearl_kill_s=10
           --param drop_prob=0.3 --param drop_min=8 --param drop_max=14
+          --param drill_prob=0.2 --league-param drill_self=1 --param drill_seconds=40
+      combo_machines:
+        description: How many of the machines play for combos (the last ones; they share weights with the rest)
+        default: "3"
       previous:
         description: Id of the run to continue from (empty starts from seed/stage1.pt)
         default: ""
@@ -124,7 +128,18 @@ jobs:
           EXTRA: ${{ inputs.args }}
           MACHINE: ${{ matrix.machine }}
           ORIGIN: ${{ needs.plan.outputs.origin }}
+          COMBO: ${{ inputs.combo_machines }}
         run: |
+          # The last few machines play for combos: a long unanswered run of
+          # hits pays more and more, up to twelve hits, mostly against the
+          # insane bot, which hits back fast, starting close. Their weights
+          # are averaged with the others' as usual, so what they find goes
+          # into the one agent.
+          if [ "$MACHINE" -ge $(( MACHINES - ${COMBO:-0} )) ]; then
+            EXTRA="$EXTRA --param w_combo=0.5 --param combo_cap=12 --param insane_prob=0.7"
+            EXTRA="$EXTRA --param start_dist_max=6 --param drill_prob=0 --param lesson_prob=0.2"
+            echo "Combo machine"
+          fi
           # Two processes use the four cores better than one. They average
           # their weights every few seconds through a folder in memory. The
           # first one also shares with the other machines: it writes its
@@ -308,6 +323,7 @@ jobs:
           SNAPSHOT: ${{ inputs.snapshot_rounds }}
           MODE: ${{ inputs.mode }}
           EXTRA: ${{ inputs.args }}
+          COMBO: ${{ inputs.combo_machines }}
           SOURCE: ${{ needs.collect.outputs.source }}
         run: |
           if gh api "repos/$GITHUB_REPOSITORY/contents/STOP" >/dev/null 2>&1; then
@@ -324,5 +340,5 @@ jobs:
           fi
           gh workflow run train.yml --repo "$GITHUB_REPOSITORY" --ref "$GITHUB_REF_NAME" \
             -f machines="$MACHINES" -f minutes="$MINUTES" -f round_minutes="$ROUND" -f snapshot_rounds="$SNAPSHOT" \
-            -f mode="$MODE" \
+            -f mode="$MODE" -f combo_machines="$COMBO" \
             -f args="$EXTRA" -f previous="$SOURCE" -f relaunch=true

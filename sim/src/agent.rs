@@ -50,10 +50,15 @@ pub const ACT_HEADS: usize = 12;
 /// The keys, the mouse from tick two on, which pitch to throw at, where
 /// to go while the potion flies, when to turn back, and which way to turn
 /// or not to, are the policy's to learn.
-pub const ACT_DIMS: [i32; ACT_HEADS] = [3, 3, 2, 2, 2, 31, 29, 2, 2, 10, 6, THROW_PITCHES as i32];
+///
+/// Three choices more throw two potions with one turn: the same turns, and
+/// on tick three the next potion's number key and a right click with the
+/// view kept where the first one went, as a player pots twice in a row.
+pub const ACT_DIMS: [i32; ACT_HEADS] = [3, 3, 2, 2, 2, 31, 29, 2, 2, 13, 6, THROW_PITCHES as i32];
 /// The first of the choices of the hotbar control that throw a potion with
 /// a turn, and the mouse counts of each one's turn: half a turn, a quarter
-/// to the right, a quarter to the left.
+/// to the right, a quarter to the left. The choices after those make the
+/// same turns for two potions.
 pub const BAR_TURN: i32 = 7;
 pub const BAR_TURNS: [i32; 3] = [1200, 600, -600];
 /// The degrees of one mouse count.
@@ -197,6 +202,9 @@ pub struct Agent {
     /// A potion thrown with a turn: ticks since the turn, the tick of the
     /// turn being 1, and 0 when there is none or it is `TURN_SHOWN` ago.
     turned: i32,
+    /// Whether the potion thrown with the turn under way has a second one
+    /// after it, on the tick after its click.
+    double: bool,
     /// Own ticks since its last potion throw.
     since_throw: i32,
     /// Where it stood after each of its last ticks, newest first, and the
@@ -319,6 +327,7 @@ impl Agent {
             potion_stage: 0,
             asked_potion: false,
             turned: 0,
+            double: false,
             since_throw: 1000,
             trail: [feet; TRAIL],
             lag: (ping_ms[0] / 50.0).floor() as i32 + 1,
@@ -375,15 +384,28 @@ impl Agent {
             if self.turned == 2 {
                 // The click of a potion thrown with a turn: nothing else of the hotbar.
                 bar = 0;
+            } else if self.turned == 3 && self.double {
+                // The second of two: the next potion, the view kept still.
+                bar = 1;
+                inp.dx = 0;
+                inp.dy = 0;
             } else if self.turned > TURN_SHOWN {
                 self.turned = 0;
             }
+            if self.turned >= 3 {
+                self.double = false;
+            }
         }
-        let turn = if bar >= BAR_TURN { BAR_TURNS[((bar - BAR_TURN) as usize).min(BAR_TURNS.len() - 1)] } else { 0 };
+        let turns = BAR_TURNS.len() as i32;
+        let turn = if bar >= BAR_TURN { BAR_TURNS[((bar - BAR_TURN).min(2 * turns - 1) % turns) as usize] } else { 0 };
+        let double = bar >= BAR_TURN + turns;
         if !self.refill_keys(c, bar, &mut inp) {
             self.consume_keys(c, duel, bar, &mut inp);
             let pitch = throw_pitch(if action.len() > 11 { action[11] } else { 0 });
             self.potion_keys(c, bar == 1 || turn != 0, turn, pitch, &mut inp);
+            if turn != 0 && self.turned == 1 {
+                self.double = double;
+            }
             self.pearl_keys(c, action.len() > 8 && action[8] != 0, &mut inp);
             self.limit_clicks(&mut inp, rng);
         }

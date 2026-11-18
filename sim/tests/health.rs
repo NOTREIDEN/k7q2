@@ -115,6 +115,41 @@ fn a_gank_hit_costs_health_and_knocks_back_but_is_no_hit_of_the_duel() {
 }
 
 #[test]
+fn a_player_that_cannot_die_and_takes_no_knockback_stays_whole_and_where_it_is() {
+    let mut m = duel(real());
+    m.s.p[1].immortal = true;
+    m.s.p[1].no_kb = true;
+    let idle = Input::default();
+    for _ in 0..4 {
+        step(&mut m, &idle, &idle);
+    }
+    let at = m.c[1].lp.l.body.pos;
+    let hit = Input { attack: true, sprint_key: true, ..Default::default() };
+    for _ in 0..40 {
+        step(&mut m, &hit, &idle);
+        step(&mut m, &idle, &idle);
+    }
+    for _ in 0..6 {
+        step(&mut m, &idle, &idle);
+    }
+    assert!(m.s.hits.iter().filter(|h| h.victim == 1).count() >= 3, "{}", m.s.hits.len());
+    assert!(m.s.hits.iter().all(|h| h.kb == [0.0; 3] && h.dealt == 0.0));
+    assert_eq!((m.s.p[1].health, m.c[1].lp.health), (20.0, 20.0));
+    let moved = (m.c[1].lp.l.body.pos[0] - at[0]).hypot(m.c[1].lp.l.body.pos[2] - at[2]);
+    assert!(moved < 1e-9, "{moved}");
+    // The same hits on a plain player knock it away.
+    let mut m = duel(real());
+    for _ in 0..4 {
+        step(&mut m, &idle, &idle);
+    }
+    step(&mut m, &hit, &idle);
+    for _ in 0..6 {
+        step(&mut m, &idle, &idle);
+    }
+    assert!(m.c[1].lp.l.body.pos[2] > 2.5 + 0.3, "{:?}", m.c[1].lp.l.body.pos);
+}
+
+#[test]
 fn a_sudden_hit_takes_its_health_past_the_armour_and_the_invulnerable_ticks() {
     let mut m = duel(ServerCfg { armor: 20, ..real() });
     let idle = Input::default();

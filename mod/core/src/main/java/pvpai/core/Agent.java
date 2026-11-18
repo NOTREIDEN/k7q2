@@ -25,11 +25,14 @@ public final strictfp class Agent {
      * yaw, pitch, right button, pearl, the rest of the hotbar, a flick of
      * the mouse, and the pitch of a potion thrown with a turn.
      */
-    public static final int[] ACT_DIMS = {3, 3, 2, 2, 2, 31, 29, 2, 2, 10, 6, THROW_PITCHES};
+    public static final int[] ACT_DIMS = {3, 3, 2, 2, 2, 31, 29, 2, 2, 13, 6, THROW_PITCHES};
     /**
      * The first of the choices of the hotbar control that throw a potion
      * with a turn of the view, and the mouse counts of each one's turn:
-     * half a turn, a quarter to the right, a quarter to the left.
+     * half a turn, a quarter to the right, a quarter to the left. The three
+     * choices after those make the same turns for two potions: on tick
+     * three the next potion's number key and a right click, the view kept
+     * where the first one went.
      */
     public static final int BAR_TURN = 7;
     static final int[] BAR_TURNS = {1200, 600, -600};
@@ -128,6 +131,8 @@ public final strictfp class Agent {
     private boolean askedPotion;
     /** A potion thrown with a turn: ticks since the turn, the tick of the turn being 1, and 0 when there is none or it is {@link #TURN_SHOWN} ago. */
     private int turned;
+    /** Whether the potion thrown with the turn under way has a second one after it, on the tick after its click. */
+    private boolean twice;
     /** Own ticks since its last potion throw. */
     private int sinceThrow = 1000;
     /**
@@ -268,11 +273,21 @@ public final strictfp class Agent {
             if (turned == 2) {
                 // The click of a potion thrown with a turn: nothing else of the hotbar.
                 bar = 0;
+            } else if (turned == 3 && twice) {
+                // The second of two: the next potion, the view kept still.
+                bar = 1;
+                inp.dx = 0;
+                inp.dy = 0;
             } else if (turned > TURN_SHOWN) {
                 turned = 0;
             }
+            if (turned >= 3) {
+                twice = false;
+            }
         }
-        int turn = bar >= BAR_TURN ? BAR_TURNS[Math.min(bar - BAR_TURN, BAR_TURNS.length - 1)] : 0;
+        int turns = BAR_TURNS.length;
+        int turn = bar >= BAR_TURN ? BAR_TURNS[Math.min(bar - BAR_TURN, 2 * turns - 1) % turns] : 0;
+        boolean two = bar >= BAR_TURN + turns;
         Keys screen = refillKeys(v, bar);
         if (screen != null) {
             return screen;
@@ -280,6 +295,9 @@ public final strictfp class Agent {
         consumeKeys(v, duel, bar, inp);
         float pitch = throwPitch(action.length > 11 ? action[11] : 0);
         potionKeys(v, bar == 1 || turn != 0, turn, pitch, inp);
+        if (turn != 0 && turned == 1) {
+            twice = two;
+        }
         pearlKeys(v, action.length > 8 && action[8] != 0, inp);
         limitClicks(inp, rng);
         return inp;

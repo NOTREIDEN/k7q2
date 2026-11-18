@@ -42,8 +42,11 @@ NEW_CHOICE_BIAS = -5.0
 # And the potions thrown with a turn, behind and to either side, start as
 # the plain throw, the three together in its place a little more than one
 # time in three: tried in the very states in which potions are thrown, and
-# kept where they heal better.
-COPY_OF = {5: {27: (0, -3.0), 28: (26, -3.0), 29: (0, -3.0), 30: (26, -3.0)}, 9: {7: (1, -2.0), 8: (1, -2.0), 9: (1, -2.0)}}
+# kept where they heal better. The same turns for two potions start as the
+# turn for one, about one time in three of those: tried where it pots with a
+# turn, and kept where one potion is not enough.
+COPY_OF = {5: {27: (0, -3.0), 28: (26, -3.0), 29: (0, -3.0), 30: (26, -3.0)},
+           9: {7: (1, -2.0), 8: (1, -2.0), 9: (1, -2.0), 10: (7, -1.0), 11: (8, -1.0), 12: (9, -1.0)}}
 # When the potion control is added, the pearl control starts over. With
 # infinite health the agent had learnt never to throw a pearl; with health
 # to lose, and an opponent that can be knocked away from its own potion, a

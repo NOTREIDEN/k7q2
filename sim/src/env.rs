@@ -35,7 +35,7 @@ pub const FOOD_TO_SPRINT: i32 = 6;
 pub const SHAKE_DEG: f32 = 6.0;
 pub const SHAKE_TICKS: i32 = 2;
 pub const PRIV_DIM: usize = 71;
-pub const STATS_DIM: usize = 100;
+pub const STATS_DIM: usize = 101;
 /// Floats per player and in total written by `Env::write_view`.
 pub const VIEW_PLAYER: usize = 45;
 pub const VIEW_DIM: usize = 2 * VIEW_PLAYER + 24;
@@ -118,10 +118,11 @@ pub struct Params {
     /// turns it off.
     pub w_reach_adv: f32,
     /// Extra reward for each hit after the first in an unanswered run, per
-    /// hit already in the run (at most five), and the same amount taken
-    /// from the player on the receiving end. Zero leaves every hit worth
-    /// the same.
+    /// hit already in the run (at most `combo_cap`, five unless set), and
+    /// the same amount taken from the player on the receiving end. Zero
+    /// leaves every hit worth the same.
     pub w_combo: f32,
+    pub combo_cap: f64,
     /// Cost per own tick of standing closer to the opponent than
     /// `close_dist`, growing to the full amount at zero distance. Fights
     /// at arm's length are where nobody can be kept out of reach; this
@@ -405,6 +406,25 @@ pub struct Params {
     pub drop_prob: f64,
     pub drop_min: f64,
     pub drop_max: f64,
+    /// Share of the duels with real health that are a survival drill for
+    /// the first player: the second cannot die and takes no knockback, and
+    /// `drill_gankers` more players it cannot see come at it in waves of 5
+    /// to 15 seconds, 1 to 4 seconds apart, the first within 3 seconds.
+    /// Each starts a few blocks away, runs at it as fast as a sprinting
+    /// player with Speed II and hits it every 10 to 16 ticks while within
+    /// reach, all of a wave with the same Strength, drawn evenly from none
+    /// to level `drill_strength_max`. It can only be got away from: a
+    /// pearl or a run puts it out of their reach for a while. Only where
+    /// the second player does not learn: against the bot, and in self-play
+    /// only with `drill_self` (for duels against earlier versions).
+    pub drill_prob: f64,
+    pub drill_self: bool,
+    pub drill_gankers: f64,
+    pub drill_strength_max: f64,
+    /// How long a drill duel lasts at most, on average (a quarter more or
+    /// less): long enough for the potions it has to see it through if it
+    /// pots well and gets away now and then.
+    pub drill_seconds: f64,
     /// Share of new duels that are a retry of one the first player lost,
     /// from a few seconds before its death (as GT Sophy trained on its
     /// mistakes): the same moment of the same duel, played again. Each lost
@@ -467,6 +487,7 @@ impl Default for Params {
             w_sprint_hit: 0.0,
             w_reach_adv: 0.0,
             w_combo: 0.0,
+            combo_cap: 5.0,
             w_close: 0.0,
             close_dist: 2.0,
             mouse_delay_fix: true,
@@ -555,6 +576,11 @@ impl Default for Params {
             drop_prob: 0.0,
             drop_min: 8.0,
             drop_max: 14.0,
+            drill_prob: 0.0,
+            drill_self: false,
+            drill_gankers: 5.0,
+            drill_strength_max: 2.0,
+            drill_seconds: 40.0,
             retry_prob: 0.0,
             league_steal: 0.0,
             throw_carry_prob: 0.0,
@@ -706,6 +732,12 @@ impl Params {
             143 => self.drop_prob = v,
             144 => self.drop_min = v,
             145 => self.drop_max = v,
+            146 => self.drill_prob = v,
+            147 => self.drill_self = v != 0.0,
+            148 => self.drill_gankers = v,
+            149 => self.drill_strength_max = v,
+            150 => self.drill_seconds = v,
+            151 => self.combo_cap = v,
             132 => self.retry_prob = v,
             113 => self.extreme_share = v,
             114 => self.w_shake = v as f32,
@@ -817,6 +849,10 @@ pub struct Stats {
     pub terrain_ticks: [f64; 2],
     /// Episodes that were a retry of a lost moment.
     pub retries: f64,
+    /// Episodes that were a survival drill, and those of them in which the
+    /// first player died.
+    pub drills: f64,
+    pub drill_deaths: f64,
 }
 
 impl Stats {
@@ -875,6 +911,8 @@ impl Stats {
             self.terrain_ticks[a] += o.terrain_ticks[a];
         }
         self.retries += o.retries;
+        self.drills += o.drills;
+        self.drill_deaths += o.drill_deaths;
     }
     pub fn write(&self, out: &mut [f64]) {
         let v = [
@@ -977,7 +1015,8 @@ impl Stats {
             self.terrain_ticks[0],
             self.terrain_ticks[1],
             self.retries,
-            0.0,
+            self.drills,
+            self.drill_deaths,
         ];
         for (o, x) in out.iter_mut().zip(v.iter()) {
             *o = *x;
@@ -990,6 +1029,9 @@ impl Stats {
 struct Moment {
     m: Match,
     pending: usize,
+    /// The tick of the duel it was kept on, and the ganks under way then.
+    at: i32,
+    gank: Gank,
     bot: BotParams,
     bot_state: BotState,
     ag: [Agent; 2],
@@ -1011,6 +1053,11 @@ struct Moment {
 
 /// The most players that gank the first player at once.
 const GANK_MAX: usize = 6;
+/// Players of a drill: blocks a tick they run (a sprint with Speed II),
+/// how close they come, and their reach.
+const DRILL_SPEED: f64 = 0.39;
+const DRILL_CLOSE: f64 = 2.0;
+const DRILL_REACH: f64 = 3.0;
 /// How many moments of the duel in progress are kept, one a second.
 const MOMENTS: usize = 5;
 /// How many lost moments are kept for retries, and how often each is played.
@@ -1089,12 +1136,40 @@ pub struct Env {
     /// for none; the tick the one under way ends, how many hit in it, and
     /// for each its next hit, the damage of its hits and the direction they
     /// come from.
-    gank_next: i32,
-    gank_end: i32,
-    gank_n: usize,
-    gank_hit: [i32; GANK_MAX],
-    gank_damage: [f32; GANK_MAX],
-    gank_dir: [[f64; 2]; GANK_MAX],
+    gank: Gank,
+}
+
+/// The ganks of the first player (see `Params::gank_prob` and
+/// `Params::drill_prob`): the tick the next one starts, -1 for none; the
+/// tick the one under way ends, how many hit in it, and for each its next
+/// hit, the damage of its hits and the direction they come from. In a
+/// drill each one also has a place, which the direction is taken from.
+#[derive(Clone, Copy, Debug)]
+struct Gank {
+    drill: bool,
+    next: i32,
+    end: i32,
+    n: usize,
+    hit: [i32; GANK_MAX],
+    damage: [f32; GANK_MAX],
+    dir: [[f64; 2]; GANK_MAX],
+    pos: [[f64; 2]; GANK_MAX],
+}
+
+impl Gank {
+    const NONE: Gank = Gank { drill: false, next: -1, end: 0, n: 0, hit: [0; GANK_MAX], damage: [0.0; GANK_MAX], dir: [[1.0, 0.0]; GANK_MAX], pos: [[0.0; 2]; GANK_MAX] };
+
+    /// The same ganks with the ticks counted from `at` on.
+    fn shifted(mut self, at: i32) -> Gank {
+        if self.next >= 0 {
+            self.next -= at;
+        }
+        self.end -= at;
+        for h in self.hit.iter_mut() {
+            *h -= at;
+        }
+        self
+    }
 }
 
 /// The keys of a player that goes for its opponent's potions, laid over
@@ -1560,12 +1635,7 @@ impl Env {
             losses: Vec::new(),
             strength_at: -1,
             drop_next: -1,
-            gank_next: -1,
-            gank_end: 0,
-            gank_n: 0,
-            gank_hit: [0; GANK_MAX],
-            gank_damage: [0.0; GANK_MAX],
-            gank_dir: [[1.0, 0.0]; GANK_MAX],
+            gank: Gank::NONE,
         };
         e.begin();
         e
@@ -1575,6 +1645,8 @@ impl Env {
         Moment {
             m: self.m.clone(),
             pending: self.pending,
+            at: self.ep_len - self.ticks_left,
+            gank: self.gank,
             bot: self.bot,
             bot_state: self.bot_state,
             ag: self.ag.clone(),
@@ -1626,11 +1698,14 @@ impl Env {
         self.over = false;
         self.moments.clear();
         // A Strength already taken is in the server's state; none comes
-        // later, and no gank.
+        // later. The ganks go on as they were: a drill stays a drill.
         self.strength_at = -1;
         self.drop_next = -1;
-        self.gank_next = -1;
-        self.gank_end = 0;
+        self.gank = k.gank.shifted(k.at);
+        self.ep.drills = self.gank.drill as u8 as f64;
+        if self.gank.drill {
+            self.drill_length();
+        }
         for a in 0..2 {
             self.phi[a] = self.potential(a).0;
         }
@@ -1657,27 +1732,87 @@ impl Env {
                 self.drop_next = now + 20;
             }
         }
-        if now < self.gank_end {
+        if self.gank.drill {
+            self.drill_tick(now);
+        } else if now < self.gank.end {
             // One hit reaches the server a tick; of those due, the hardest,
             // and the others come on the next ticks.
-            let due = (0..self.gank_n).filter(|&k| now >= self.gank_hit[k]).max_by(|&a, &b| self.gank_damage[a].total_cmp(&self.gank_damage[b]));
+            let g = &mut self.gank;
+            let due = (0..g.n).filter(|&k| now >= g.hit[k]).max_by(|&a, &b| g.damage[a].total_cmp(&g.damage[b]));
             if let Some(k) = due {
-                self.m.s.gank = Some((0, self.gank_damage[k], self.gank_dir[k]));
-                self.gank_hit[k] = now + self.rng.range(10.0, 16.0).round() as i32;
+                self.m.s.gank = Some((0, g.damage[k], g.dir[k]));
+                g.hit[k] = now + self.rng.range(10.0, 16.0).round() as i32;
             }
-        } else if self.gank_next >= 0 && now >= self.gank_next {
-            self.gank_end = now + self.rng.range(40.0, 120.0).round() as i32;
+        } else if self.gank.next >= 0 && now >= self.gank.next {
+            self.gank.end = now + self.rng.range(40.0, 120.0).round() as i32;
             let top = self.params.gank_max.round().clamp(1.0, GANK_MAX as f64) as u64;
-            self.gank_n = 1 + (self.rng.next_u64() % top) as usize;
+            self.gank.n = 1 + (self.rng.next_u64() % top) as usize;
             let sword = self.m.s.cfg.damage;
-            for k in 0..self.gank_n {
-                self.gank_hit[k] = now + if k == 0 { 0 } else { self.rng.range(0.0, 16.0).round() as i32 };
+            for k in 0..self.gank.n {
+                self.gank.hit[k] = now + if k == 0 { 0 } else { self.rng.range(0.0, 16.0).round() as i32 };
                 let amp = (self.rng.next_u64() % 3) as i32 - 1;
-                self.gank_damage[k] = if amp < 0 { sword } else { (sword as f64 * (1.0 + 1.3 * (amp + 1) as f64)) as f32 };
+                self.gank.damage[k] = if amp < 0 { sword } else { (sword as f64 * (1.0 + 1.3 * (amp + 1) as f64)) as f32 };
                 let a = self.rng.range(0.0, std::f64::consts::TAU);
-                self.gank_dir[k] = [a.cos(), a.sin()];
+                self.gank.dir[k] = [a.cos(), a.sin()];
             }
-            self.gank_next = self.gank_end + self.rng.range(200.0, 800.0).round() as i32;
+            self.gank.next = self.gank.end + self.rng.range(200.0, 800.0).round() as i32;
+        }
+    }
+
+    /// A drill is no longer than `drill_seconds`, give or take a quarter
+    /// (the same in `begin`).
+    fn drill_length(&mut self) {
+        let cap = (self.params.drill_seconds * 20.0 * self.rng.range(0.75, 1.25)).round().max(20.0) as i32;
+        self.ep_len = self.ep_len.min(cap);
+        self.ticks_left = self.ep_len;
+    }
+
+    /// A tick of a drill (see `Params::drill_prob`): a wave starts, or the
+    /// players of the one under way run at the first player and the
+    /// hardest of those in reach whose hit is due hits it.
+    fn drill_tick(&mut self, now: i32) {
+        let me = self.m.s.p[0].l.body.pos;
+        let edge = self.m.world.half - 0.3;
+        if now < self.gank.end {
+            let g = &mut self.gank;
+            let mut best: Option<usize> = None;
+            for k in 0..g.n {
+                let (dx, dz) = (g.pos[k][0] - me[0], g.pos[k][1] - me[2]);
+                let d = (dx * dx + dz * dz).sqrt();
+                if d > DRILL_CLOSE {
+                    let step = DRILL_SPEED.min(d - DRILL_CLOSE) / d;
+                    g.pos[k][0] -= dx * step;
+                    g.pos[k][1] -= dz * step;
+                }
+                let (dx, dz) = (g.pos[k][0] - me[0], g.pos[k][1] - me[2]);
+                let d = (dx * dx + dz * dz).sqrt();
+                if d > 1e-6 {
+                    g.dir[k] = [dx / d, dz / d];
+                }
+                if d <= DRILL_REACH && now >= g.hit[k] && best.map_or(true, |b| g.damage[k] > g.damage[b]) {
+                    best = Some(k);
+                }
+            }
+            if let Some(k) = best {
+                self.m.s.gank = Some((0, g.damage[k], g.dir[k]));
+                g.hit[k] = now + self.rng.range(10.0, 16.0).round() as i32;
+            }
+        } else if self.gank.next >= 0 && now >= self.gank.next {
+            self.gank.end = now + self.rng.range(100.0, 300.0).round() as i32;
+            self.gank.n = self.params.drill_gankers.round().clamp(1.0, GANK_MAX as f64) as usize;
+            let top = self.params.drill_strength_max.round().clamp(0.0, 3.0) as u64;
+            let amp = (self.rng.next_u64() % (top + 1)) as i32 - 1;
+            let sword = self.m.s.cfg.damage;
+            let damage = if amp < 0 { sword } else { (sword as f64 * (1.0 + 1.3 * (amp + 1) as f64)) as f32 };
+            for k in 0..self.gank.n {
+                self.gank.hit[k] = now + if k == 0 { 0 } else { self.rng.range(0.0, 16.0).round() as i32 };
+                self.gank.damage[k] = damage;
+                let a = self.rng.range(0.0, std::f64::consts::TAU);
+                let d = self.rng.range(2.0, 5.0);
+                self.gank.pos[k] = [(me[0] + d * a.cos()).clamp(-edge, edge), (me[2] + d * a.sin()).clamp(-edge, edge)];
+                self.gank.dir[k] = [a.cos(), a.sin()];
+            }
+            self.gank.next = self.gank.end + self.rng.range(20.0, 80.0).round() as i32;
         }
     }
 
@@ -1693,15 +1828,28 @@ impl Env {
         if p.drop_prob > 0.0 && self.rng.chance(p.drop_prob) {
             self.drop_next = self.rng.range(0.0, self.ep_len as f64 / 2.0).round() as i32;
         }
-        self.gank_next = -1;
-        self.gank_end = 0;
-        if p.gank_prob > 0.0 && self.rng.chance(p.gank_prob) {
-            self.gank_next = self.rng.range(0.0, self.ep_len as f64 / 2.0).round() as i32;
+        self.gank = Gank::NONE;
+        let drill = p.drill_prob > 0.0
+            && !self.m.s.cfg.infinite_health
+            && (self.mode == Mode::Bot || p.drill_self)
+            && self.rng.chance(p.drill_prob);
+        if drill {
+            self.gank.drill = true;
+            self.gank.next = self.rng.range(0.0, 60.0).round() as i32;
+            self.m.s.p[1].immortal = true;
+            self.m.s.p[1].no_kb = true;
+            // No longer than `drill_seconds`, give or take a quarter.
+            let cap = (p.drill_seconds * 20.0 * self.rng.range(0.75, 1.25)).round().max(20.0) as i32;
+            self.ep_len = self.ep_len.min(cap);
+            self.ticks_left = self.ep_len;
+        } else if p.gank_prob > 0.0 && self.rng.chance(p.gank_prob) {
+            self.gank.next = self.rng.range(0.0, self.ep_len as f64 / 2.0).round() as i32;
         }
         self.rew_acc = [0.0; 2];
         self.combo = [0; 2];
         self.max_combo = [0; 2];
         self.ep = Stats::default();
+        self.ep.drills = self.gank.drill as u8 as f64;
         self.bot_state = BotState::default();
         self.landed = None;
         self.pearl_kill = [0; 2];
@@ -1797,6 +1945,9 @@ impl Env {
                     if dead[a] {
                         self.rew_acc[a] -= self.params.w_win + self.params.w_death;
                         self.ep.deaths[a] += 1.0;
+                        if a == 0 && self.gank.drill {
+                            self.ep.drill_deaths += 1.0;
+                        }
                         if self.m.s.p[a].l.body.pos[1] < self.m.world.void_y {
                             self.ep.void_falls[a] += 1.0;
                         }
@@ -1857,7 +2008,7 @@ impl Env {
                     self.ep.tap_hits[h.attacker] += 1.0;
                 }
             }
-            let run = self.combo[h.attacker].min(5) as f32 * self.params.w_combo;
+            let run = self.combo[h.attacker].min(self.params.combo_cap.max(0.0) as u32) as f32 * self.params.w_combo;
             self.rew_acc[h.attacker] += run;
             self.rew_acc[h.victim] -= run;
             self.combo[h.attacker] += 1;

@@ -114,7 +114,7 @@ fn a_flick_is_added_to_the_yaw_of_its_tick() {
 
 #[test]
 fn a_potion_thrown_with_a_turn_takes_the_pitch_asked_for_and_the_rest_is_the_policys() {
-    assert_eq!(ACT_DIMS[9], 10);
+    assert_eq!(ACT_DIMS[9], 13);
     assert_eq!(ACT_DIMS[11], THROW_PITCHES as i32);
     assert_eq!((BAR_TURN, BAR_TURNS), (7, [1200, 600, -600]));
     assert_eq!((throw_pitch(0), throw_pitch(10), throw_pitch(35), throw_pitch(99)), (90.0, 70.0, 20.0, 20.0));
@@ -183,6 +183,56 @@ fn a_potion_thrown_with_a_turn_takes_the_pitch_asked_for_and_the_rest_is_the_pol
     run(&mut e, 12, |_| IDLE);
     assert!((yaw(&e) - at).abs() < 1e-3);
     assert_eq!(e.m.s.potion_throws[0], 1);
+}
+
+#[test]
+fn two_potions_thrown_with_one_turn_go_on_two_ticks_in_a_row_along_the_same_view() {
+    let yaw = |e: &Env| e.m.c[0].lp.l.yaw;
+    let pitch = |e: &Env| e.m.c[0].lp.l.pitch;
+    for (k, turn) in [(0usize, 180.0f32), (1, 90.0), (2, -90.0)] {
+        let mut e = Env::new(Mode::SelfPlay, params(), 3);
+        let at = yaw(&e);
+        let potions = e.m.c[0].lp.potions.count_ones();
+        run(&mut e, 1, |_| {
+            let mut a = with(9, BAR_TURN + BAR_TURNS.len() as i32 + k as i32);
+            a[11] = 4;
+            a
+        });
+        assert!((yaw(&e) - at - turn).abs() < 1e-3, "{} from {at}", yaw(&e));
+        let (ty, tp) = (yaw(&e), pitch(&e));
+        assert!((tp - throw_pitch(4)).abs() <= 0.08);
+        // The first click, then the second with the next potion: whatever
+        // the policy asks of the mouse and the hotbar on that tick, the
+        // view stays where the first one went.
+        run(&mut e, 1, |_| IDLE);
+        run(&mut e, 1, |_| {
+            let mut a = with(5, 26);
+            a[6] = 0;
+            a[10] = 5;
+            a[9] = 5;
+            a
+        });
+        assert!((yaw(&e) - ty).abs() < 1e-3 && (pitch(&e) - tp).abs() < 1e-3, "{} {} from {ty} {tp}", yaw(&e), pitch(&e));
+        assert_eq!(e.m.c[0].lp.potions.count_ones(), potions - 2);
+        let mut ticks = Vec::new();
+        for t in 0..12 {
+            run(&mut e, 1, |_| IDLE);
+            while ticks.len() < e.m.s.potion_throws[0] as usize {
+                ticks.push(t);
+            }
+            let (_, dir) = throw_heading(Kind::Potion, e.m.s.p[0].l.body.pos, ty, tp);
+            for th in e.m.s.thrown.iter().filter(|t| t.thrower == 0) {
+                // Both go along the view of the turn (the player stood still).
+                for i in 0..3 {
+                    assert!((th.aim[i] - dir[i] * Kind::Potion.speed() as f64).abs() < 1e-6, "{:?} against {dir:?}", th.aim);
+                }
+            }
+        }
+        assert_eq!(ticks.len(), 2, "{ticks:?}");
+        assert_eq!(ticks[1], ticks[0] + 1, "{ticks:?}");
+        // And the sword is back in hand.
+        assert_eq!(e.m.c[0].lp.held, 0);
+    }
 }
 
 #[test]

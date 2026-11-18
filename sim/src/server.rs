@@ -496,6 +496,12 @@ pub struct ServerPlayer {
     pub gone: Vec<u32>,
     /// Ticks until the server lets this player throw the next pearl.
     pub pearl_wait: i32,
+    /// Stands for a player that cannot die (a drill): hits on it take no
+    /// health, as with Resistance V.
+    pub immortal: bool,
+    /// Stands for a client that takes no knockback from hits: it is sent
+    /// no velocity for them and stays where it is.
+    pub no_kb: bool,
 }
 
 /// `chunkCoordX/Y/Z` for a position.
@@ -569,6 +575,8 @@ impl ServerPlayer {
             equip: (Item::Sword, 0),
             gone: Vec::new(),
             pearl_wait: 0,
+            immortal: false,
+            no_kb: false,
         }
     }
 
@@ -1594,7 +1602,10 @@ impl Server {
                 if self.cfg.hunger && !self.cfg.infinite_health {
                     self.p[a].food.add_exhaustion(0.3f32);
                 }
-                if self.p[v].velocity_changed {
+                if self.p[v].velocity_changed && self.p[v].no_kb {
+                    self.p[v].velocity_changed = false;
+                    self.p[v].l.body.motion = saved;
+                } else if self.p[v].velocity_changed {
                     let mut m = self.p[v].l.body.motion;
                     let mut sprint_kb = i > 0;
                     if let (Some(k), true) = (self.plugin, self.hits.len() > n_hits) {
@@ -1774,7 +1785,7 @@ impl Server {
         }
         let blocked = amount;
         self.p[v].damage_taken += amount;
-        if self.cfg.infinite_health {
+        if self.cfg.infinite_health || self.p[v].immortal {
             // Resistance V leaves nothing of it.
             return (blocked, 0.0);
         }

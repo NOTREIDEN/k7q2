@@ -341,6 +341,9 @@ def main():
                         # minute, and per potion the health it gave its thrower (eight at
                         # best) and the other player.
                         win_frac=st["deaths1"] / max(st["deaths0"] + st["deaths1"], 1.0),
+                        # Survival drills: the share of them in which player 0 died.
+                        drill_died=st.get("drill_deaths", 0.0) / max(st.get("drills", 0.0), 1.0),
+                        drills=st.get("drills", 0.0),
                         deaths_per_min=(st["deaths0"] + st["deaths1"]) / mins0,
                         potions_per_min=st["splashes0"] / mins0,
                         opp_potions_per_min=st["splashes1"] / mins0,
@@ -404,6 +407,7 @@ def main():
                   f"pearl {b.get('pearls_per_min', 0):.1f}/{b.get('opp_pearls_per_min', 0):.1f} "
                   f"first {b.get('pearl_first_hit', 0):.2f}/{b.get('opp_pearl_answered', 0):.2f} "
                   f"win {b.get('win_frac', 0):.2f} deaths {b.get('deaths_per_min', 0):.1f} "
+                  f"drill-died {b.get('drill_died', 0):.2f} of {b.get('drills', 0):.0f} "
                   f"pot {b.get('potions_per_min', 0):.1f}/{b.get('opp_potions_per_min', 0):.1f} "
                   f"heal {b.get('potion_heal', 0):.1f}/{b.get('opp_potion_heal', 0):.1f} "
                   f"reach {b.get('potion_reach', 0):.1f} gift {b.get('potion_gift', 0):.1f}/{b.get('opp_potion_gift', 0):.1f} "
