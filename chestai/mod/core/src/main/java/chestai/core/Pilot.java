@@ -10,6 +10,7 @@ package chestai.core;
  * using, use ticks, allowance).
  */
 public final class Pilot {
+    public static final float MAX_DYAW = 10f, MAX_DPITCH = 7f;
     public static final float[] YAW_BINS = {-60f, -30f, -15f, -8f, -4f, -2f, -0.7f, 0f, 0.7f, 2f, 4f, 8f, 15f, 30f, 60f};
     public static final float[] PITCH_BINS = {-30f, -15f, -7f, -3f, -1f, 0f, 1f, 3f, 7f, 15f, 30f};
     public static final int SWORD = 0, BOW = 1, GAPPLE = 2, PEARL = 3, POTION = 4;
@@ -56,8 +57,9 @@ public final class Pilot {
         k.strafe = 1 - a[1];
         k.jump = a[2] == 1;
         k.sprint = a[3] == 1;
-        k.dyaw = YAW_BINS[a[4]];
-        k.dpitch = PITCH_BINS[a[5]];
+        // The view turns at most MAX_DYAW / MAX_DPITCH degrees a tick, as in the simulator.
+        k.dyaw = Math.max(-MAX_DYAW, Math.min(MAX_DYAW, YAW_BINS[a[4]]));
+        k.dpitch = Math.max(-MAX_DPITCH, Math.min(MAX_DPITCH, PITCH_BINS[a[5]]));
         boolean attack = a[6] == 1, use = a[7] == 1;
         int want = a[8] == 0 ? -1 : a[8] - 1;
         if (backTo >= 0) {

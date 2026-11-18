@@ -20,6 +20,10 @@ pub const TERRAIN_DIM: usize = 2 * GRID_N;
 pub const OBS_DIM: usize = SELF_DIM + TERRAIN_DIM + K_MOBS * MOB_DIM + K_CHESTS * CHEST_DIM + K_PROJ * PROJ_DIM + OWN_DIM;
 pub const PRIV_DIM: usize = K_CHESTS * 7 + 6;
 
+/// Most the view turns in one tick (degrees), as a player's hand would: the
+/// larger bins are cut to this. The mod (Pilot) cuts them the same way.
+pub const MAX_DYAW: f32 = 10.0;
+pub const MAX_DPITCH: f32 = 7.0;
 pub const YAW_BINS: [f32; 15] = [-60.0, -30.0, -15.0, -8.0, -4.0, -2.0, -0.7, 0.0, 0.7, 2.0, 4.0, 8.0, 15.0, 30.0, 60.0];
 pub const PITCH_BINS: [f32; 11] = [-30.0, -15.0, -7.0, -3.0, -1.0, 0.0, 1.0, 3.0, 7.0, 15.0, 30.0];
 /// forward, strafe, jump, sprint, yaw, pitch, attack, use, slot.
@@ -822,8 +826,8 @@ impl Env {
             strafe: (1 - a[1]) as f32,
             jump: a[2] == 1,
             sprint: a[3] == 1,
-            dyaw: YAW_BINS[a[4] as usize],
-            dpitch: PITCH_BINS[a[5] as usize],
+            dyaw: YAW_BINS[a[4] as usize].clamp(-MAX_DYAW, MAX_DYAW),
+            dpitch: PITCH_BINS[a[5] as usize].clamp(-MAX_DPITCH, MAX_DPITCH),
             attack: a[6] == 1,
             use_: a[7] == 1,
             slot: if a[8] == 0 { 255 } else { (a[8] - 1) as u8 },
