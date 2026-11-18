@@ -37,7 +37,7 @@ PARAM = {
     "lesson_prob": 105, "lessons": 106, "lesson_dist_min": 107, "lesson_dist_max": 108,
     "drink_window_s": 109, "w_miss": 110, "w_pot_time": 111, "bot_runner": 112,
     "extreme_share": 113, "w_shake": 114, "pot_strict_prob": 115, "pot_strict": 116,
-    "w_gift": 117, "w_hungry": 118, "w_slow": 119, "drinks_stowed": 120, "bot_presser": 121, "w_inv_near": 122, "inv_near_dist": 123, "league_steal": 124, "throw_carry_prob": 125, "teach": 126, "w_speed_refill": 127, "insane_prob": 128, "w_pearl_next": 129, "terrain_prob": 130, "terrain_amount": 131, "retry_prob": 132,
+    "w_gift": 117, "w_hungry": 118, "w_slow": 119, "drinks_stowed": 120, "bot_presser": 121, "w_inv_near": 122, "inv_near_dist": 123, "league_steal": 124, "throw_carry_prob": 125, "teach": 126, "w_speed_refill": 127, "insane_prob": 128, "w_pearl_next": 129, "terrain_prob": 130, "terrain_amount": 131, "retry_prob": 132, "terrain_gap_prob": 133,
 }
 
 STAT_NAMES = [

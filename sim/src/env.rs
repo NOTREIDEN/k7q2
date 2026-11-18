@@ -360,6 +360,9 @@ pub struct Params {
     pub terrain_prob: f64,
     /// How much terrain such a duel has, from 0 to 1.
     pub terrain_amount: f64,
+    /// Of the duels on terrain, the share with a strip open to the void
+    /// across the way from one player to the other (`terrain::build`).
+    pub terrain_gap_prob: f64,
     /// Share of new duels that are a retry of one the first player lost,
     /// from a few seconds before its death (as GT Sophy trained on its
     /// mistakes): the same moment of the same duel, played again. Each lost
@@ -497,6 +500,7 @@ impl Default for Params {
             w_pearl_next: 0.0,
             terrain_prob: 0.0,
             terrain_amount: 0.6,
+            terrain_gap_prob: 0.0,
             retry_prob: 0.0,
             league_steal: 0.0,
             throw_carry_prob: 0.0,
@@ -635,6 +639,7 @@ impl Params {
             129 => self.w_pearl_next = v as f32,
             130 => self.terrain_prob = v,
             131 => self.terrain_amount = v,
+            133 => self.terrain_gap_prob = v,
             132 => self.retry_prob = v,
             113 => self.extreme_share = v,
             114 => self.w_shake = v as f32,
@@ -1114,7 +1119,9 @@ pub fn new_duel(p: &Params, rng: &mut Rng, mode: Mode) -> (Match, [f64; 2], BotP
     };
     // Terrain, drawn only when asked for.
     if p.terrain_prob > 0.0 && rng.chance(p.terrain_prob) {
-        crate::terrain::build(&mut world, rng, &[a, b], p.terrain_amount);
+        // Drawn only when asked for, so that terrain comes out as it did.
+        let gap = p.terrain_gap_prob > 0.0 && rng.chance(p.terrain_gap_prob);
+        crate::terrain::build(&mut world, rng, &[a, b], p.terrain_amount, gap);
     }
     let spawns = [Spawn { pos: a, yaw: yaw_a, pitch: pitch[0] }, Spawn { pos: b, yaw: yaw_b, pitch: pitch[1] }];
     let mut ping = [0.0; 2];

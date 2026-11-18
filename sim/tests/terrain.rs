@@ -201,3 +201,26 @@ fn duels_on_terrain_start_on_open_ground() {
     }
     assert!(blocks > 0);
 }
+
+#[test]
+fn a_gap_lies_across_the_way_between_the_players() {
+    let mut rng = Rng::new(5);
+    for _ in 0..50 {
+        let mut w = World::arena(0.0, 24.0, true);
+        let a = [rng.range(-15.0, 15.0), 0.0, rng.range(-15.0, 15.0)];
+        let ang = rng.range(0.0, std::f64::consts::TAU);
+        let d = rng.range(5.0, 16.0);
+        let b = [a[0] + d * ang.cos(), 0.0, a[2] + d * ang.sin()];
+        pvpsim::terrain::build(&mut w, &mut rng, &[a, b], 0.0, true);
+        // Somewhere on the straight way there is no ground.
+        let crossed = (0..=100).any(|k| {
+            let f = k as f64 / 100.0;
+            let (x, z) = (a[0] + (b[0] - a[0]) * f, a[2] + (b[2] - a[2]) * f);
+            ground(&w, x.floor() as i32, z.floor() as i32, 0.0) == NO_GROUND
+        });
+        assert!(crossed, "{a:?} {b:?}");
+        for p in [a, b] {
+            assert_eq!(ground(&w, p[0].floor() as i32, p[2].floor() as i32, 0.0), 0.0);
+        }
+    }
+}

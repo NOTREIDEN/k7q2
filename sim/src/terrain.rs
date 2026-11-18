@@ -29,8 +29,11 @@ fn restore(t: &mut Terrain, x: i32, z: i32, floor: i32) {
 
 /// Draws terrain for the arena of `world` and puts it in. `amount` from 0
 /// to 1 says how much of it there is; the ground around each point of
-/// `keep` (where the players start) is left flat and open.
-pub fn build(world: &mut World, rng: &mut Rng, keep: &[V3], amount: f64) {
+/// `keep` (where the players start) is left flat and open. With `gap`, a
+/// strip open to the void also lies across the way between the first two
+/// points, so that the straight way from one player to the other drops
+/// into it and the way round is a few blocks off.
+pub fn build(world: &mut World, rng: &mut Rng, keep: &[V3], amount: f64, gap: bool) {
     let mut t = world.blank_terrain();
     let f = world.floor_y.round() as i32;
     let (lo_x, hi_x, lo_z, hi_z) = (t.x0, t.x0 + t.nx, t.z0, t.z0 + t.nz);
@@ -131,6 +134,30 @@ pub fn build(world: &mut World, rng: &mut Rng, keep: &[V3], amount: f64) {
                     t.dig_void(i, k);
                 }
             }
+        }
+    }
+    if gap && keep.len() >= 2 {
+        // Across the middle of the way, square to it, two to six blocks
+        // either side of it and one to three wide.
+        let (a, b) = (keep[0], keep[1]);
+        let (dx, dz) = (b[0] - a[0], b[2] - a[2]);
+        let len = (dx * dx + dz * dz).sqrt().max(1e-6);
+        let (ux, uz) = (dx / len, dz / len);
+        let at = rng.range(0.35, 0.65);
+        let (mx, mz) = (a[0] + dx * at, a[2] + dz * at);
+        let (left, right) = (rng.range(2.0, 6.0), rng.range(2.0, 6.0));
+        let wide = rng.range(1.0, 3.0);
+        let mut s = -left;
+        while s <= right {
+            let mut w = -wide / 2.0;
+            while w <= wide / 2.0 {
+                // Along the strip is square to the way: (-uz, ux).
+                let x = mx - uz * s + ux * w;
+                let z = mz + ux * s + uz * w;
+                t.dig_void(floor_d(x), floor_d(z));
+                w += 0.5;
+            }
+            s += 0.5;
         }
     }
     for p in keep {
