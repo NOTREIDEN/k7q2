@@ -4,6 +4,8 @@ import net.minecraft.client.Minecraft;
 import net.minecraft.client.gui.inventory.GuiInventory;
 import net.minecraft.client.settings.GameSettings;
 import net.minecraft.client.settings.KeyBinding;
+import net.minecraft.entity.Entity;
+import net.minecraft.util.MovingObjectPosition;
 import pvpai.core.Inv;
 import pvpai.core.Keys;
 
@@ -57,6 +59,10 @@ final class Hands {
     }
 
     void press(Keys k) {
+        press(k, null);
+    }
+
+    void press(Keys k, Entity opponent) {
         GameSettings gs = mc.gameSettings;
         boolean open = mc.currentScreen instanceof GuiInventory;
         if (open || k.inv != 0) {
@@ -99,12 +105,6 @@ final class Hands {
         if (k.slotKey > 0) {
             KeyBinding.onTick(gs.keyBindsHotbar[layout.real[k.slotKey - 1]].getKeyCode());
         }
-        // A left click is a press let go at once: the button is never left down.
-        if (k.attack) {
-            for (int n = 0; n <= k.extraClicks; n++) {
-                KeyBinding.onTick(gs.keyBindAttack.getKeyCode());
-            }
-        }
         // The right button: a press when it goes down, then held.
         if (k.useItem && (!useDown || k.useAgain)) {
             KeyBinding.onTick(gs.keyBindUseItem.getKeyCode());
@@ -123,6 +123,21 @@ final class Hands {
             int[] n = userCounts(k.dx, k.dy, f1);
             if (n[0] != 0 || n[1] != 0) {
                 mc.thePlayer.setAngles((float) n[0] * f1, -((float) n[1] * f1));
+            }
+        }
+        if (opponent != null) {
+            mc.thePlayer.setRotationYawHead(mc.thePlayer.rotationYaw);
+            if (k.attack) {
+                mc.entityRenderer.getMouseOver(1.0F);
+                MovingObjectPosition hit = mc.objectMouseOver;
+                k.attack = hit != null && hit.typeOfHit == MovingObjectPosition.MovingObjectType.ENTITY
+                    && hit.entityHit == opponent;
+            }
+        }
+        // A left click is a press let go at once: the button is never left down.
+        if (k.attack) {
+            for (int n = 0; n <= k.extraClicks; n++) {
+                KeyBinding.onTick(gs.keyBindAttack.getKeyCode());
             }
         }
     }

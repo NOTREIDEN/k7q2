@@ -292,6 +292,13 @@ public final strictfp class Agent {
         prev = inp.copy();
     }
 
+    /** Time passes while the inventory waits for a server reply. */
+    public void inventoryWaitTick() {
+        if (pearlWait > 0) {
+            pearlWait--;
+        }
+    }
+
     /** Clicks the player can still make on its next tick. */
     private double clicksAvailable() {
         double r = Math.min(cps / 20.0, 1.0);

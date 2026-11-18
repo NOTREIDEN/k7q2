@@ -10,6 +10,8 @@ import net.minecraft.client.Minecraft;
 import net.minecraft.client.gui.inventory.GuiInventory;
 import net.minecraft.client.settings.KeyBinding;
 import net.minecraft.util.ChatComponentText;
+import net.minecraftforge.client.event.GuiScreenEvent;
+import net.minecraftforge.client.event.MouseEvent;
 import net.minecraftforge.common.MinecraftForge;
 import net.minecraftforge.fml.client.registry.ClientRegistry;
 import net.minecraftforge.fml.common.FMLCommonHandler;
@@ -19,6 +21,7 @@ import net.minecraftforge.fml.common.event.FMLPreInitializationEvent;
 import net.minecraftforge.fml.common.eventhandler.SubscribeEvent;
 import net.minecraftforge.fml.common.gameevent.TickEvent;
 import org.lwjgl.input.Keyboard;
+import org.lwjgl.input.Mouse;
 import pvpai.client.Session;
 import pvpai.client.Settings;
 import pvpai.core.Policy;
@@ -74,6 +77,31 @@ public final class PvpAi {
 
     boolean on() {
         return session != null && session.on();
+    }
+
+    @SubscribeEvent
+    public void mouse(MouseEvent event) {
+        if (filterMouse(event.button, event.dwheel, event.buttonstate)) {
+            event.setCanceled(true);
+        }
+    }
+
+    @SubscribeEvent
+    public void inventoryMouse(GuiScreenEvent.MouseInputEvent.Pre event) {
+        if (event.gui instanceof GuiInventory && filterMouse(Mouse.getEventButton(), Mouse.getEventDWheel(), Mouse.getEventButtonState())) {
+            event.setCanceled(true);
+        }
+    }
+
+    private boolean filterMouse(int button, int wheel, boolean down) {
+        if (!on() || (button < 0 && wheel == 0)) {
+            return false;
+        }
+        if (button >= 0 && button - 100 == key.getKeyCode() && down) {
+            session.stop();
+            say(Minecraft.getMinecraft(), "PvP AI apagado.");
+        }
+        return true;
     }
 
     /** Whether the key was pressed since the last tick. */

@@ -49,6 +49,8 @@ public final class Session implements Wire.Tap {
     private MouseHelper mouse;
     /** Whether the tick that runs now started with the agent at the keys. */
     private boolean started;
+    private boolean openingInventory;
+    private GuiInventory ownedInventory;
 
     public Session(Minecraft mc, Policy policy) {
         this.mc = mc;
@@ -105,6 +107,7 @@ public final class Session implements Wire.Tap {
             }
         });
         bot.block(s.block);
+        bot.release();
         // The agent starts a duel with its sword in hand. If the player holds
         // something else, the sword is taken up as the wheel of the mouse would.
         int swordAt = bot.layout().real[Inv.SLOT_SWORD];
@@ -159,9 +162,17 @@ public final class Session implements Wire.Tap {
         if (mc.mouseHelper instanceof Still) {
             mc.mouseHelper = mouse;
         }
+        boolean closeInventory = mc.currentScreen instanceof GuiInventory
+            && (ownedInventory == mc.currentScreen || openingInventory)
+            && mc.thePlayer == me && mc.theWorld == world && mc.getNetHandler() != null;
         bot = null;
         started = false;
+        openingInventory = false;
+        ownedInventory = null;
         refill.reset();
+        if (closeInventory) {
+            me.closeScreen();
+        }
     }
 
     @Override
@@ -207,20 +218,25 @@ public final class Session implements Wire.Tap {
      */
     public String tickStart() {
         started = false;
+        openingInventory = false;
         String why = check();
         if (why != null) {
             stop();
             return why;
         }
         if (bot != null && !mc.isGamePaused()) {
+            if (ownedInventory != mc.currentScreen) {
+                ownedInventory = null;
+            }
             InventoryRefill.Step step = refill.step(mc.currentScreen, me);
             switch (step) {
                 case WAIT:
-                    bot.release();
-                    return null;
                 case CLOSE:
-                    bot.release();
-                    me.closeScreen();
+                    bot.waitForInventory();
+                    started = true;
+                    if (step == InventoryRefill.Step.CLOSE) {
+                        me.closeScreen();
+                    }
                     return null;
                 case REJECTED:
                 case TIMED_OUT:
@@ -235,9 +251,11 @@ public final class Session implements Wire.Tap {
             // In 1.8.9 the targeting ray reads the head yaw. The mouse
             // changes the camera yaw before vanilla updates the head.
             me.setRotationYawHead(me.rotationYaw);
-            boolean closeAfterClick = bot.tickStartForSession();
+            boolean wasClosed = mc.currentScreen == null;
+            int inventory = bot.tickStartForSession();
             me.setRotationYawHead(me.rotationYaw);
-            refill.sent(mc.currentScreen, me.openContainer, closeAfterClick);
+            openingInventory = wasClosed && inventory == 1;
+            refill.sent(mc.currentScreen, me.openContainer, inventory >= Inv.SHUT + Inv.WINDOW_ROWS);
             started = true;
         }
         return null;
@@ -246,10 +264,14 @@ public final class Session implements Wire.Tap {
     /** At the end of a tick of the client. */
     public void tickEnd() {
         if (bot != null && started && mc.thePlayer == me && mc.theWorld == world) {
+            if (openingInventory && mc.currentScreen instanceof GuiInventory) {
+                ownedInventory = (GuiInventory) mc.currentScreen;
+            }
             bot.tickEnd();
             // Keep the targeting ray in step with the interpolated camera.
             me.prevRotationYawHead = me.prevRotationYaw;
         }
         started = false;
+        openingInventory = false;
     }
 }
