@@ -43,7 +43,7 @@ on:
           --teach-coef 1 --teach-full-until 15640 --teach-until 16130
           --param insane_prob=0.35 --param w_speed_refill=1 --param w_pearl_next=0.5
           --param inv_near_dist=3 --param ep_ticks_max=2400
-          --param terrain_prob=0.5 --param terrain_amount=0.8
+          --param terrain_prob=0.5 --param terrain_amount=0.8 --param retry_prob=0.25
       previous:
         description: Id of the run to continue from (empty starts from seed/stage1.pt)
         default: ""

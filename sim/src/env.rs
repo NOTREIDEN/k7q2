@@ -35,7 +35,7 @@ pub const FOOD_TO_SPRINT: i32 = 6;
 pub const SHAKE_DEG: f32 = 6.0;
 pub const SHAKE_TICKS: i32 = 2;
 pub const PRIV_DIM: usize = 71;
-pub const STATS_DIM: usize = 98;
+pub const STATS_DIM: usize = 100;
 /// Floats per player and in total written by `Env::write_view`.
 pub const VIEW_PLAYER: usize = 45;
 pub const VIEW_DIM: usize = 2 * VIEW_PLAYER + 24;
@@ -360,6 +360,11 @@ pub struct Params {
     pub terrain_prob: f64,
     /// How much terrain such a duel has, from 0 to 1.
     pub terrain_amount: f64,
+    /// Share of new duels that are a retry of one the first player lost,
+    /// from a few seconds before its death (as GT Sophy trained on its
+    /// mistakes): the same moment of the same duel, played again. Each lost
+    /// moment is kept for two retries; with none kept the duel is new.
+    pub retry_prob: f64,
     /// In self-play, the share of duels in which player 1 goes for the
     /// other player's potions: while that player holds a potion, has one in
     /// the air or is under 12 health, it runs straight at it (`steal_keys`).
@@ -492,6 +497,7 @@ impl Default for Params {
             w_pearl_next: 0.0,
             terrain_prob: 0.0,
             terrain_amount: 0.6,
+            retry_prob: 0.0,
             league_steal: 0.0,
             throw_carry_prob: 0.0,
             teach: 0.0,
@@ -629,6 +635,7 @@ impl Params {
             129 => self.w_pearl_next = v as f32,
             130 => self.terrain_prob = v,
             131 => self.terrain_amount = v,
+            132 => self.retry_prob = v,
             113 => self.extreme_share = v,
             114 => self.w_shake = v as f32,
             115 => self.pot_strict_prob = v,
@@ -737,6 +744,8 @@ pub struct Stats {
     /// Deaths in the void, and ticks played on terrain (`terrain_prob`).
     pub void_falls: [f64; 2],
     pub terrain_ticks: [f64; 2],
+    /// Episodes that were a retry of a lost moment.
+    pub retries: f64,
 }
 
 impl Stats {
@@ -794,6 +803,7 @@ impl Stats {
             self.void_falls[a] += o.void_falls[a];
             self.terrain_ticks[a] += o.terrain_ticks[a];
         }
+        self.retries += o.retries;
     }
     pub fn write(&self, out: &mut [f64]) {
         let v = [
@@ -895,12 +905,43 @@ impl Stats {
             self.void_falls[1],
             self.terrain_ticks[0],
             self.terrain_ticks[1],
+            self.retries,
+            0.0,
         ];
         for (o, x) in out.iter_mut().zip(v.iter()) {
             *o = *x;
         }
     }
 }
+
+/// A moment of a duel, to play it again from there (`Params::retry_prob`).
+#[derive(Clone)]
+struct Moment {
+    m: Match,
+    pending: usize,
+    bot: BotParams,
+    bot_state: BotState,
+    ag: [Agent; 2],
+    combo: [u32; 2],
+    ping_ms: [f64; 2],
+    landed: Option<(usize, i32)>,
+    since_block: [i32; 2],
+    pot_since: [i32; 2],
+    pot_back: [bool; 2],
+    off_run: [i32; 2],
+    steal: bool,
+    was_open: [bool; 2],
+    view_was: [[f32; 2]; 2],
+    turn_last: [[f32; 2]; 2],
+    turn_age: [[i32; 2]; 2],
+    lesson: u8,
+}
+
+/// How many moments of the duel in progress are kept, one a second.
+const MOMENTS: usize = 5;
+/// How many lost moments are kept for retries, and how often each is played.
+const LOSSES: usize = 4;
+const RETRIES: u8 = 2;
 
 pub struct Env {
     pub m: Match,
@@ -957,6 +998,10 @@ pub struct Env {
     pub lesson: u8,
     /// A player has died: the duel ends when both have made their tick.
     over: bool,
+    /// The last seconds of the duel in progress, oldest first, and moments
+    /// from before the first player's deaths with the retries left of each.
+    moments: std::collections::VecDeque<Moment>,
+    losses: Vec<(Moment, u8)>,
 }
 
 /// The keys of a player that goes for its opponent's potions, laid over
@@ -1415,9 +1460,68 @@ impl Env {
             overridden: false,
             teach: [-1; ACT_HEADS],
             over: false,
+            moments: std::collections::VecDeque::new(),
+            losses: Vec::new(),
         };
         e.begin();
         e
+    }
+
+    fn moment(&self) -> Moment {
+        Moment {
+            m: self.m.clone(),
+            pending: self.pending,
+            bot: self.bot,
+            bot_state: self.bot_state,
+            ag: self.ag.clone(),
+            combo: self.combo,
+            ping_ms: self.ping_ms,
+            landed: self.landed,
+            since_block: self.since_block,
+            pot_since: self.pot_since,
+            pot_back: self.pot_back,
+            off_run: self.off_run,
+            steal: self.steal,
+            was_open: self.was_open,
+            view_was: self.view_was,
+            turn_last: self.turn_last,
+            turn_age: self.turn_age,
+            lesson: self.lesson,
+        }
+    }
+
+    /// Goes back to a kept moment, as the start of a new episode.
+    fn resume(&mut self, k: Moment) {
+        self.m = k.m;
+        self.pending = k.pending;
+        self.bot = k.bot;
+        self.bot_state = k.bot_state;
+        self.ag = k.ag;
+        self.combo = k.combo;
+        self.ping_ms = k.ping_ms;
+        self.landed = k.landed;
+        self.since_block = k.since_block;
+        self.pot_since = k.pot_since;
+        self.pot_back = k.pot_back;
+        self.off_run = k.off_run;
+        self.steal = k.steal;
+        self.was_open = k.was_open;
+        self.view_was = k.view_was;
+        self.turn_last = k.turn_last;
+        self.turn_age = k.turn_age;
+        self.lesson = k.lesson;
+        let p = &self.params;
+        self.ep_len = self.rng.range(p.ep_ticks_min, p.ep_ticks_max.max(p.ep_ticks_min)).round() as i32;
+        self.ticks_left = self.ep_len;
+        self.rew_acc = [0.0; 2];
+        self.max_combo = self.combo;
+        self.ep = Stats::default();
+        self.ep.retries = 1.0;
+        self.over = false;
+        self.moments.clear();
+        for a in 0..2 {
+            self.phi[a] = self.potential(a).0;
+        }
     }
 
     fn begin(&mut self) {
@@ -1861,6 +1965,27 @@ impl Env {
         self.ep.episodes = 1.0;
         let ep = self.ep;
         self.total.add(&ep);
+        if self.params.retry_prob > 0.0 {
+            // A death of the first player: the moment two to four seconds
+            // before it is kept for retries.
+            if how == 1 && !self.m.s.p[0].alive() && self.moments.len() >= 3 {
+                let back = (self.rng.next_u64() % (self.moments.len() as u64 - 2)) as usize;
+                let k = self.moments[back].clone();
+                if self.losses.len() >= LOSSES {
+                    let i = (self.rng.next_u64() % LOSSES as u64) as usize;
+                    self.losses.swap_remove(i);
+                }
+                self.losses.push((k, RETRIES));
+            }
+            self.moments.clear();
+            if !self.losses.is_empty() && self.rng.chance(self.params.retry_prob) {
+                let i = (self.rng.next_u64() % self.losses.len() as u64) as usize;
+                self.losses[i].1 -= 1;
+                let k = if self.losses[i].1 == 0 { self.losses.swap_remove(i).0 } else { self.losses[i].0.clone() };
+                self.resume(k);
+                return;
+            }
+        }
         let (m, ping, bot, lesson) = new_duel(&self.params, &mut self.rng, self.mode);
         self.m = m;
         self.ping_ms = ping;
@@ -1915,6 +2040,12 @@ impl Env {
                 self.finish_episode(1);
             } else if self.ticks_left <= 0 {
                 self.finish_episode(2);
+            } else if self.params.retry_prob > 0.0 && self.ticks_left % 20 == 0 {
+                if self.moments.len() >= MOMENTS {
+                    self.moments.pop_front();
+                }
+                let k = self.moment();
+                self.moments.push_back(k);
             }
         }
         self.ag[self.pending].before_tick(&self.m.c[self.pending], &self.m.world);
