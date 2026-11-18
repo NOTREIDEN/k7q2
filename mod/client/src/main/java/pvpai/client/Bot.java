@@ -181,6 +181,17 @@ public final class Bot implements Wire.Tap {
         return k;
     }
 
+    /** Applies the tick, leaving an inventory close until its last click is confirmed. */
+    boolean tickStartForSession() {
+        look(null);
+        boolean closeAfterClick = pressed.inv >= Inv.SHUT + Inv.WINDOW_ROWS;
+        if (closeAfterClick) {
+            pressed.inv -= Inv.SHUT;
+        }
+        press();
+        return closeAfterClick;
+    }
+
     /**
      * Read the client and settle the keys of this tick: the agent's, or
      * the ones handed in if it only keeps its counts. Returns them.

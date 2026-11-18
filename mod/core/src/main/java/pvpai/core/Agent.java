@@ -399,6 +399,10 @@ public final strictfp class Agent {
      * belongs to the screen, or null.
      */
     private Keys refillKeys(View v, int choice) {
+        if (refill != 0 && !v.invOpen) {
+            refill = 0;
+            return null;
+        }
         int want = choice == 5 ? Inv.POTION : choice == 6 ? Inv.DRINK : -1;
         Inv.Bar bar = Inv.Bar.of(v);
         int inv;

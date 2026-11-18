@@ -8,6 +8,8 @@ import net.minecraft.client.entity.EntityPlayerSP;
 import net.minecraft.client.gui.inventory.GuiInventory;
 import net.minecraft.client.multiplayer.WorldClient;
 import net.minecraft.network.NetworkManager;
+import net.minecraft.network.Packet;
+import net.minecraft.network.play.server.S32PacketConfirmTransaction;
 import net.minecraft.util.MouseHelper;
 import pvpai.core.Duel;
 import pvpai.core.Inv;
@@ -19,7 +21,7 @@ import pvpai.core.Policy;
  * loader has to do is call {@link #tickStart} and {@link #tickEnd} around
  * each tick of the client and show the player the lines it gets back.
  */
-public final class Session {
+public final class Session implements Wire.Tap {
     /** Seconds of Speed left at which the agents of training take a drink. */
     private static final double DRINK_WINDOW_S = 30.0;
     /** What stands in for a ping the player list does not say. */
@@ -38,6 +40,7 @@ public final class Session {
     private final Minecraft mc;
     private final Policy policy;
     private final Random draws = new Random();
+    private final InventoryRefill refill = new InventoryRefill();
     private Bot bot;
     private Duel duel;
     private EntityPlayerSP me;
@@ -112,7 +115,7 @@ public final class Session {
         me = mc.thePlayer;
         world = mc.theWorld;
         manager = mc.getNetHandler().getNetworkManager();
-        Wire.install(mc, manager, bot);
+        Wire.install(mc, manager, this);
         mouse = mc.mouseHelper;
         mc.mouseHelper = new Still();
         started = false;
@@ -158,6 +161,24 @@ public final class Session {
         }
         bot = null;
         started = false;
+        refill.reset();
+    }
+
+    @Override
+    public void before(Packet<?> packet) {
+        if (bot != null) {
+            bot.before(packet);
+        }
+    }
+
+    @Override
+    public void after(Packet<?> packet) {
+        if (bot != null) {
+            bot.after(packet);
+            if (packet instanceof S32PacketConfirmTransaction) {
+                refill.confirmed((S32PacketConfirmTransaction) packet);
+            }
+        }
     }
 
     /** Why the agent cannot go on, or null if it can. */
@@ -192,11 +213,31 @@ public final class Session {
             return why;
         }
         if (bot != null && !mc.isGamePaused()) {
+            InventoryRefill.Step step = refill.step(mc.currentScreen, me);
+            switch (step) {
+                case WAIT:
+                    bot.release();
+                    return null;
+                case CLOSE:
+                    bot.release();
+                    me.closeScreen();
+                    return null;
+                case REJECTED:
+                case TIMED_OUT:
+                    me.closeScreen();
+                    stop();
+                    return step == InventoryRefill.Step.REJECTED
+                        ? "PvP AI apagado: el servidor rechazo el clic de inventario."
+                        : "PvP AI apagado: no llego la confirmacion del clic de inventario.";
+                default:
+                    break;
+            }
             // In 1.8.9 the targeting ray reads the head yaw. The mouse
             // changes the camera yaw before vanilla updates the head.
             me.setRotationYawHead(me.rotationYaw);
-            bot.tickStart(null);
+            boolean closeAfterClick = bot.tickStartForSession();
             me.setRotationYawHead(me.rotationYaw);
+            refill.sent(mc.currentScreen, me.openContainer, closeAfterClick);
             started = true;
         }
         return null;
