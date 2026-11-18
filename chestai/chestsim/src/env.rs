@@ -194,7 +194,7 @@ impl Default for Params {
             w_tp: 0.2,
             w_waste: 0.5,
             w_shape: 0.08,
-            w_punch: 0.0,
+            w_punch: 1.5,
             gamma: 0.998,
             arrow_self_dmg: 0.35,
             rival_prob: 0.5,
@@ -860,7 +860,6 @@ impl Env {
             - p.w_hurt * ev.dmg_taken as f64
             - p.w_tp * ev.leash_tps as f64
             - p.w_waste * (ev.gapple_waste + ev.potion_waste) as f64
-            + p.w_punch * ev.self_punch as f64
             - p.w_rival * ev.rival_near as f64;
         let turn = (inp.dyaw.abs() + inp.dpitch.abs()) as f64 / 15.0;
         r -= p.w_turn * turn * turn;
@@ -882,6 +881,21 @@ impl Env {
             }
             if nearest_active.is_finite() && nearest_active > 8.0 {
                 r -= p.w_away;
+            }
+            // A Punch shot at oneself pays when it carries the player toward a far chest:
+            // no wave running close by and the nearest chest to work on more than 12 blocks off.
+            if ev.self_punch > 0 && !(nearest_active <= 8.0) {
+                let mut nearest_goal = f64::INFINITY;
+                for ci in 0..self.g.chests.len() {
+                    let k = &self.known[ci];
+                    if k.seen && (k.state == 1 || k.state == 3) {
+                        let c = self.g.chests[ci].center();
+                        nearest_goal = nearest_goal.min(((c[0] - pos[0]).powi(2) + (c[2] - pos[2]).powi(2)).sqrt());
+                    }
+                }
+                if nearest_goal.is_finite() && nearest_goal > 12.0 {
+                    r += p.w_punch * ev.self_punch as f64;
+                }
             }
             // Standing about.
             let t = self.ticks as u64;
