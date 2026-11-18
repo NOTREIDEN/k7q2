@@ -103,8 +103,9 @@ public final class ChestAi {
             net.minecraft.entity.Entity src = e.source.getEntity();
             String held = src instanceof net.minecraft.entity.player.EntityPlayer && ((net.minecraft.entity.player.EntityPlayer) src).getHeldItem() != null
                 ? ((net.minecraft.entity.player.EntityPlayer) src).getHeldItem().getDisplayName() : "-";
-            System.out.println(String.format(java.util.Locale.ROOT, "HURT %s %.1f by %s with %s resist=%d",
-                e.entity.getClass().getSimpleName(), e.ammount, e.source.getDamageType(), held, e.entity.hurtResistantTime));
+            System.out.println(String.format(java.util.Locale.ROOT, "HURT %s %.1f by %s with %s resist=%d src=%s self=%b",
+                e.entity.getClass().getSimpleName(), e.ammount, e.source.getDamageType(), held, e.entity.hurtResistantTime,
+                src == null ? "-" : src.getClass().getSimpleName(), src == e.entity));
         }
     }
 

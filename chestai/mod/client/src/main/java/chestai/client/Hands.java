@@ -1,10 +1,8 @@
 package chestai.client;
 
-import java.lang.reflect.Field;
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.settings.GameSettings;
 import net.minecraft.client.settings.KeyBinding;
-import net.minecraft.item.ItemStack;
 import chestai.core.Pilot;
 
 /**
@@ -14,8 +12,6 @@ import chestai.core.Pilot;
  * crosshair is on).
  */
 final class Hands {
-    /** 1.8 keeps the left button from clicking for half a second after a click into the air; the simulator does not. */
-    private static final Field MISS_DELAY = Names.field(Minecraft.class, "leftClickCounter", "field_71429_W");
 
     private final Minecraft mc;
     private double carryX, carryY;
@@ -71,6 +67,9 @@ final class Hands {
         carryY = y - ny;
         if (nx != 0 || ny != 0) {
             mc.thePlayer.setAngles(nx * f1, -(ny * f1));
+            // What the crosshair is on after this turn, as the game works it out
+            // later in the tick before it reads the buttons.
+            mc.entityRenderer.getMouseOver(1.0F);
         }
 
         // The hand.
@@ -78,57 +77,26 @@ final class Hands {
         if (real >= 0 && mc.thePlayer.inventory.currentItem != real) {
             mc.thePlayer.inventory.currentItem = real;
         }
-        if (k.throwIt && real >= 0) {
-            ItemStack s = mc.thePlayer.inventory.mainInventory[real];
-            if (s != null) {
-                mc.playerController.sendUseItem(mc.thePlayer, mc.theWorld, s);
-            }
+        // Everything goes through the game's own key handling, as a player's keys
+        // would: no packets of our own, no reaching past what the crosshair is on.
+        boolean throwNow = k.throwIt && real >= 0 && mc.thePlayer.inventory.mainInventory[real] != null;
+        if (throwNow) {
+            KeyBinding.onTick(gs.keyBindUseItem.getKeyCode());
         }
-        if (k.attack && !onMount) {
-            Names.setInt(MISS_DELAY, mc, 0);
-            net.minecraft.entity.Entity behind = mc.objectMouseOver != null && mc.objectMouseOver.entityHit instanceof net.minecraft.entity.item.EntityArmorStand
-                ? throughStands() : null;
-            if (behind != null) {
-                // A hologram stand with a hitbox in front of a mob: the server's holograms
-                // are not there to be hit, so the blow goes to what is behind.
-                mc.thePlayer.swingItem();
-                mc.playerController.attackEntity(mc.thePlayer, behind);
-            } else {
-                KeyBinding.onTick(gs.keyBindAttack.getKeyCode());
-            }
+        // A click into the air costs half a second without clicks in 1.8, and the
+        // simulator's air clicks do nothing: the left button is only pressed when
+        // the crosshair is on an entity.
+        boolean onEntity = mc.objectMouseOver != null
+            && mc.objectMouseOver.typeOfHit == net.minecraft.util.MovingObjectPosition.MovingObjectType.ENTITY;
+        if (k.attack && !onMount && onEntity) {
+            KeyBinding.onTick(gs.keyBindAttack.getKeyCode());
         }
         boolean hold = k.useHeld;
-        if ((k.claim || (hold && !useDown))) {
+        if (!throwNow && (k.claim || (hold && !useDown))) {
             KeyBinding.onTick(gs.keyBindUseItem.getKeyCode());
         }
         key(gs.keyBindUseItem, hold);
         useDown = hold;
-    }
-
-    /** The nearest living entity on the line of sight within reach, armor stands left out. */
-    private net.minecraft.entity.Entity throughStands() {
-        net.minecraft.entity.Entity me = mc.thePlayer;
-        net.minecraft.util.Vec3 eye = me.getPositionEyes(1.0F), look = me.getLook(1.0F);
-        double reach = mc.playerController.getBlockReachDistance();
-        reach = Math.min(reach, 3.0);
-        net.minecraft.util.Vec3 end = eye.addVector(look.xCoord * reach, look.yCoord * reach, look.zCoord * reach);
-        net.minecraft.entity.Entity best = null;
-        double bestD = reach;
-        for (Object o : mc.theWorld.loadedEntityList) {
-            net.minecraft.entity.Entity e = (net.minecraft.entity.Entity) o;
-            if (e == me || e instanceof net.minecraft.entity.item.EntityArmorStand || !(e instanceof net.minecraft.entity.EntityLivingBase) || !e.canBeCollidedWith()) {
-                continue;
-            }
-            float b = e.getCollisionBorderSize();
-            net.minecraft.util.AxisAlignedBB box = e.getEntityBoundingBox().expand(b, b, b);
-            net.minecraft.util.MovingObjectPosition hit = box.calculateIntercept(eye, end);
-            double d = box.isVecInside(eye) ? 0.0 : hit != null ? eye.distanceTo(hit.hitVec) : -1.0;
-            if (d >= 0.0 && d < bestD) {
-                bestD = d;
-                best = e;
-            }
-        }
-        return best;
     }
 
     void release() {
