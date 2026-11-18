@@ -51,6 +51,7 @@ public final class Session {
     private Pilot pilot;
     private Hands hands;
     private final Obs obs = new Obs();
+    private Coach coach;
     private EntityPlayerSP me;
     private WorldClient world;
     private MouseHelper mouse;
@@ -115,7 +116,8 @@ public final class Session {
     private File chestFile() {
         ServerData sd = mc.getCurrentServerData();
         String name = sd == null ? "local" : sd.serverIP.toLowerCase(Locale.ROOT).replaceAll("[^a-z0-9.-]", "_");
-        return new File(dir, "cofres-" + name + ".txt");
+        // v2: the first version also took the names over mobs for chests, so its lists are left aside.
+        return new File(dir, "cofres2-" + name + ".txt");
     }
 
     private void loadChests() {
@@ -128,7 +130,7 @@ public final class Session {
                 String line;
                 while ((line = r.readLine()) != null) {
                     String[] t = line.trim().split("\\s+");
-                    if (t.length == 3) {
+                    if (t.length == 3 && mem.near(Integer.parseInt(t[0]), Integer.parseInt(t[1]), Integer.parseInt(t[2]), 2.5) < 0) {
                         mem.chest(Integer.parseInt(t[0]), Integer.parseInt(t[1]), Integer.parseInt(t[2]));
                     }
                 }
@@ -177,6 +179,7 @@ public final class Session {
         double cps = s.cpsMin + draws.nextDouble() * (s.cpsMax - s.cpsMin);
         pilot = new Pilot(cps);
         hands = new Hands(mc);
+        coach = new Coach();
         Layout lay = Layout.of(me.inventory);
         if (lay.real[Pilot.SWORD] >= 0) {
             me.inventory.currentItem = lay.real[Pilot.SWORD];
@@ -273,7 +276,17 @@ public final class Session {
         if (mem.chests.isEmpty()) {
             // No chest known: nothing to go for, so the keys stay still
             // instead of the network wandering about with an empty map.
-            hands.release();
+            // Mobs at hand are still fought.
+            int[] idle = {1, 1, 0, 0, 7, 5, 0, 0, 0};
+            coach.before(f, mem, pilot, idle);
+            if (coach.mode == Coach.FIGHT) {
+                Layout l2 = lay;
+                Pilot.Keys k2 = pilot.step(idle, 0, 1, 0, 0, l2.real[Pilot.GAPPLE] >= 0 ? l2.gapples : 0, f.pickMob >= 0, f.pickChest >= 0);
+                coach.after(f, k2);
+                hands.press(k2, l2);
+            } else {
+                hands.release();
+            }
             if (tick == 1 || tick % 600 == 0) {
                 return "Chest AI: no veo ningun cofre de farmeo, espero quieto." + Reader.diag(mc, settings)
                     + "\nSi el texto del holograma es otro, ponelo en texto_claim de ajustes.txt.";
@@ -282,10 +295,12 @@ public final class Session {
         }
         float[] o = obs.build(f, mem, new WorldGrid(world));
         int[] a = net.act(o, draws, !settings.draw);
+        int[] fromNet = a.clone();
+        coach.before(f, mem, pilot, a);
         if ((DEBUG || settings.log) && tick % 10 == 0) {
             StringBuilder b = new StringBuilder();
-            b.append(String.format(java.util.Locale.ROOT, "CHESTAI t=%d pos=%.1f,%.1f,%.1f yaw=%.0f hp=%.1f mobs=%d holos=%d known=%d a=%s |",
-                tick, f.x, f.y, f.z, f.yaw, f.hp, f.mobs.size(), f.holos.size(), mem.chests.size(), java.util.Arrays.toString(a)));
+            b.append(String.format(java.util.Locale.ROOT, "CHESTAI t=%d pos=%.1f,%.1f,%.1f yaw=%.0f hp=%.1f mobs=%d holos=%d known=%d net=%s modo=%d |",
+                tick, f.x, f.y, f.z, f.yaw, f.hp, f.mobs.size(), f.holos.size(), mem.chests.size(), java.util.Arrays.toString(fromNet), coach.mode));
             for (chestai.core.Memory.Known k : mem.chests) {
                 b.append(String.format(java.util.Locale.ROOT, " (%d,%d,%d s%d %ds)", k.x, k.y, k.z, k.state, k.secs));
             }
@@ -305,6 +320,7 @@ public final class Session {
         int pearls = lay.real[Pilot.PEARL] >= 0 ? lay.pearls : 0;
         int potions = lay.real[Pilot.POTION] >= 0 ? lay.potions : 0;
         Pilot.Keys k = pilot.step(a, pearls, pearlLeft, potions, lay.real[Pilot.BOW] >= 0 ? lay.arrows : 0, lay.real[Pilot.GAPPLE] >= 0 ? lay.gapples : 0, f.pickMob >= 0, f.pickChest >= 0);
+        coach.after(f, k);
         if (k.throwIt && k.slot == Pilot.PEARL) {
             pearlUntil = tick + (long) Math.round(settings.pearlCooldownS * 20.0);
         }

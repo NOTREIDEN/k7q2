@@ -88,7 +88,7 @@ tasks.register<JavaExec>("demo") {
     classpath = run.sourceSet.runtimeClasspath
     mainClass.set(run.mainClass)
     jvmArgs(run.vmArgs)
-    jvmArgs("-Dchestai.demo=true", "-Dchestai.debug=true", "-Dchestai.demo.seconds=" + (project.findProperty("demo.seconds") ?: "120"))
+    jvmArgs("-Dchestai.demo=true", "-Dchestai.debug=true", "-Dchestai.demo.seconds=" + (project.findProperty("demo.seconds") ?: "120"), "-Dchestai.demo.exp=" + (project.findProperty("demo.exp") ?: "false"))
     args(run.programArgs)
     args("--width", "1280", "--height", "720")
     workingDir = file(run.runDir)

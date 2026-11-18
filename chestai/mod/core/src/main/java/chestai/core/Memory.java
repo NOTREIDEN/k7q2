@@ -52,6 +52,22 @@ public final class Memory {
         return chests.size() - 1;
     }
 
+    /** The chest within {@code r} blocks (and 3 up or down) of this block, the nearest, or -1. */
+    public int near(int x, int y, int z, double r) {
+        int best = -1;
+        double bd = r * r;
+        for (int i = 0; i < chests.size(); i++) {
+            Known k = chests.get(i);
+            double dx = k.x - x, dz = k.z - z;
+            double d = dx * dx + dz * dz;
+            if (Math.abs(k.y - y) <= 3 && d <= bd) {
+                bd = d;
+                best = i;
+            }
+        }
+        return best;
+    }
+
     /** Take in what this tick showed. The first frame only sets the health to compare with. */
     public void update(Frame f, boolean first) {
         for (Frame.Holo h : f.holos) {

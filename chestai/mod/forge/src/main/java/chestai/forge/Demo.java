@@ -42,10 +42,28 @@ final class Demo {
     private volatile String pendingName;
     private volatile double[] pendingAt;
     private int claims, resets;
+    /** Like Expeditions: two-line holograms, tough armoured skeletons and wolves with names over them, NPC holograms about. */
+    private static final boolean EXP = Boolean.getBoolean("chestai.demo.exp");
+
+    private static EntityArmorStand stand(WorldServer w, double x, double y, double z, String name) {
+        EntityArmorStand a = new EntityArmorStand(w, x, y, z);
+        net.minecraft.nbt.NBTTagCompound tag = new net.minecraft.nbt.NBTTagCompound();
+        a.writeEntityToNBT(tag);
+        tag.setBoolean("Marker", true);
+        tag.setBoolean("NoGravity", true);
+        tag.setBoolean("Invisible", true);
+        a.readEntityFromNBT(tag);
+        a.setInvisible(true);
+        a.setAlwaysRenderNameTag(true);
+        a.setCustomNameTag(name);
+        w.spawnEntityInWorld(a);
+        return a;
+    }
 
     private static final class Chest {
         BlockPos pos;
-        EntityArmorStand holo;
+        EntityArmorStand holo, holo2;
+        final java.util.Map<EntityLiving, EntityArmorStand> tags = new java.util.HashMap<EntityLiving, EntityArmorStand>();
         int state = READY, timer, waveTicks;
         long started;
         final List<EntityLiving> mobs = new ArrayList<EntityLiving>();
@@ -193,6 +211,19 @@ final class Demo {
         }
         chests.get(3).state = COOLDOWN;
         chests.get(3).timer = 20 * 25;
+        if (EXP) {
+            for (Chest c : chests) {
+                c.holo.setPosition(c.pos.getX() + 0.5, c.pos.getY() + 1.0, c.pos.getZ() + 0.5);
+                c.holo2 = stand(w, c.pos.getX() + 0.5, c.pos.getY() + 0.7, c.pos.getZ() + 0.5, "§eNext Wave: §f0 seconds");
+            }
+            // The first chest is about to come: the agent should go there and wait.
+            chests.get(0).state = COOLDOWN;
+            chests.get(0).timer = 20 * 15;
+            // NPC holograms near where the player starts, over the ground.
+            stand(w, x0 + 4.5, y + 2.3, z0 + 3.5, "§6§lEXPEDITIONS");
+            stand(w, x0 + 4.5, y + 2.0, z0 + 3.5, "§eRight click to start!");
+            stand(w, x0 - 3.5, y + 2.0, z0 - 4.5, "§c§lBOSS RUSH §7(soon)");
+        }
         farmOn = true;
     }
 
@@ -231,7 +262,7 @@ final class Demo {
                 if (p.getDistance(cx, c.pos.getY(), cz) <= 12.0) {
                     spawn(w, c);
                     c.state = ACTIVE;
-                    c.waveTicks = 200;
+                    c.waveTicks = EXP ? 20 * 60 : 200;
                     c.started = w.getTotalWorldTime();
                 }
             } else if (c.state == ACTIVE) {
@@ -247,6 +278,10 @@ final class Demo {
                 if (c.mobs.isEmpty()) {
                     c.state = CLAIMABLE;
                 } else if (--c.waveTicks <= 0) {
+                    for (EntityArmorStand t : c.tags.values()) {
+                        t.setDead();
+                    }
+                    c.tags.clear();
                     for (EntityLiving m : c.mobs) {
                         if (m.ridingEntity != null) {
                             m.ridingEntity.setDead();
@@ -263,9 +298,36 @@ final class Demo {
             } else {
                 name = "§aClick here to claim the rewards!";
             }
-            if (!name.equals(c.shown)) {
+            String sub = null;
+            if (EXP) {
+                if (c.state == ACTIVE) {
+                    name = "§c§lWAVE IN PROGRESS";
+                    sub = "§7Kill the creatures to get the rewards!";
+                } else if (c.state == CLAIMABLE) {
+                    name = "§a§lWAVE DEFEATED";
+                    sub = "§eClick here to claim the rewards!";
+                } else {
+                    sub = name;
+                    name = "§a§lWAVE DEFEATED";
+                }
+                for (java.util.Iterator<java.util.Map.Entry<EntityLiving, EntityArmorStand>> it = c.tags.entrySet().iterator(); it.hasNext();) {
+                    java.util.Map.Entry<EntityLiving, EntityArmorStand> en = it.next();
+                    EntityLiving m = en.getKey();
+                    if (m.isDead || m.getHealth() <= 0) {
+                        en.getValue().setDead();
+                        it.remove();
+                    } else {
+                        en.getValue().setPositionAndUpdate(m.posX, m.posY + m.height + 0.3, m.posZ);
+                        en.getValue().setCustomNameTag("§c" + (int) Math.ceil(m.getHealth()) + " §4\u2764");
+                    }
+                }
+            }
+            if (!(name + sub).equals(c.shown)) {
                 c.holo.setCustomNameTag(name);
-                c.shown = name;
+                if (c.holo2 != null && sub != null) {
+                    c.holo2.setCustomNameTag(sub);
+                }
+                c.shown = name + sub;
             }
         }
     }
@@ -289,6 +351,10 @@ final class Demo {
     }
 
     private void spawn(WorldServer w, Chest c) {
+        if (EXP) {
+            spawnExp(w, c);
+            return;
+        }
         double cx = c.pos.getX() + 0.5, cz = c.pos.getZ() + 0.5;
         int y = c.pos.getY();
         for (int i = 0; i < 5; i++) {
@@ -320,6 +386,40 @@ final class Demo {
                 m = zo;
             }
             c.mobs.add(m);
+        }
+    }
+
+    private void spawnExp(WorldServer w, Chest c) {
+        double cx = c.pos.getX() + 0.5, cz = c.pos.getZ() + 0.5;
+        int y = c.pos.getY();
+        for (int i = 0; i < 5; i++) {
+            double a = i * Math.PI * 2 / 5, x = cx + 2.5 * Math.cos(a), z = cz + 2.5 * Math.sin(a);
+            EntityLiving m;
+            if (i < 3) {
+                EntitySkeleton sk = new EntitySkeleton(w);
+                sk.setCurrentItemOrArmor(0, new net.minecraft.item.ItemStack(net.minecraft.init.Items.stone_sword));
+                sk.setCurrentItemOrArmor(4, new net.minecraft.item.ItemStack(net.minecraft.init.Items.skull, 1, 3));
+                sk.setCurrentItemOrArmor(3, new net.minecraft.item.ItemStack(net.minecraft.init.Items.iron_chestplate));
+                sk.setCurrentItemOrArmor(2, new net.minecraft.item.ItemStack(net.minecraft.init.Items.iron_leggings));
+                sk.setCurrentItemOrArmor(1, new net.minecraft.item.ItemStack(net.minecraft.init.Items.iron_boots));
+                m = sk;
+            } else {
+                net.minecraft.entity.passive.EntityWolf wo = new net.minecraft.entity.passive.EntityWolf(w);
+                wo.setAngry(true);
+                m = wo;
+            }
+            m.setLocationAndAngles(x, y, z, 0, 0);
+            m.getEntityAttribute(SharedMonsterAttributes.maxHealth).setBaseValue(200);
+            m.setHealth(50);
+            w.spawnEntityInWorld(m);
+            if (m instanceof net.minecraft.entity.passive.EntityWolf) {
+                List<?> ps = w.playerEntities;
+                if (!ps.isEmpty()) {
+                    m.setAttackTarget((EntityPlayer) ps.get(0));
+                }
+            }
+            c.mobs.add(m);
+            c.tags.put(m, stand(w, x, y + m.height + 0.3, z, "§c50 §4\u2764"));
         }
     }
 }

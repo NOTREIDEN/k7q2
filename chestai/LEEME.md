@@ -28,7 +28,9 @@ Toma como cofre de farmeo todo cofre que tenga encima un holograma (armor stand 
 - Un mensaje en rojo: hay una oleada en curso.
 - "Next Wave: 2 minutes 5 seconds", "45 seconds" o "1:30": el tiempo para la próxima oleada.
 
-Recuerda cada cofre que ve, sin límite de cantidad, y el último tiempo que mostró su holograma, que sigue descontando aunque lo pierda de vista. El mapa puede ser de cualquier tamaño: un cofre a más de 150 bloques lo ve en su dirección real pero a 150 bloques, que es lo más lejos que vio en el entrenamiento. En cada momento elige entre los 8 cofres más cercanos que recuerda. El terreno lo lee en vivo alrededor suyo. Guarda las posiciones por servidor en `config/chestai/cofres-<servidor>.txt`, así que la próxima vez ya sabe dónde están.
+Recuerda cada cofre que ve, sin límite de cantidad, y el último tiempo que mostró su holograma, que sigue descontando aunque lo pierda de vista. El mapa puede ser de cualquier tamaño: un cofre a más de 150 bloques lo ve en su dirección real pero a 150 bloques, que es lo más lejos que vio en el entrenamiento. En cada momento elige entre los 8 cofres más cercanos que recuerda. El terreno lo lee en vivo alrededor suyo. Guarda las posiciones por servidor en `config/chestai/cofres2-<servidor>.txt`, así que la próxima vez ya sabe dónde están. Solo anota un cofre cuando su holograma dice algo de una oleada (wave, claim, rewards o el texto de `texto_claim`) y está quieto; los nombres que van sobre los mobs y los carteles de NPCs no cuentan.
+
+La pelea, la espera y el reclamo van siempre igual: con un mob a menos de 8 bloques gira la mira de a poco hacia él (como mucho 10° por tick), camina hacia él y pega solo cuando está a tiro, sin saltar para críticos. Al lado de un cofre cuya oleada falta poco (hasta 90 s) se queda quieto esperando. Un cofre para reclamar a menos de 6 bloques lo mira y le hace clic. Las perlas son solo para ir lejos: nunca con mobs cerca, al lado de un cofre ni mirando al piso.
 
 ## Ajustes
 

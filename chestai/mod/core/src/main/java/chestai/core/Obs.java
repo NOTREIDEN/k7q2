@@ -212,7 +212,8 @@ public final class Obs {
             put(lv[1] * 4.0);
             put(lv[2] * 4.0);
             put((double) (mob.hp / Math.max(mob.maxHp, 1.0f)));
-            put(mob.hp / 40.0);
+            // The simulator's mobs have at most 40 health: a tougher one reads as that, by its share left.
+            put(mob.maxHp > 40.0f ? mob.hp / mob.maxHp : mob.hp / 40.0);
             for (int kk = 0; kk < MOB_KINDS; kk++) {
                 put(b(mob.kind == kk));
             }
