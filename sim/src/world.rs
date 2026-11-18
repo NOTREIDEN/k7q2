@@ -1,4 +1,6 @@
-//! The arena: a flat floor of full blocks with optional full-height walls.
+//! The arena: a flat floor of full blocks with optional full-height walls,
+//! and on top of it, for some duels, terrain: steps, slabs, pillars,
+//! builds, pits and drops into the void (`Terrain`).
 //!
 //! Movement collides against one box per block, found the way
 //! `World.getCollidingBoundingBoxes` finds them. Merging blocks into larger
@@ -10,6 +12,7 @@
 use crate::aabb::{dist_sq, Aabb, V3};
 use crate::mth::floor_d;
 use std::collections::HashSet;
+use std::sync::Arc;
 
 #[derive(Clone, Debug)]
 pub struct World {
@@ -19,8 +22,137 @@ pub struct World {
     half_i: i32,
     top_i: i32,
     walls: bool,
+    /// The top of the highest block on the floor: the floor itself when
+    /// there is no terrain.
+    terrain_top: f64,
     /// Single full cubes placed on top of the floor (parity scenarios).
     extra: HashSet<[i32; 3]>,
+    /// What stands on the floor and what is dug out of it, inside the walls.
+    terrain: Option<Arc<Terrain>>,
+    /// Below this height a player has fallen out of the world.
+    pub void_y: f64,
+}
+
+/// What a block of terrain is.
+pub const AIR: u8 = 0;
+pub const FULL: u8 = 1;
+/// A bottom slab: a block with half the height.
+pub const SLAB: u8 = 2;
+
+/// How far below the floor a pit can reach and how high terrain can stand.
+pub const TERRAIN_BELOW: i32 = 6;
+pub const TERRAIN_ABOVE: i32 = 8;
+/// A player this far below the floor has fallen out of the world.
+pub const VOID_DEPTH: f64 = 12.0;
+
+/// The blocks of a box of the world, from `TERRAIN_BELOW` levels under the
+/// floor to `TERRAIN_ABOVE` over it. Under the box a column is solid down
+/// to the bottom of the world unless it is open to the void.
+#[derive(Clone, Debug)]
+pub struct Terrain {
+    pub x0: i32,
+    pub y0: i32,
+    pub z0: i32,
+    pub nx: i32,
+    pub ny: i32,
+    pub nz: i32,
+    pub cells: Vec<u8>,
+    pub void: Vec<bool>,
+}
+
+impl Terrain {
+    /// The floor of the arena with nothing on it: solid below `floor_i`.
+    pub fn flat(x0: i32, z0: i32, nx: i32, nz: i32, floor_i: i32) -> Terrain {
+        let (y0, ny) = (floor_i - TERRAIN_BELOW, TERRAIN_BELOW + TERRAIN_ABOVE);
+        let mut cells = vec![AIR; (nx * nz * ny) as usize];
+        for x in 0..nx {
+            for z in 0..nz {
+                for y in 0..TERRAIN_BELOW {
+                    cells[((x * nz + z) * ny + y) as usize] = FULL;
+                }
+            }
+        }
+        Terrain { x0, y0, z0, nx, ny, nz, cells, void: vec![false; (nx * nz) as usize] }
+    }
+
+    #[inline]
+    fn column(&self, x: i32, z: i32) -> Option<usize> {
+        let (i, k) = (x - self.x0, z - self.z0);
+        if i < 0 || k < 0 || i >= self.nx || k >= self.nz {
+            return None;
+        }
+        Some((i * self.nz + k) as usize)
+    }
+
+    /// The block at these coordinates, or None outside the box's columns
+    /// or above it.
+    #[inline]
+    pub fn get(&self, x: i32, y: i32, z: i32) -> Option<u8> {
+        let c = self.column(x, z)?;
+        let j = y - self.y0;
+        if j < 0 {
+            return Some(if self.void[c] { AIR } else { FULL });
+        }
+        if j >= self.ny {
+            return None;
+        }
+        Some(self.cells[c * self.ny as usize + j as usize])
+    }
+
+    /// Sets a block inside the box; outside it nothing happens.
+    pub fn set(&mut self, x: i32, y: i32, z: i32, b: u8) {
+        if let Some(c) = self.column(x, z) {
+            let j = y - self.y0;
+            if j >= 0 && j < self.ny {
+                self.cells[c * self.ny as usize + j as usize] = b;
+            }
+        }
+    }
+
+    /// Opens a column to the void: nothing under the floor any more.
+    pub fn dig_void(&mut self, x: i32, z: i32) {
+        if let Some(c) = self.column(x, z) {
+            self.void[c] = true;
+            for j in 0..self.ny as usize {
+                self.cells[c * self.ny as usize + j] = AIR;
+            }
+        }
+    }
+
+    /// The floor again in a column: solid under `floor`, air from there up.
+    pub fn fill_floor(&mut self, x: i32, z: i32, floor: i32) {
+        if let Some(c) = self.column(x, z) {
+            self.void[c] = false;
+            for j in 0..self.ny {
+                self.cells[c * self.ny as usize + j as usize] = if self.y0 + j < floor { FULL } else { AIR };
+            }
+        }
+    }
+
+    /// The highest top of a block in the box, as a height.
+    pub fn top(&self) -> f64 {
+        let mut best = f64::NEG_INFINITY;
+        for c in 0..(self.nx * self.nz) as usize {
+            for j in (0..self.ny as usize).rev() {
+                let b = self.cells[c * self.ny as usize + j];
+                if b != AIR {
+                    best = best.max((self.y0 + j as i32) as f64 + height(b));
+                    break;
+                }
+            }
+        }
+        best
+    }
+}
+
+/// The height of a block's box within its cell.
+#[inline]
+pub fn height(b: u8) -> f64 {
+    match b {
+        AIR => 0.0,
+        SLAB => 0.5,
+        _ => 1.0,
+    }
 }
 
 /// Result of `World.rayTraceBlocks`.
@@ -44,7 +176,53 @@ impl World {
         let (floor_y, half) = (floor_i as f64, half_i as f64);
         // Higher than an ender pearl can be thrown.
         let top_i = floor_i + 64;
-        World { floor_y, half, floor_i, half_i, top_i, walls, extra: HashSet::new() }
+        World {
+            floor_y,
+            half,
+            floor_i,
+            half_i,
+            top_i,
+            walls,
+            extra: HashSet::new(),
+            terrain: None,
+            void_y: f64::NEG_INFINITY,
+            terrain_top: floor_y,
+        }
+    }
+
+    /// An empty terrain box over the inside of this arena, to build on.
+    pub fn blank_terrain(&self) -> Terrain {
+        Terrain::flat(-self.half_i, -self.half_i, 2 * self.half_i, 2 * self.half_i, self.floor_i)
+    }
+
+    /// Puts terrain into the arena.
+    pub fn set_terrain(&mut self, t: Terrain) {
+        self.terrain_top = t.top().max(self.floor_y);
+        self.void_y = if t.void.iter().any(|&v| v) { self.floor_y - VOID_DEPTH } else { f64::NEG_INFINITY };
+        self.terrain = Some(Arc::new(t));
+    }
+
+    pub fn terrain(&self) -> Option<&Terrain> {
+        self.terrain.as_deref()
+    }
+
+    /// What the block at these block coordinates is: air, a full cube or
+    /// a slab.
+    #[inline]
+    pub fn block(&self, x: i32, y: i32, z: i32) -> u8 {
+        if let Some(t) = &self.terrain {
+            if let Some(b) = t.get(x, y, z) {
+                return b;
+            }
+        }
+        self.base_solid(x, y, z) as u8
+    }
+
+    /// The top of the box of the block at these coordinates, above its
+    /// bottom: 0 for air.
+    #[inline]
+    pub fn block_height(&self, x: i32, y: i32, z: i32) -> f64 {
+        height(self.block(x, y, z))
     }
 
     /// A flat floor with single full cubes at the given block coordinates.
@@ -58,6 +236,14 @@ impl World {
     /// Is the block at these block coordinates a full solid cube?
     #[inline]
     pub fn solid(&self, x: i32, y: i32, z: i32) -> bool {
+        if self.terrain.is_some() {
+            return self.block(x, y, z) == FULL;
+        }
+        self.base_solid(x, y, z)
+    }
+
+    #[inline]
+    fn base_solid(&self, x: i32, y: i32, z: i32) -> bool {
         if y < self.floor_i {
             return true;
         }
@@ -76,7 +262,7 @@ impl World {
             return false;
         }
         let open = |p: &V3| {
-            p[1] >= self.floor_y
+            p[1] >= self.terrain_top
                 && (!self.walls
                     || (p[1] < self.top_i as f64 && p[0] >= -self.half && p[0] < self.half && p[2] >= -self.half && p[2] < self.half))
         };
@@ -92,9 +278,10 @@ impl World {
         for x in i..j {
             for z in i1..j1 {
                 for y in (k - 1)..l {
-                    if self.solid(x, y, z) {
+                    let h = self.block_height(x, y, z);
+                    if h > 0.0 {
                         let lo = [x as f64, y as f64, z as f64];
-                        let b = Aabb::new(lo, [lo[0] + 1.0, lo[1] + 1.0, lo[2] + 1.0]);
+                        let b = Aabb::new(lo, [lo[0] + 1.0, lo[1] + h, lo[2] + 1.0]);
                         if bb.intersects(&b) {
                             out.push(b);
                         }
@@ -112,9 +299,10 @@ impl World {
         for x in i..j {
             for z in i1..j1 {
                 for y in (k - 1)..l {
-                    if self.solid(x, y, z) {
+                    let h = self.block_height(x, y, z);
+                    if h > 0.0 {
                         let lo = [x as f64, y as f64, z as f64];
-                        if bb.intersects(&Aabb::new(lo, [lo[0] + 1.0, lo[1] + 1.0, lo[2] + 1.0])) {
+                        if bb.intersects(&Aabb::new(lo, [lo[0] + 1.0, lo[1] + h, lo[2] + 1.0])) {
                             return true;
                         }
                     }
@@ -139,8 +327,10 @@ impl World {
         }
     }
 
-    /// `Block.collisionRayTrace` for a full cube at block (x, y, z).
-    fn cube_trace(pos: [i32; 3], start: V3, end: V3) -> Option<V3> {
+    /// `Block.collisionRayTrace` for a block at (x, y, z) whose box is
+    /// `top` high (a full cube or a slab).
+    fn cube_trace(pos: [i32; 3], top: f64, start: V3, end: V3) -> Option<V3> {
+        let hi = [1.0, top, 1.0];
         let off = [-(pos[0] as f64), -(pos[1] as f64), -(pos[2] as f64)];
         let s = [start[0] + off[0], start[1] + off[1], start[2] + off[2]];
         let e = [end[0] + off[0], end[1] + off[1], end[2] + off[2]];
@@ -151,9 +341,9 @@ impl World {
                 1 => (0, 2),
                 _ => (0, 1),
             };
-            for value in [0.0, 1.0] {
+            for value in [0.0, hi[axis]] {
                 if let Some(p) = Self::intermediate(s, e, axis, value) {
-                    if p[u] >= 0.0 && p[u] <= 1.0 && p[w] >= 0.0 && p[w] <= 1.0 {
+                    if p[u] >= 0.0 && p[u] <= hi[u] && p[w] >= 0.0 && p[w] <= hi[w] {
                         let better = match best {
                             None => true,
                             Some(b) => dist_sq(s, p) < dist_sq(s, b),
@@ -172,8 +362,9 @@ impl World {
     pub fn ray_trace_blocks(&self, mut a: V3, b: V3, return_last: bool) -> RayHit {
         let (i, j, k) = (floor_d(b[0]), floor_d(b[1]), floor_d(b[2]));
         let (mut l, mut i1, mut j1) = (floor_d(a[0]), floor_d(a[1]), floor_d(a[2]));
-        if self.solid(l, i1, j1) {
-            if let Some(h) = Self::cube_trace([l, i1, j1], a, b) {
+        let top = self.block_height(l, i1, j1);
+        if top > 0.0 {
+            if let Some(h) = Self::cube_trace([l, i1, j1], top, a, b) {
                 return RayHit::Block(h);
             }
         }
@@ -252,8 +443,9 @@ impl World {
             l = floor_d(a[0]) - east as i32;
             i1 = floor_d(a[1]) - up as i32;
             j1 = floor_d(a[2]) - south as i32;
-            if self.solid(l, i1, j1) {
-                if let Some(h) = Self::cube_trace([l, i1, j1], a, b) {
+            let top = self.block_height(l, i1, j1);
+            if top > 0.0 {
+                if let Some(h) = Self::cube_trace([l, i1, j1], top, a, b) {
                     return RayHit::Block(h);
                 }
             } else {

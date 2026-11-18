@@ -7,4 +7,11 @@ public interface Blocks {
      * line from a to b first meets a block, or null if it meets none.
      */
     double[] rayTrace(double[] a, double[] b);
+
+    /**
+     * How high the box a player collides with in the block at (x, y, z)
+     * reaches above the block's bottom: 0 for air and for what is walked
+     * through, 1 for a full block, 0.5 for a slab.
+     */
+    double height(int x, int y, int z);
 }

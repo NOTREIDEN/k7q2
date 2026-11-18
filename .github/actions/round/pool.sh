@@ -11,6 +11,17 @@ for n in $names; do
     git cat-file blob "FETCH_HEAD:pool/$n" > "share/pool.tmp/$n" && mv -f "share/pool.tmp/$n" "share/pool/$n"
   fi
 done
+# The newest exploiter (branch "exploit", see exploit.yml) plays in the
+# league too, as exploit.pt: a new version of it starts with a clean record.
+if git fetch -q --depth 1 origin exploit 2>/dev/null; then
+  blob=$(git rev-parse FETCH_HEAD:latest.pt 2>/dev/null || true)
+  if [ -n "$blob" ] && [ "$blob" != "$(cat share/exploit.blob 2>/dev/null)" ]; then
+    git cat-file blob "$blob" > share/pool.tmp/exploit.pt && mv -f share/pool.tmp/exploit.pt share/pool/exploit.pt \
+      && echo "$blob" > share/exploit.blob
+  fi
+  names="$names
+exploit.pt"
+fi
 for f in share/pool/*.pt; do
   [ -e "$f" ] || continue
   echo "$names" | grep -qxF "$(basename "$f")" || rm -f "$f"

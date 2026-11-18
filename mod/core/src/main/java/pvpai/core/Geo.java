@@ -34,6 +34,12 @@ public final strictfp class Geo {
         return a;
     }
 
+    /** {@code MathHelper.floor_double}. */
+    public static int floor(double v) {
+        int i = (int) v;
+        return v < (double) i ? i - 1 : i;
+    }
+
     static double clamp(double v, double lo, double hi) {
         return v < lo ? lo : v > hi ? hi : v;
     }

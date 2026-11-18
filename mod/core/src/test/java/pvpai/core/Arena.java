@@ -2,13 +2,20 @@ package pvpai.core;
 
 /**
  * The arena of the training simulator: a flat floor of full blocks with
- * optional walls, and the game's own walk of a line through the block grid
- * ({@code World.rayTraceBlocks}). In the game the world itself answers.
+ * optional walls and terrain on it (full blocks and slabs, pits and
+ * columns open to the void), and the game's own walk of a line through the
+ * block grid ({@code World.rayTraceBlocks}). In the game the world itself
+ * answers.
  */
 public final strictfp class Arena implements Blocks {
     private final double floorY, half;
     private final int floorI, halfI, topI;
     private final boolean walls;
+    /** The terrain's box: its corner and sizes, its blocks (0 air, 1 full, 2 slab) and its void columns. */
+    private int x0, y0, z0, nx, ny, nz;
+    private byte[] cells;
+    private boolean[] voids;
+    private double top;
 
     public Arena(double floorY, double half, boolean walls) {
         floorI = (int) Math.floor(floorY + 0.5);
@@ -17,17 +24,65 @@ public final strictfp class Arena implements Blocks {
         this.half = halfI;
         topI = floorI + 64;
         this.walls = walls;
+        top = this.floorY;
     }
 
-    private boolean solid(int x, int y, int z) {
+    /** Puts terrain in: the corner and sizes of its box, its blocks (x, then z, then y) and its void columns. */
+    public void terrain(int[] box, byte[] cells, boolean[] voids) {
+        x0 = box[0];
+        y0 = box[1];
+        z0 = box[2];
+        nx = box[3];
+        ny = box[4];
+        nz = box[5];
+        this.cells = cells;
+        this.voids = voids;
+        double t = floorY;
+        for (int c = 0; c < nx * nz; c++) {
+            for (int j = ny - 1; j >= 0; j--) {
+                if (cells[c * ny + j] != 0) {
+                    t = Math.max(t, (double) (y0 + j) + height(cells[c * ny + j]));
+                    break;
+                }
+            }
+        }
+        top = t;
+    }
+
+    private static double height(int b) {
+        return b == 0 ? 0.0 : b == 2 ? 0.5 : 1.0;
+    }
+
+    private boolean baseSolid(int x, int y, int z) {
         if (y < floorI) {
             return true;
         }
         return walls && y < topI && (x >= halfI || x < -halfI || z >= halfI || z < -halfI);
     }
 
+    private int block(int x, int y, int z) {
+        if (cells != null) {
+            int i = x - x0, k = z - z0;
+            if (i >= 0 && k >= 0 && i < nx && k < nz) {
+                int c = i * nz + k, j = y - y0;
+                if (j < 0) {
+                    return voids[c] ? 0 : 1;
+                }
+                if (j < ny) {
+                    return cells[c * ny + j];
+                }
+            }
+        }
+        return baseSolid(x, y, z) ? 1 : 0;
+    }
+
+    @Override
+    public double height(int x, int y, int z) {
+        return height(block(x, y, z));
+    }
+
     private boolean open(double[] p) {
-        return p[1] >= floorY && (!walls || (p[1] < (double) topI && p[0] >= -half && p[0] < half && p[2] >= -half && p[2] < half));
+        return p[1] >= top && (!walls || (p[1] < (double) topI && p[0] >= -half && p[0] < half && p[2] >= -half && p[2] < half));
     }
 
     private static int floor(double v) {
@@ -47,16 +102,17 @@ public final strictfp class Arena implements Blocks {
         return null;
     }
 
-    /** {@code Block.collisionRayTrace} for a full cube. */
-    private static double[] cubeTrace(int x, int y, int z, double[] start, double[] end) {
+    /** {@code Block.collisionRayTrace} for a full cube or a slab, {@code top} high. */
+    private static double[] cubeTrace(int x, int y, int z, double top, double[] start, double[] end) {
         double[] s = {start[0] - x, start[1] - y, start[2] - z};
         double[] e = {end[0] - x, end[1] - y, end[2] - z};
+        double[] hi = {1.0, top, 1.0};
         double[] best = null;
         for (int axis = 0; axis < 3; axis++) {
             int u = axis == 0 ? 1 : 0, w = axis == 2 ? 1 : 2;
             for (int side = 0; side < 2; side++) {
-                double[] p = intermediate(s, e, axis, (double) side);
-                if (p != null && p[u] >= 0.0 && p[u] <= 1.0 && p[w] >= 0.0 && p[w] <= 1.0) {
+                double[] p = intermediate(s, e, axis, side == 0 ? 0.0 : hi[axis]);
+                if (p != null && p[u] >= 0.0 && p[u] <= hi[u] && p[w] >= 0.0 && p[w] <= hi[w]) {
                     if (best == null || Geo.distSq(s, p) < Geo.distSq(s, best)) {
                         best = p;
                     }
@@ -74,8 +130,9 @@ public final strictfp class Arena implements Blocks {
         double[] a = from.clone();
         int i = floor(b[0]), j = floor(b[1]), k = floor(b[2]);
         int l = floor(a[0]), i1 = floor(a[1]), j1 = floor(a[2]);
-        if (solid(l, i1, j1)) {
-            double[] h = cubeTrace(l, i1, j1, a, b);
+        double t0 = height(l, i1, j1);
+        if (t0 > 0.0) {
+            double[] h = cubeTrace(l, i1, j1, t0, a, b);
             if (h != null) {
                 return h;
             }
@@ -141,8 +198,9 @@ public final strictfp class Arena implements Blocks {
             l = floor(a[0]) - east;
             i1 = floor(a[1]) - up;
             j1 = floor(a[2]) - south;
-            if (solid(l, i1, j1)) {
-                double[] h = cubeTrace(l, i1, j1, a, b);
+            double t = height(l, i1, j1);
+            if (t > 0.0) {
+                double[] h = cubeTrace(l, i1, j1, t, a, b);
                 if (h != null) {
                     return h;
                 }

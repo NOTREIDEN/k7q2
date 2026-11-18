@@ -476,6 +476,64 @@ fn pearl_target(c: &Client, world: &World, p: &BotParams, st: &BotState, hdist: 
 }
 
 pub fn act(c: &Client, world: &World, cfg: &ClientCfg, p: &BotParams, st: &mut BotState, rng: &mut Rng) -> Input {
+    let mut inp = act_flat(c, world, cfg, p, st, rng);
+    if world.terrain().is_some() && p.level >= 2 {
+        terrain_guard(c, world, &mut inp);
+    }
+    inp
+}
+
+/// How a bot gets about on terrain, on top of what it does on a flat
+/// floor: it jumps onto a block in its way, goes around a wall it cannot
+/// jump and does not walk into a drop it could not get out of (unless the
+/// other player is down there).
+fn terrain_guard(c: &Client, world: &World, inp: &mut Input) {
+    use crate::agent::ground;
+    let b = &c.lp.l.body;
+    if !b.on_ground || (inp.forward == 0 && inp.strafe == 0) {
+        return;
+    }
+    let (s, co) = (c.lp.l.yaw as f64).to_radians().sin_cos();
+    // Where the keys move it: forward is (-sin, cos), left is (cos, sin).
+    let dir = |fw: f64, left: f64| -> [f64; 2] {
+        let v = [left * co - fw * s, fw * co + left * s];
+        let n = v[0].hypot(v[1]).max(1e-9);
+        [v[0] / n, v[1] / n]
+    };
+    let ahead = |d: [f64; 2], k: f64| -> f64 {
+        ground(world, mth::floor_d(b.pos[0] + d[0] * k), mth::floor_d(b.pos[2] + d[1] * k), b.pos[1])
+    };
+    let worst = |d: [f64; 2]| -> (f64, f64) {
+        let (a, f) = (ahead(d, 0.7), ahead(d, 1.4));
+        (a.min(f), a.max(f))
+    };
+    let rel_y = c.rp.pos[1] - b.pos[1];
+    let d = dir(inp.forward as f64, inp.strafe as f64);
+    let (low, high) = worst(d);
+    let drop = low <= -2.0 && !(rel_y < -1.5 && low > crate::agent::NO_GROUND);
+    if high > 0.6 && high <= 1.25 && !drop {
+        // A block to get up onto.
+        inp.jump = true;
+        return;
+    }
+    if drop || high > 1.25 {
+        // A drop or a wall: the way to one side or the other that is
+        // open, the one nearer the way it wanted to go first.
+        for (fw, left) in [(inp.forward as f64, 1.0), (inp.forward as f64, -1.0), (0.0, 1.0), (0.0, -1.0), (-1.0, 0.0)] {
+            let (l, h) = worst(dir(fw, left));
+            if l > -2.0 && h <= 1.25 {
+                inp.forward = fw as i8;
+                inp.strafe = left as i8;
+                inp.jump = h > 0.6;
+                return;
+            }
+        }
+        inp.forward = 0;
+        inp.strafe = 0;
+    }
+}
+
+fn act_flat(c: &Client, world: &World, cfg: &ClientCfg, p: &BotParams, st: &mut BotState, rng: &mut Rng) -> Input {
     let mut inp = Input::default();
     let deg_per_count = cfg.mouse_f1 as f64 * 0.15;
     if p.level == 0 {

@@ -13,6 +13,12 @@ inputs:
   snapshot-every:
     description: See ../round
     default: "0"
+  branch:
+    description: See ../round
+    default: weights
+  opponent:
+    description: See ../round
+    default: pool
 runs:
   using: composite
   steps:
@@ -22,69 +28,93 @@ runs:
         machines: ${{ inputs.machines }}
         round-minutes: ${{ inputs.round-minutes }}
         snapshot-every: ${{ inputs.snapshot-every }}
+        branch: ${{ inputs.branch }}
+        opponent: ${{ inputs.opponent }}
     - uses: ./.github/actions/round
       with:
         machine: ${{ inputs.machine }}
         machines: ${{ inputs.machines }}
         round-minutes: ${{ inputs.round-minutes }}
         snapshot-every: ${{ inputs.snapshot-every }}
+        branch: ${{ inputs.branch }}
+        opponent: ${{ inputs.opponent }}
     - uses: ./.github/actions/round
       with:
         machine: ${{ inputs.machine }}
         machines: ${{ inputs.machines }}
         round-minutes: ${{ inputs.round-minutes }}
         snapshot-every: ${{ inputs.snapshot-every }}
+        branch: ${{ inputs.branch }}
+        opponent: ${{ inputs.opponent }}
     - uses: ./.github/actions/round
       with:
         machine: ${{ inputs.machine }}
         machines: ${{ inputs.machines }}
         round-minutes: ${{ inputs.round-minutes }}
         snapshot-every: ${{ inputs.snapshot-every }}
+        branch: ${{ inputs.branch }}
+        opponent: ${{ inputs.opponent }}
     - uses: ./.github/actions/round
       with:
         machine: ${{ inputs.machine }}
         machines: ${{ inputs.machines }}
         round-minutes: ${{ inputs.round-minutes }}
         snapshot-every: ${{ inputs.snapshot-every }}
+        branch: ${{ inputs.branch }}
+        opponent: ${{ inputs.opponent }}
     - uses: ./.github/actions/round
       with:
         machine: ${{ inputs.machine }}
         machines: ${{ inputs.machines }}
         round-minutes: ${{ inputs.round-minutes }}
         snapshot-every: ${{ inputs.snapshot-every }}
+        branch: ${{ inputs.branch }}
+        opponent: ${{ inputs.opponent }}
     - uses: ./.github/actions/round
       with:
         machine: ${{ inputs.machine }}
         machines: ${{ inputs.machines }}
         round-minutes: ${{ inputs.round-minutes }}
         snapshot-every: ${{ inputs.snapshot-every }}
+        branch: ${{ inputs.branch }}
+        opponent: ${{ inputs.opponent }}
     - uses: ./.github/actions/round
       with:
         machine: ${{ inputs.machine }}
         machines: ${{ inputs.machines }}
         round-minutes: ${{ inputs.round-minutes }}
         snapshot-every: ${{ inputs.snapshot-every }}
+        branch: ${{ inputs.branch }}
+        opponent: ${{ inputs.opponent }}
     - uses: ./.github/actions/round
       with:
         machine: ${{ inputs.machine }}
         machines: ${{ inputs.machines }}
         round-minutes: ${{ inputs.round-minutes }}
         snapshot-every: ${{ inputs.snapshot-every }}
+        branch: ${{ inputs.branch }}
+        opponent: ${{ inputs.opponent }}
     - uses: ./.github/actions/round
       with:
         machine: ${{ inputs.machine }}
         machines: ${{ inputs.machines }}
         round-minutes: ${{ inputs.round-minutes }}
         snapshot-every: ${{ inputs.snapshot-every }}
+        branch: ${{ inputs.branch }}
+        opponent: ${{ inputs.opponent }}
     - uses: ./.github/actions/round
       with:
         machine: ${{ inputs.machine }}
         machines: ${{ inputs.machines }}
         round-minutes: ${{ inputs.round-minutes }}
         snapshot-every: ${{ inputs.snapshot-every }}
+        branch: ${{ inputs.branch }}
+        opponent: ${{ inputs.opponent }}
     - uses: ./.github/actions/round
       with:
         machine: ${{ inputs.machine }}
         machines: ${{ inputs.machines }}
         round-minutes: ${{ inputs.round-minutes }}
         snapshot-every: ${{ inputs.snapshot-every }}
+        branch: ${{ inputs.branch }}
+        opponent: ${{ inputs.opponent }}

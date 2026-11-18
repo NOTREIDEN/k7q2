@@ -35,7 +35,7 @@ pub const FOOD_TO_SPRINT: i32 = 6;
 pub const SHAKE_DEG: f32 = 6.0;
 pub const SHAKE_TICKS: i32 = 2;
 pub const PRIV_DIM: usize = 71;
-pub const STATS_DIM: usize = 94;
+pub const STATS_DIM: usize = 98;
 /// Floats per player and in total written by `Env::write_view`.
 pub const VIEW_PLAYER: usize = 45;
 pub const VIEW_DIM: usize = 2 * VIEW_PLAYER + 24;
@@ -347,7 +347,7 @@ pub struct Params {
     pub w_speed_refill: f32,
     /// Share of the duels against scripted bots fought against the
     /// hardest one: level 4 that presses and pots as the best players do
-    /// (`BotParams::perfect_pot`), on the server itself (0 to 15 ms), with
+    /// (`BotParams::perfect_pot`), on or near the server (0 to 60 ms), with
     /// 3.0 to 3.4 blocks of reach and 0 to 40 % of the knockback.
     pub insane_prob: f64,
     /// Paid, in hits, to the thrower of a pearl that landed when the next
@@ -355,6 +355,11 @@ pub struct Params {
     /// other player's: a pearl is for getting at the other one (at its
     /// potion, out of its combo, on with one's own), not for its own sake.
     pub w_pearl_next: f32,
+    /// Share of duels fought on terrain (`terrain::build`): steps, slabs,
+    /// pillars, walls, platforms, houses, pits and drops into the void.
+    pub terrain_prob: f64,
+    /// How much terrain such a duel has, from 0 to 1.
+    pub terrain_amount: f64,
     /// In self-play, the share of duels in which player 1 goes for the
     /// other player's potions: while that player holds a potion, has one in
     /// the air or is under 12 health, it runs straight at it (`steal_keys`).
@@ -485,6 +490,8 @@ impl Default for Params {
             w_speed_refill: 0.0,
             insane_prob: 0.0,
             w_pearl_next: 0.0,
+            terrain_prob: 0.0,
+            terrain_amount: 0.6,
             league_steal: 0.0,
             throw_carry_prob: 0.0,
             teach: 0.0,
@@ -620,6 +627,8 @@ impl Params {
             127 => self.w_speed_refill = v as f32,
             128 => self.insane_prob = v,
             129 => self.w_pearl_next = v as f32,
+            130 => self.terrain_prob = v,
+            131 => self.terrain_amount = v,
             113 => self.extreme_share = v,
             114 => self.w_shake = v as f32,
             115 => self.pot_strict_prob = v,
@@ -725,6 +734,9 @@ pub struct Stats {
     pub speed_waste: [f64; 2],
     pub inv_hurt: [f64; 2],
     pub pearl_sense: [f64; 2],
+    /// Deaths in the void, and ticks played on terrain (`terrain_prob`).
+    pub void_falls: [f64; 2],
+    pub terrain_ticks: [f64; 2],
 }
 
 impl Stats {
@@ -779,6 +791,8 @@ impl Stats {
             self.speed_waste[a] += o.speed_waste[a];
             self.inv_hurt[a] += o.inv_hurt[a];
             self.pearl_sense[a] += o.pearl_sense[a];
+            self.void_falls[a] += o.void_falls[a];
+            self.terrain_ticks[a] += o.terrain_ticks[a];
         }
     }
     pub fn write(&self, out: &mut [f64]) {
@@ -877,6 +891,10 @@ impl Stats {
             self.inv_hurt[1],
             self.pearl_sense[0],
             self.pearl_sense[1],
+            self.void_falls[0],
+            self.void_falls[1],
+            self.terrain_ticks[0],
+            self.terrain_ticks[1],
         ];
         for (o, x) in out.iter_mut().zip(v.iter()) {
             *o = *x;
@@ -975,7 +993,7 @@ pub fn new_match(p: &Params, rng: &mut Rng, mode: Mode) -> (Match, [f64; 2], Bot
 /// A duel with newly drawn conditions, and the lesson it starts as (0:
 /// none; see `Params::lessons`).
 pub fn new_duel(p: &Params, rng: &mut Rng, mode: Mode) -> (Match, [f64; 2], BotParams, u8) {
-    let world = World::arena(p.floor_y, p.arena_half, p.walls);
+    let mut world = World::arena(p.floor_y, p.arena_half, p.walls);
     let lim = (p.arena_half - 2.0).max(1.0);
     // Drawn only when lessons are on, so that duels without them come out
     // as they always did.
@@ -1049,6 +1067,10 @@ pub fn new_duel(p: &Params, rng: &mut Rng, mode: Mode) -> (Match, [f64; 2], BotP
     } else {
         (yaw_a, yaw_b)
     };
+    // Terrain, drawn only when asked for.
+    if p.terrain_prob > 0.0 && rng.chance(p.terrain_prob) {
+        crate::terrain::build(&mut world, rng, &[a, b], p.terrain_amount);
+    }
     let spawns = [Spawn { pos: a, yaw: yaw_a, pitch: pitch[0] }, Spawn { pos: b, yaw: yaw_b, pitch: pitch[1] }];
     let mut ping = [0.0; 2];
     let mut net = NetCfg { up_us: [0; 2], down_us: [0; 2], jitter_us: [0; 2] };
@@ -1056,8 +1078,8 @@ pub fn new_duel(p: &Params, rng: &mut Rng, mode: Mode) -> (Match, [f64; 2], BotP
         let (lo, hi) = if i == 0 && p.agent_ping_min_ms >= 0.0 {
             (p.agent_ping_min_ms, p.agent_ping_max_ms)
         } else if insane {
-            // A bot on the server itself.
-            (0.0, 15.0)
+            // A bot on the server itself, or a player close to it.
+            (0.0, 60.0)
         } else {
             (p.ping_min_ms, p.ping_max_ms)
         };
@@ -1500,6 +1522,9 @@ impl Env {
                     if dead[a] {
                         self.rew_acc[a] -= self.params.w_win;
                         self.ep.deaths[a] += 1.0;
+                        if self.m.s.p[a].l.body.pos[1] < self.m.world.void_y {
+                            self.ep.void_falls[a] += 1.0;
+                        }
                     } else {
                         self.rew_acc[a] += self.params.w_win;
                     }
@@ -1882,6 +1907,10 @@ impl Env {
                 self.landed = if left > 1 { Some((who, left - 1)) } else { None };
             }
             self.ticks_left -= 1;
+            if self.m.world.terrain().is_some() {
+                self.ep.terrain_ticks[0] += 1.0;
+                self.ep.terrain_ticks[1] += 1.0;
+            }
             if self.over {
                 self.finish_episode(1);
             } else if self.ticks_left <= 0 {

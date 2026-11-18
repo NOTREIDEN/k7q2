@@ -144,7 +144,7 @@ public final class AgentCheck {
     public static void main(String[] args) throws IOException {
         byte[] raw = Files.readAllBytes(Paths.get(args[0]));
         d = ByteBuffer.wrap(raw).order(ByteOrder.LITTLE_ENDIAN).asDoubleBuffer();
-        if (n() != 5050.0 || n() != 3.0) {
+        if (n() != 5050.0 || n() != 4.0) {
             throw new IOException("not a file of duels, or of another format");
         }
         int obsDim = i(), heads = i();
@@ -162,7 +162,7 @@ public final class AgentCheck {
         float[] obs = new float[obsDim];
         int[] action = new int[heads];
         double[] feet = new double[3];
-        int ticks = 0, duels = 0, keysSame = 0, obsSame = 0;
+        int ticks = 0, duels = 0, keysSame = 0, obsSame = 0, terrains = 0;
         long same = 0, close = 0, numbers = 0;
         double worst = 0.0;
         int worstAt = -1, worstTick = -1;
@@ -181,7 +181,24 @@ public final class AgentCheck {
                 double pingOwn = n(), pingOther = n(), cps = n();
                 float mouse = (float) n();
                 v(feet);
-                blocks = new Arena(duel.floorY, duel.arenaHalf, walls);
+                Arena arena = new Arena(duel.floorY, duel.arenaHalf, walls);
+                if (b()) {
+                    int[] box = new int[6];
+                    for (int q = 0; q < 6; q++) {
+                        box[q] = i();
+                    }
+                    byte[] cells = new byte[box[3] * box[4] * box[5]];
+                    for (int q = 0; q < cells.length; q++) {
+                        cells[q] = (byte) i();
+                    }
+                    boolean[] voids = new boolean[box[3] * box[5]];
+                    for (int q = 0; q < voids.length; q++) {
+                        voids[q] = b();
+                    }
+                    arena.terrain(box, cells, voids);
+                    terrains++;
+                }
+                blocks = arena;
                 agent = new Agent(pingOwn, pingOther, cps, mouse, feet);
                 book = new Book(feet);
                 duels++;
@@ -300,7 +317,7 @@ public final class AgentCheck {
             agent.ticked(pressed, duel, feet, consuming, oppUsing && (oppItem == Inv.DRINK || oppItem == Inv.FOOD), threw, threwPotion);
             ticks++;
         }
-        System.out.println(ticks + " ticks of " + duels + " duels: the same counts on " + booksSame + ", the same keys on " + keysSame + ", all " + obsDim + " numbers shown the same on " + obsSame);
+        System.out.println(ticks + " ticks of " + duels + " duels (" + terrains + " on terrain): the same counts on " + booksSame + ", the same keys on " + keysSame + ", all " + obsDim + " numbers shown the same on " + obsSame);
         System.out.println(same + " of " + numbers + " numbers the same to the last bit, " + (numbers - close) + " further off than 0.00001; the largest difference " + worst + " (number " + worstAt + ", tick " + worstTick + ")");
         StringBuilder where = new StringBuilder();
         for (int k = 0; k < obsDim; k++) {

@@ -89,7 +89,47 @@ pub const PITCH_BINS: [i32; 29] = [
     -89, -55, -34, -21, -13, -8, -5, -3, -2, -1, 0, 1, 2, 3, 5, 8, 13, 21, 34, 55, 89, -377, -233, -144, 144, 233, 377, -600, 600,
 ];
 
-pub const OBS_DIM: usize = 154;
+pub const OBS_DIM: usize = 154 + GRID_FWD.len() * GRID_RIGHT.len();
+
+/// The ground around a player, shown as a grid of columns along its view:
+/// blocks forward (negative: behind) and to the right.
+pub const GRID_FWD: [f64; 7] = [-2.0, -1.0, 0.0, 1.0, 2.0, 3.0, 4.0];
+pub const GRID_RIGHT: [f64; 7] = [-3.0, -2.0, -1.0, 0.0, 1.0, 2.0, 3.0];
+/// Where the grid starts in an observation.
+pub const GRID_AT: usize = 154;
+/// What a column with no ground near enough under the feet shows.
+pub const NO_GROUND: f64 = -6.0;
+
+/// Where the ground is in the column of blocks at (x, z) for feet at
+/// height `feet`: the top of the highest block from the level of the head
+/// down to five under the feet, relative to the feet; `NO_GROUND` for none
+/// (a deep pit, the void). 1 is a block to jump onto, 0.5 a slab to walk
+/// onto, 2 a wall.
+pub fn ground(world: &World, x: i32, z: i32, feet: f64) -> f64 {
+    let fy = mth::floor_d(feet);
+    for y in (fy - 5..=fy + 1).rev() {
+        let h = world.block_height(x, y, z);
+        if h > 0.0 {
+            return (y as f64 + h - feet).min(2.0);
+        }
+    }
+    NO_GROUND
+}
+
+/// The grid of `ground` around a player at `pos` looking along `yaw`,
+/// divided by 3, forward row by forward row.
+pub fn ground_grid(world: &World, pos: V3, yaw: f32, o: &mut [f32]) {
+    let (s, c) = (yaw as f64).to_radians().sin_cos();
+    for (i, f) in GRID_FWD.iter().enumerate() {
+        for (j, r) in GRID_RIGHT.iter().enumerate() {
+            // Forward is (-sin, cos), right is (-cos, -sin).
+            let x = pos[0] - s * f - c * r;
+            let z = pos[2] + c * f - s * r;
+            let g = ground(world, mth::floor_d(x), mth::floor_d(z), pos[1]);
+            o[i * GRID_RIGHT.len() + j] = (g / 3.0) as f32;
+        }
+    }
+}
 
 /// How many of its last positions an agent keeps.
 const TRAIL: usize = 16;
@@ -1145,6 +1185,8 @@ impl Agent {
         o[152] = if self.turned > 0 { (TURN_SHOWN + 1 - self.turned) as f32 / TURN_SHOWN as f32 } else { 0.0 };
         // Whether its throws take on its movement: not seen yet, no, yes.
         o[153] = [0.5, 0.0, 1.0][(self.carry + 1) as usize];
+        // The ground around it: steps, walls, pits and drops.
+        ground_grid(world, b.pos, yaw, &mut o[GRID_AT..OBS_DIM]);
     }
 }
 

@@ -1386,6 +1386,11 @@ impl Server {
         if inside_opaque_block(world, self.p[i].l.body.pos) {
             self.attack_entity_from(i, 1.0, Source::Wall, rng, out);
         }
+        // Fallen into the void: a duel server ends the duel there, long
+        // before the game's own floor of the world.
+        if self.p[i].l.body.pos[1] < world.void_y {
+            self.p[i].health = 0.0;
+        }
         {
             let p = &mut self.p[i];
             if p.hurt_time > 0 {

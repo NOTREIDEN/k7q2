@@ -51,7 +51,14 @@ public final strictfp class Agent {
     public static final int[] PITCH_BINS = {
         -89, -55, -34, -21, -13, -8, -5, -3, -2, -1, 0, 1, 2, 3, 5, 8, 13, 21, 34, 55, 89, -377, -233, -144, 144, 233, 377, -600, 600,
     };
-    public static final int OBS_DIM = 154;
+    /** The ground around a player, shown as a grid of columns along its view: blocks forward (negative: behind) and to the right. */
+    public static final double[] GRID_FWD = {-2.0, -1.0, 0.0, 1.0, 2.0, 3.0, 4.0};
+    public static final double[] GRID_RIGHT = {-3.0, -2.0, -1.0, 0.0, 1.0, 2.0, 3.0};
+    /** Where the grid starts in an observation. */
+    public static final int GRID_AT = 154;
+    /** What a column with no ground near enough under the feet shows. */
+    public static final double NO_GROUND = -6.0;
+    public static final int OBS_DIM = GRID_AT + GRID_FWD.length * GRID_RIGHT.length;
     private static final int TRAIL = 16;
     /**
      * A hurt of the other player counts as a hit of this one's for this
@@ -1025,5 +1032,41 @@ public final strictfp class Agent {
         o[152] = turned > 0 ? (float) (TURN_SHOWN + 1 - turned) / (float) TURN_SHOWN : 0.0f;
         // Whether its throws take on its movement: not seen yet, no, yes.
         o[153] = new float[] {0.5f, 0.0f, 1.0f}[carry + 1];
+        // The ground around it: steps, walls, pits and drops.
+        groundGrid(blocks, pos, yaw, o, GRID_AT);
+    }
+
+    /**
+     * Where the ground is in the column of blocks at (x, z) for feet at
+     * height {@code feet}: the top of the highest block from the level of
+     * the head down to five under the feet, relative to the feet;
+     * {@link #NO_GROUND} for none (a deep pit, the void). 1 is a block to
+     * jump onto, 0.5 a slab to walk onto, 2 a wall.
+     */
+    public static double ground(Blocks blocks, int x, int z, double feet) {
+        int fy = Geo.floor(feet);
+        for (int y = fy + 1; y >= fy - 5; y--) {
+            double h = blocks.height(x, y, z);
+            if (h > 0.0) {
+                return Math.min((double) y + h - feet, 2.0);
+            }
+        }
+        return NO_GROUND;
+    }
+
+    /** The grid of {@link #ground} around a player at {@code pos} looking along {@code yaw}, divided by 3, forward row by forward row. */
+    public static void groundGrid(Blocks blocks, double[] pos, float yaw, float[] o, int at) {
+        double r = (double) yaw * (Math.PI / 180.0);
+        double s = Math.sin(r), c = Math.cos(r);
+        for (int i = 0; i < GRID_FWD.length; i++) {
+            for (int j = 0; j < GRID_RIGHT.length; j++) {
+                double f = GRID_FWD[i], rt = GRID_RIGHT[j];
+                // Forward is (-sin, cos), right is (-cos, -sin).
+                double x = pos[0] - s * f - c * rt;
+                double z = pos[2] + c * f - s * rt;
+                double g = ground(blocks, Geo.floor(x), Geo.floor(z), pos[1]);
+                o[at + i * GRID_RIGHT.length + j] = (float) (g / 3.0);
+            }
+        }
     }
 }

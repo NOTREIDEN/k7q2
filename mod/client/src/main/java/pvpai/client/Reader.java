@@ -2,6 +2,7 @@ package pvpai.client;
 
 import java.lang.reflect.Field;
 import java.util.List;
+import net.minecraft.block.state.IBlockState;
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.entity.EntityOtherPlayerMP;
 import net.minecraft.client.entity.EntityPlayerSP;
@@ -20,6 +21,7 @@ import net.minecraft.item.ItemSword;
 import net.minecraft.potion.Potion;
 import net.minecraft.potion.PotionEffect;
 import net.minecraft.util.AxisAlignedBB;
+import net.minecraft.util.BlockPos;
 import net.minecraft.util.MovingObjectPosition;
 import net.minecraft.util.Vec3;
 import pvpai.core.Blocks;
@@ -276,6 +278,17 @@ final class Reader {
             public double[] rayTrace(double[] a, double[] b) {
                 MovingObjectPosition m = mc.theWorld.rayTraceBlocks(new Vec3(a[0], a[1], a[2]), new Vec3(b[0], b[1], b[2]));
                 return m == null ? null : new double[] {m.hitVec.xCoord, m.hitVec.yCoord, m.hitVec.zCoord};
+            }
+
+            public double height(int x, int y, int z) {
+                BlockPos p = new BlockPos(x, y, z);
+                IBlockState st = mc.theWorld.getBlockState(p);
+                AxisAlignedBB bb = st.getBlock().getCollisionBoundingBox(mc.theWorld, p, st);
+                if (bb == null) {
+                    return 0.0;
+                }
+                double h = bb.maxY - (double) y;
+                return h <= 0.0 ? 0.0 : Math.min(h, 1.5);
             }
         };
     }

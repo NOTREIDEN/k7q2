@@ -15,4 +15,5 @@ pub mod net;
 pub mod replay;
 pub mod server;
 pub mod sim;
+pub mod terrain;
 pub mod world;

@@ -20,6 +20,17 @@ inputs:
       every this many rounds (0 for never), and on every machine fetch the
       pool of earlier versions from it
     default: "0"
+  branch:
+    description: >
+      The branch the snapshots go to: "weights" for the main agent, with the
+      pool of its earlier versions; any other holds the network alone
+    default: weights
+  opponent:
+    description: >
+      What the league plays against: "pool", the earlier versions on the
+      branch "weights" (and the newest exploiter), or "main", the main agent
+      as it is on that branch now (for an exploiter)
+    default: pool
 runs:
   using: composite
   steps:
@@ -102,6 +113,7 @@ runs:
         ROUND: ${{ steps.wait.outputs.round }}
         EVERY: ${{ inputs.snapshot-every }}
         ROUND_MINUTES: ${{ inputs.round-minutes }}
+        BRANCH: ${{ inputs.branch }}
       run: |
         # The branch holds one commit: the network the machines stand for
         # right now, and a few lines on how training is going.
@@ -118,6 +130,14 @@ runs:
         } > share/snap/status.txt
         blob=$(git hash-object -w share/snap/latest.pt)
         note=$(git hash-object -w share/snap/status.txt)
+        if [ "$BRANCH" != weights ]; then
+          tree=$(printf '100644 blob %s\tlatest.pt\n100644 blob %s\tstatus.txt\n' "$blob" "$note" | git mktree)
+          commit=$(git -c user.name='github-actions[bot]' \
+            -c user.email='41898282+github-actions[bot]@users.noreply.github.com' \
+            commit-tree "$tree" -m "Weights of run $GITHUB_RUN_ID after round $ROUND")
+          git push --force origin "$commit:refs/heads/$BRANCH"
+          exit 0
+        fi
         # The earlier versions the league plays against travel in the same
         # commit, in the folder "pool"; python/pool.py says which ones stay
         # and whether this network joins them. No such branch yet is fine,
@@ -143,7 +163,12 @@ runs:
       env:
         ROUND: ${{ steps.wait.outputs.round }}
         EVERY: ${{ inputs.snapshot-every }}
+        OPPONENT: ${{ inputs.opponent }}
       run: |
         # Every machine takes the pool as the branch now has it.
         [ $(( ROUND % EVERY )) -eq 0 ] || exit 0
-        bash "$GITHUB_ACTION_PATH/pool.sh"
+        if [ "$OPPONENT" = main ]; then
+          bash "$GITHUB_ACTION_PATH/main_pool.sh"
+        else
+          bash "$GITHUB_ACTION_PATH/pool.sh"
+        fi

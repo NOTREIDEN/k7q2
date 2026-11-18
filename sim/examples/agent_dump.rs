@@ -5,14 +5,16 @@
 //! `cargo run --release --example agent_dump -- OUT.bin [TICKS]`.
 //!
 //! The file is a row of little-endian doubles (every number an agent
-//! handles fits one exactly). It starts with 5050, the format (3), the
+//! handles fits one exactly). It starts with 5050, the format (4), the
 //! sizes of an observation and of an action; then for each tick:
 //!
 //! - 1 and the duel if a new duel starts here, else 0. The duel: half the
 //!   arena, its floor, whether it has walls, whether hits cost health, the
 //!   health of a plain hit, the pearl cooldown, the drink window in
-//!   seconds, the two pings, the click rate, the mouse factor, and where
-//!   the player stands (see `duel`).
+//!   seconds, the two pings, the click rate, the mouse factor, where the
+//!   player stands, and the terrain if there is any: the corner and the
+//!   sizes of its box, every block of it and which columns are open to the
+//!   void (see `duel`).
 //! - The packets the client was handed since its last tick that an agent's
 //!   own counts go by, how many and then each (see `packet`).
 //! - What the client holds when its packets are in and its tick is to come
@@ -32,7 +34,9 @@ use pvpsim::sim::Match;
 use std::io::Write;
 
 /// Parameter numbers of `Params::set` and the values of the training runs.
-const SETTINGS: [(i32, f64); 24] = [
+const SETTINGS: [(i32, f64); 26] = [
+    (130, 0.6),
+    (131, 1.0),
     (125, 0.5),
     (20, 0.7),
     (48, 0.5),
@@ -73,7 +77,7 @@ impl Out {
     }
 }
 
-fn duel(o: &mut Out, d: &Duel, walls: bool, ag: &Agent, ccfg: &ClientCfg, feet: [f64; 3]) {
+fn duel(o: &mut Out, d: &Duel, walls: bool, ag: &Agent, ccfg: &ClientCfg, feet: [f64; 3], world: &pvpsim::world::World) {
     o.n(d.arena_half);
     o.n(d.floor_y);
     o.b(walls);
@@ -86,6 +90,21 @@ fn duel(o: &mut Out, d: &Duel, walls: bool, ag: &Agent, ccfg: &ClientCfg, feet: 
     o.n(ag.cps);
     o.n(ccfg.mouse_f1);
     o.v(feet);
+    match world.terrain() {
+        None => o.b(false),
+        Some(t) => {
+            o.b(true);
+            for v in [t.x0, t.y0, t.z0, t.nx, t.ny, t.nz] {
+                o.n(v);
+            }
+            for &b in &t.cells {
+                o.n(b);
+            }
+            for &v in &t.void {
+                o.b(v);
+            }
+        }
+    }
 }
 
 /// A packet as the agent's counts need it; returns whether it is one of
@@ -283,7 +302,7 @@ fn main() {
     }
     let mut o = Out(Vec::new());
     o.n(5050.0);
-    o.n(3.0);
+    o.n(4.0);
     o.n(OBS_DIM as u32);
     o.n(ACT_HEADS as u32);
     let mut rng = Rng::new(23);
@@ -351,7 +370,7 @@ fn main() {
                 seen[(obs[153] * 2.0) as usize] += 1;
                 o.b(fresh);
                 if fresh {
-                    duel(&mut o, &d, p.walls, &ag[0], &m.ccfg, m.c[0].lp.l.body.pos);
+                    duel(&mut o, &d, p.walls, &ag[0], &m.ccfg, m.c[0].lp.l.body.pos, &m.world);
                     fresh = false;
                 }
                 o.n(count);
