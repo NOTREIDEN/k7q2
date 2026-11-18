@@ -58,7 +58,10 @@ public final strictfp class Agent {
     public static final int GRID_AT = 154;
     /** What a column with no ground near enough under the feet shows. */
     public static final double NO_GROUND = -6.0;
-    public static final int OBS_DIM = GRID_AT + GRID_FWD.length * GRID_RIGHT.length;
+    /** Where the previews of a pearl thrown with the view turned first start in an observation, and the turns (degrees of yaw). */
+    public static final int PEARL_AT = GRID_AT + GRID_FWD.length * GRID_RIGHT.length;
+    public static final float[] PEARL_TURNS = {45.0f, -45.0f, 90.0f, -90.0f};
+    public static final int OBS_DIM = PEARL_AT + 3 * PEARL_TURNS.length;
     private static final int TRAIL = 16;
     /**
      * A hurt of the other player counts as a hit of this one's for this
@@ -947,6 +950,26 @@ public final strictfp class Agent {
             o[93] = (float) Math.min((int) land[3], 60) / 30.0f;
             o[94] = clip((ll[0] - rf) / 8.0, 4.0);
             o[95] = clip((ll[1] - rr) / 8.0, 4.0);
+            // The same for a view turned first, to either side: where a
+            // pearl would put this player as seen from the opponent, and in
+            // how many ticks.
+            for (int q = 0; q < PEARL_TURNS.length; q++) {
+                float turned = v.yaw + PEARL_TURNS[q];
+                double[] at;
+                if (carry == 1) {
+                    double[] h = Geo.throwHeading(Inv.KIND_PEARL, pos, turned, v.pitch);
+                    double sp = Geo.speed(Inv.KIND_PEARL);
+                    double[] add = carried();
+                    at = Geo.flight(blocks, Inv.KIND_PEARL, new double[] {h[0], h[1], h[2]}, new double[] {h[3] * sp + add[0], h[4] * sp, h[5] * sp + add[1]});
+                } else {
+                    at = Geo.pearlPreview(blocks, pos, turned, v.pitch);
+                }
+                double[] lt = local(yaw, at[0] - pos[0], at[2] - pos[2]);
+                int i = PEARL_AT + 3 * q;
+                o[i] = clip((lt[0] - rf) / 8.0, 4.0);
+                o[i + 1] = clip((lt[1] - rr) / 8.0, 4.0);
+                o[i + 2] = (float) Math.min((int) at[3], 60) / 30.0f;
+            }
         }
         // Health.
         boolean real = duel.realHealth;

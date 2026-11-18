@@ -89,7 +89,12 @@ pub const PITCH_BINS: [i32; 29] = [
     -89, -55, -34, -21, -13, -8, -5, -3, -2, -1, 0, 1, 2, 3, 5, 8, 13, 21, 34, 55, 89, -377, -233, -144, 144, 233, 377, -600, 600,
 ];
 
-pub const OBS_DIM: usize = 154 + GRID_FWD.len() * GRID_RIGHT.len();
+pub const OBS_DIM: usize = PEARL_AT + 3 * PEARL_TURNS.len();
+
+/// Where the previews of a pearl thrown with the view turned first start in
+/// an observation, and the turns (degrees of yaw).
+pub const PEARL_AT: usize = GRID_AT + GRID_FWD.len() * GRID_RIGHT.len();
+pub const PEARL_TURNS: [f32; 4] = [45.0, -45.0, 90.0, -90.0];
 
 /// The ground around a player, shown as a grid of columns along its view:
 /// blocks forward (negative: behind) and to the right.
@@ -1052,18 +1057,32 @@ impl Agent {
         // carry this player, in how many ticks, and where that is seen from
         // the opponent (further along the view, to the right of it).
         if lp.pearls > 0 {
-            let (land, ticks) = if self.carry == 1 {
-                let (from, dir) = throw_heading(Kind::Pearl, b.pos, lp.l.yaw, lp.l.pitch);
-                let (v, add) = (Kind::Pearl.speed() as f64, self.carried());
-                thrown_flight(world, Kind::Pearl, from, [dir[0] * v + add[0], dir[1] * v, dir[2] * v + add[1]])
-            } else {
-                pearl_preview(world, b.pos, lp.l.yaw, lp.l.pitch)
+            let land_at = |yaw: f32| {
+                if self.carry == 1 {
+                    let (from, dir) = throw_heading(Kind::Pearl, b.pos, yaw, lp.l.pitch);
+                    let (v, add) = (Kind::Pearl.speed() as f64, self.carried());
+                    thrown_flight(world, Kind::Pearl, from, [dir[0] * v + add[0], dir[1] * v, dir[2] * v + add[1]])
+                } else {
+                    pearl_preview(world, b.pos, yaw, lp.l.pitch)
+                }
             };
+            let (land, ticks) = land_at(lp.l.yaw);
             let (lf, lr) = local(yaw, land[0] - b.pos[0], land[2] - b.pos[2]);
             o[92] = clip(lf.hypot(lr) / 16.0, 4.0);
             o[93] = (ticks.min(60)) as f32 / 30.0;
             o[94] = clip((lf - rf) / 8.0, 4.0);
             o[95] = clip((lr - rr) / 8.0, 4.0);
+            // The same for a view turned first, to either side: where a
+            // pearl would put this player as seen from the opponent, and in
+            // how many ticks.
+            for (k, turn) in PEARL_TURNS.iter().enumerate() {
+                let (land, ticks) = land_at(lp.l.yaw + turn);
+                let (lf, lr) = local(yaw, land[0] - b.pos[0], land[2] - b.pos[2]);
+                let at = PEARL_AT + 3 * k;
+                o[at] = clip((lf - rf) / 8.0, 4.0);
+                o[at + 1] = clip((lr - rr) / 8.0, 4.0);
+                o[at + 2] = (ticks.min(60)) as f32 / 30.0;
+            }
         }
         // Health: whether hits cost any in this duel, this player's and the
         // opponent's as this client knows them, and the health a plain hit
