@@ -11,6 +11,8 @@ import java.util.List;
  * has to be made here too; ObsCheck compares the two.
  */
 public final class Obs {
+    /** Blocks: farther chests are shown at this distance (see the chest block). */
+    static final double FAR = 150.0;
     public static final int K_MOBS = 8, K_CHESTS = 8, K_PROJ = 4, GRID = 4;
     public static final int SELF_DIM = 46, MOB_DIM = 25, CHEST_DIM = 28, PROJ_DIM = 9, OWN_DIM = 8;
     public static final int TERRAIN_DIM = 2 * (2 * GRID + 1) * (2 * GRID + 1);
@@ -267,11 +269,15 @@ public final class Obs {
             double ccx = kn.cx(), ccy = kn.cy(), ccz = kn.cz();
             double[] rel = local(yaw, ccx - px, ccy - py, ccz - pz);
             double d = Math.sqrt(sq(ccx - px) + sq(ccy - py - 0.9) + sq(ccz - pz));
+            // The training maps are at most about 160 blocks across: a chest farther
+            // than that is shown in its true direction but at that distance, so that a
+            // map of any size gives the network values it knows.
+            double far = Math.max(1.0, d / FAR);
             put(1.0);
-            put(rel[0] / 32.0);
-            put(rel[1] / 32.0);
-            put(rel[2] / 32.0);
-            put(d / 32.0);
+            put(rel[0] / far / 32.0);
+            put(rel[1] / far / 32.0);
+            put(rel[2] / far / 32.0);
+            put(d / far / 32.0);
             for (int st = 0; st < 4; st++) {
                 put(b(kn.seen && kn.state == st));
             }
@@ -308,6 +314,10 @@ public final class Obs {
             if (oi != ci) {
                 Memory.Known c2 = m.chests.get(oi);
                 double[] rm = local(yaw, (ccx + c2.cx()) / 2.0 - px, (ccy + c2.cy()) / 2.0 - py, (ccz + c2.cz()) / 2.0 - pz);
+                double rmf = Math.max(1.0, Math.sqrt(sq(rm[0]) + sq(rm[1]) + sq(rm[2])) / FAR);
+                rm[0] /= rmf;
+                rm[1] /= rmf;
+                rm[2] /= rmf;
                 put(rm[0] / 32.0);
                 put(rm[1] / 32.0);
                 put(rm[2] / 32.0);

@@ -44,9 +44,28 @@ final class Hands {
         key(gs.keyBindJump, k.jump);
         key(gs.keyBindSprint, k.sprint);
 
+        // A mob riding a horse: the crosshair on the horse lands the blows on the
+        // horse, which is not part of the wave. Turn the view up to the rider
+        // instead, within the same turn limits, and keep the click for it.
+        float dyaw = k.dyaw, dpitch = k.dpitch;
+        boolean onMount = false;
+        net.minecraft.entity.Entity under = mc.objectMouseOver != null ? mc.objectMouseOver.entityHit : null;
+        if (under != null && under.riddenByEntity instanceof net.minecraft.entity.EntityLiving) {
+            net.minecraft.entity.Entity r = under.riddenByEntity;
+            double ex = mc.thePlayer.posX, ey = mc.thePlayer.posY + mc.thePlayer.getEyeHeight(), ez = mc.thePlayer.posZ;
+            double tx = r.posX - ex, ty = r.posY + r.height * 0.6 - ey, tz = r.posZ - ez;
+            double wantYaw = Math.toDegrees(Math.atan2(-tx, tz));
+            double wantPitch = -Math.toDegrees(Math.atan2(ty, Math.sqrt(tx * tx + tz * tz)));
+            double ey2 = net.minecraft.util.MathHelper.wrapAngleTo180_double(wantYaw - mc.thePlayer.rotationYaw);
+            double ep = wantPitch - mc.thePlayer.rotationPitch;
+            dyaw = (float) Math.max(-Pilot.MAX_DYAW, Math.min(Pilot.MAX_DYAW, ey2));
+            dpitch = (float) Math.max(-Pilot.MAX_DPITCH, Math.min(Pilot.MAX_DPITCH, ep));
+            onMount = true;
+        }
+
         // The view, in whole mouse counts.
         float f1 = mouseFactor(gs);
-        double x = k.dyaw / (0.15 * f1) + carryX, y = k.dpitch / (0.15 * f1) + carryY;
+        double x = dyaw / (0.15 * f1) + carryX, y = dpitch / (0.15 * f1) + carryY;
         long nx = Math.round(x), ny = Math.round(y);
         carryX = x - nx;
         carryY = y - ny;
@@ -65,7 +84,7 @@ final class Hands {
                 mc.playerController.sendUseItem(mc.thePlayer, mc.theWorld, s);
             }
         }
-        if (k.attack) {
+        if (k.attack && !onMount) {
             Names.setInt(MISS_DELAY, mc, 0);
             net.minecraft.entity.Entity behind = mc.objectMouseOver != null && mc.objectMouseOver.entityHit instanceof net.minecraft.entity.item.EntityArmorStand
                 ? throughStands() : null;
