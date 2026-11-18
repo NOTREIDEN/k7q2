@@ -381,11 +381,13 @@ pub struct Params {
     pub opp_strength_prob: f64,
     pub opp_strength_max: f64,
     /// Share of duels in which the first player is ganked now and then:
-    /// someone it cannot see hits it from one side every 10 to 16 ticks for
-    /// 2 to 6 seconds, with the sword of the kit and no Strength, Strength
-    /// I or II, the first time within the first half of the duel and again
-    /// 10 to 40 seconds after each.
+    /// one to `gank_max` players it cannot see, each on a side of its own,
+    /// each hitting it every 10 to 16 ticks for 2 to 6 seconds with the
+    /// sword of the kit and no Strength, Strength I or II, the first time
+    /// within the first half of the duel and again 10 to 40 seconds after
+    /// each. The game's invulnerable ticks decide which of their hits count.
     pub gank_prob: f64,
+    pub gank_max: f64,
     /// What dying costs on top of losing the duel (`w_win`): not dying is
     /// worth more than killing.
     pub w_death: f32,
@@ -532,6 +534,7 @@ impl Default for Params {
             opp_strength_prob: 0.0,
             opp_strength_max: 3.0,
             gank_prob: 0.0,
+            gank_max: 1.0,
             w_death: 0.0,
             retry_prob: 0.0,
             league_steal: 0.0,
@@ -678,6 +681,7 @@ impl Params {
             137 => self.opp_strength_max = v,
             138 => self.gank_prob = v,
             139 => self.w_death = v as f32,
+            140 => self.gank_max = v,
             132 => self.retry_prob = v,
             113 => self.extreme_share = v,
             114 => self.w_shake = v as f32,
@@ -980,6 +984,8 @@ struct Moment {
     lesson: u8,
 }
 
+/// The most players that gank the first player at once.
+const GANK_MAX: usize = 6;
 /// How many moments of the duel in progress are kept, one a second.
 const MOMENTS: usize = 5;
 /// How many lost moments are kept for retries, and how often each is played.
@@ -1049,13 +1055,15 @@ pub struct Env {
     /// -1 for never (see `Params::opp_strength_prob`).
     strength_at: i32,
     /// Ganks (see `Params::gank_prob`): the tick the next one starts, -1
-    /// for none; the tick the one under way ends, its next hit, the
-    /// damage of its hits and the direction they come from.
+    /// for none; the tick the one under way ends, how many hit in it, and
+    /// for each its next hit, the damage of its hits and the direction they
+    /// come from.
     gank_next: i32,
     gank_end: i32,
-    gank_hit: i32,
-    gank_damage: f32,
-    gank_dir: [f64; 2],
+    gank_n: usize,
+    gank_hit: [i32; GANK_MAX],
+    gank_damage: [f32; GANK_MAX],
+    gank_dir: [[f64; 2]; GANK_MAX],
 }
 
 /// The keys of a player that goes for its opponent's potions, laid over
@@ -1521,9 +1529,10 @@ impl Env {
             strength_at: -1,
             gank_next: -1,
             gank_end: 0,
-            gank_hit: 0,
-            gank_damage: 0.0,
-            gank_dir: [1.0, 0.0],
+            gank_n: 0,
+            gank_hit: [0; GANK_MAX],
+            gank_damage: [0.0; GANK_MAX],
+            gank_dir: [[1.0, 0.0]; GANK_MAX],
         };
         e.begin();
         e
@@ -1601,18 +1610,25 @@ impl Env {
             self.strength_at = now + self.rng.range(100.0, 500.0).round() as i32;
         }
         if now < self.gank_end {
-            if now >= self.gank_hit {
-                self.m.s.gank = Some((0, self.gank_damage, self.gank_dir));
-                self.gank_hit = now + self.rng.range(10.0, 16.0).round() as i32;
+            // One hit reaches the server a tick; of those due, the hardest,
+            // and the others come on the next ticks.
+            let due = (0..self.gank_n).filter(|&k| now >= self.gank_hit[k]).max_by(|&a, &b| self.gank_damage[a].total_cmp(&self.gank_damage[b]));
+            if let Some(k) = due {
+                self.m.s.gank = Some((0, self.gank_damage[k], self.gank_dir[k]));
+                self.gank_hit[k] = now + self.rng.range(10.0, 16.0).round() as i32;
             }
         } else if self.gank_next >= 0 && now >= self.gank_next {
             self.gank_end = now + self.rng.range(40.0, 120.0).round() as i32;
-            self.gank_hit = now;
-            let amp = (self.rng.next_u64() % 3) as i32 - 1;
+            let top = self.params.gank_max.round().clamp(1.0, GANK_MAX as f64) as u64;
+            self.gank_n = 1 + (self.rng.next_u64() % top) as usize;
             let sword = self.m.s.cfg.damage;
-            self.gank_damage = if amp < 0 { sword } else { (sword as f64 * (1.0 + 1.3 * (amp + 1) as f64)) as f32 };
-            let a = self.rng.range(0.0, std::f64::consts::TAU);
-            self.gank_dir = [a.cos(), a.sin()];
+            for k in 0..self.gank_n {
+                self.gank_hit[k] = now + if k == 0 { 0 } else { self.rng.range(0.0, 16.0).round() as i32 };
+                let amp = (self.rng.next_u64() % 3) as i32 - 1;
+                self.gank_damage[k] = if amp < 0 { sword } else { (sword as f64 * (1.0 + 1.3 * (amp + 1) as f64)) as f32 };
+                let a = self.rng.range(0.0, std::f64::consts::TAU);
+                self.gank_dir[k] = [a.cos(), a.sin()];
+            }
             self.gank_next = self.gank_end + self.rng.range(200.0, 800.0).round() as i32;
         }
     }
