@@ -322,3 +322,47 @@ fn a_pearl_costs_what_it_is_set_to_unless_the_other_player_dies_soon_after() {
     let (paid, _) = paid_for_a_pearl(1.0, true, 1.0);
     assert!((free - paid - 1.0).abs() < 1e-4, "free {free} paid {paid}");
 }
+
+#[test]
+fn the_agent_is_told_what_the_last_hit_and_the_last_second_took() {
+    use pvpsim::env::{HURT_AT, HURT_WINDOW};
+    let mut e = Env::new(Mode::SelfPlay, params(), 21);
+    run(&mut e, 10, |_, _| IDLE);
+    let mut o = [0.0f32; OBS_DIM];
+    e.write_obs(0, &mut o);
+    assert_eq!((o[HURT_AT], o[HURT_AT + 1]), (0.0, 0.0));
+    e.m.s.sudden = Some((0, 10.0, [1.0, 0.0]));
+    run(&mut e, 4, |_, _| IDLE);
+    e.write_obs(0, &mut o);
+    assert_eq!((o[HURT_AT], o[HURT_AT + 1]), (1.0, 1.0));
+    e.m.s.sudden = Some((0, 4.0, [1.0, 0.0]));
+    run(&mut e, 4, |_, _| IDLE);
+    e.write_obs(0, &mut o);
+    assert!((o[HURT_AT] - 0.4).abs() < 1e-6 && (o[HURT_AT + 1] - 1.4).abs() < 1e-6, "{} {}", o[HURT_AT], o[HURT_AT + 1]);
+    // A second later the last hit is still told, the second is over.
+    run(&mut e, HURT_WINDOW, |_, _| IDLE);
+    e.write_obs(0, &mut o);
+    assert!((o[HURT_AT] - 0.4).abs() < 1e-6 && o[HURT_AT + 1] == 0.0, "{} {}", o[HURT_AT], o[HURT_AT + 1]);
+}
+
+#[test]
+fn sudden_falls_of_health_come_in_the_share_of_duels_asked_for() {
+    let mut p = params();
+    p.drop_prob = 1.0;
+    p.drop_min = 8.0;
+    p.drop_max = 8.0;
+    p.ep_ticks_min = 2000.0;
+    p.ep_ticks_max = 2000.0;
+    let mut e = Env::new(Mode::SelfPlay, p, 4);
+    let mut falls = 0;
+    let mut last = e.m.s.p[0].health;
+    run(&mut e, 1500, |e, _| {
+        let h = e.m.s.p[0].health;
+        if last - h >= 8.0 {
+            falls += 1;
+        }
+        last = h;
+        IDLE
+    });
+    assert!(falls >= 1, "{falls}");
+}

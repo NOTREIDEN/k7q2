@@ -124,3 +124,16 @@ pub unsafe extern "C" fn pvp_vec_view(p: *mut VecEnv, index: i32, out: *mut f32)
     let v = &*p;
     v.envs[index as usize].write_view(slice::from_raw_parts_mut(out, VIEW_DIM));
 }
+
+/// The first player of duel `index` loses `amount` health at once at the
+/// start of the next server tick, knocked back along (dx, dz): a sudden
+/// hit as `Params::drop_prob` deals them, at a moment of the caller's
+/// choosing (for measuring what the agent does after one).
+///
+/// # Safety
+/// `index` must be a valid duel.
+#[no_mangle]
+pub unsafe extern "C" fn pvp_vec_sudden(p: *mut VecEnv, index: i32, amount: f32, dx: f64, dz: f64) {
+    let v = &mut *p;
+    v.envs[index as usize].m.s.sudden = Some((0, amount, [dx, dz]));
+}

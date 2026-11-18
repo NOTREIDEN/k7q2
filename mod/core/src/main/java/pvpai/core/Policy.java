@@ -116,7 +116,9 @@ public final class Policy {
      * choices of each control.
      */
     public float[][] logits(float[] obs) {
-        if (obs.length != obsDim) {
+        // A policy trained before the agent showed more reads the first
+        // values only, as if the later ones had no weight.
+        if (obs.length < obsDim) {
             throw new IllegalArgumentException("observation of " + obs.length + " values, the policy reads " + obsDim);
         }
         int n = hidden;

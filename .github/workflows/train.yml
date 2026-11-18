@@ -47,6 +47,7 @@ on:
           --param w_hp_pot=8 --param hp_pot_scale=4 --param opp_strength_prob=0.2 --param opp_strength_max=3
           --param gank_prob=0.2 --param gank_max=6 --param w_death=5
           --param w_pearl_cost=1 --param pearl_kill_s=10
+          --param drop_prob=0.3 --param drop_min=8 --param drop_max=14
       previous:
         description: Id of the run to continue from (empty starts from seed/stage1.pt)
         default: ""

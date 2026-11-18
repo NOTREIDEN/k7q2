@@ -783,6 +783,11 @@ pub struct Server {
     /// the player hit, the damage before the block and the armour, and the
     /// horizontal direction from that player to whoever hits it.
     pub gank: Option<(usize, f32, [f64; 2])>,
+    /// A hit that takes this much health at once from this player, past its
+    /// armour and its invulnerable ticks, with a knockback along this
+    /// direction: Strength or a player it does not see, as sudden as it
+    /// gets. Dealt at the start of the next tick.
+    pub sudden: Option<(usize, f32, [f64; 2])>,
 }
 
 /// Packets produced by the server: (destination client, packet).
@@ -807,6 +812,7 @@ impl Server {
             spawned: Vec::new(),
             frozen: Vec::new(),
             gank: None,
+            sudden: None,
             pearl_guard: false,
             ench_rand: None,
         }
@@ -1738,6 +1744,26 @@ impl Server {
         self.p[v].l.body.motion = saved;
     }
 
+    /// See `sudden`.
+    fn sudden_hit(&mut self, v: usize, amount: f32, dir: [f64; 2], out: &mut Outbox) {
+        if self.p[v].health <= 0.0 || amount <= 0.0 {
+            return;
+        }
+        let saved = self.p[v].l.body.motion;
+        let h = self.p[v].health;
+        self.p[v].set_health(h - amount);
+        self.p[v].last_damage = self.p[v].last_damage.max(amount);
+        self.p[v].hurt_resistant_time = self.cfg.max_no_damage;
+        self.p[v].hurt_time = 10;
+        out.push((1 - v, S2C::Hurt { own: false }));
+        out.push((v, S2C::Hurt { own: true }));
+        self.knock_back(v, dir[0], dir[1]);
+        let enc = encode_velocity(self.p[v].l.body.motion);
+        out.push((v, S2C::Velocity { own: true, v: enc }));
+        self.p[v].velocity_changed = false;
+        self.p[v].l.body.motion = saved;
+    }
+
     /// `EntityPlayer.damageEntity`: the block, the armour, Protection, then
     /// the health. Returns the damage that is left after the block and the
     /// health that was taken in the end.
@@ -1822,6 +1848,9 @@ impl Server {
     pub fn tick(&mut self, world: &World, rng: &mut Rng, out: &mut Outbox) {
         if let Some((v, amount, dir)) = self.gank.take() {
             self.gank_hit(v, amount, dir, rng, out);
+        }
+        if let Some((v, amount, dir)) = self.sudden.take() {
+            self.sudden_hit(v, amount, dir, out);
         }
         for (i, p) in self.p.iter_mut().enumerate() {
             if p.hurt_resistant_time > 0 {

@@ -9,7 +9,7 @@
 //! the reward that agent earned since its previous action.
 use crate::aabb::{dist, V3};
 use crate::agent::{aim_error, clip, local, Agent, Duel};
-pub use crate::agent::{decode_action, ACT_DIMS, ACT_HEADS, BAR_TURN, BAR_TURNS, FLICK_BINS, OBS_DIM, PITCH_BINS, YAW_BINS};
+pub use crate::agent::{decode_action, ACT_DIMS, ACT_HEADS, BAR_TURN, BAR_TURNS, FLICK_BINS, HURT_AT, HURT_WINDOW, OBS_DIM, PITCH_BINS, YAW_BINS};
 use crate::bot::{self, BotParams, BotState};
 use crate::client::{Client, ClientCfg, Edge, Input, TickOut, INV_SHUT, MAX_BACKTRACK};
 use crate::mth::Rng;
@@ -397,6 +397,14 @@ pub struct Params {
     /// than it costs.
     pub w_pearl_cost: f32,
     pub pearl_kill_s: f64,
+    /// Share of duels in which the first player loses `drop_min` to
+    /// `drop_max` health at once (past the armour, with a knockback) at a
+    /// moment drawn in the first half of the duel and again every 15 to 45
+    /// seconds: a hit with Strength or by a player it does not see. It is
+    /// always left with two health at least.
+    pub drop_prob: f64,
+    pub drop_min: f64,
+    pub drop_max: f64,
     /// Share of new duels that are a retry of one the first player lost,
     /// from a few seconds before its death (as GT Sophy trained on its
     /// mistakes): the same moment of the same duel, played again. Each lost
@@ -544,6 +552,9 @@ impl Default for Params {
             w_death: 0.0,
             w_pearl_cost: 0.0,
             pearl_kill_s: 10.0,
+            drop_prob: 0.0,
+            drop_min: 8.0,
+            drop_max: 14.0,
             retry_prob: 0.0,
             league_steal: 0.0,
             throw_carry_prob: 0.0,
@@ -692,6 +703,9 @@ impl Params {
             140 => self.gank_max = v,
             141 => self.w_pearl_cost = v as f32,
             142 => self.pearl_kill_s = v,
+            143 => self.drop_prob = v,
+            144 => self.drop_min = v,
+            145 => self.drop_max = v,
             132 => self.retry_prob = v,
             113 => self.extreme_share = v,
             114 => self.w_shake = v as f32,
@@ -1068,6 +1082,9 @@ pub struct Env {
     /// Tick of the duel at which the second player's Strength changes next;
     /// -1 for never (see `Params::opp_strength_prob`).
     strength_at: i32,
+    /// Tick of the duel of the next sudden fall of the first player's
+    /// health, -1 for none (see `Params::drop_prob`).
+    drop_next: i32,
     /// Ganks (see `Params::gank_prob`): the tick the next one starts, -1
     /// for none; the tick the one under way ends, how many hit in it, and
     /// for each its next hit, the damage of its hits and the direction they
@@ -1542,6 +1559,7 @@ impl Env {
             moments: std::collections::VecDeque::new(),
             losses: Vec::new(),
             strength_at: -1,
+            drop_next: -1,
             gank_next: -1,
             gank_end: 0,
             gank_n: 0,
@@ -1610,6 +1628,7 @@ impl Env {
         // A Strength already taken is in the server's state; none comes
         // later, and no gank.
         self.strength_at = -1;
+        self.drop_next = -1;
         self.gank_next = -1;
         self.gank_end = 0;
         for a in 0..2 {
@@ -1625,6 +1644,18 @@ impl Env {
             let top = self.params.opp_strength_max.round().clamp(1.0, 3.0) as u64;
             self.m.s.p[1].strength = (self.rng.next_u64() % (top + 1)) as i32 - 1;
             self.strength_at = now + self.rng.range(100.0, 500.0).round() as i32;
+        }
+        if self.drop_next >= 0 && now >= self.drop_next {
+            let h = self.m.s.p[0].health;
+            let (lo, hi) = (self.params.drop_min, self.params.drop_max.max(self.params.drop_min));
+            let amount = (self.rng.range(lo, hi) as f32).min(h - 2.0);
+            if amount >= 2.0 {
+                let a = self.rng.range(0.0, std::f64::consts::TAU);
+                self.m.s.sudden = Some((0, amount, [a.cos(), a.sin()]));
+                self.drop_next = now + self.rng.range(300.0, 900.0).round() as i32;
+            } else {
+                self.drop_next = now + 20;
+            }
         }
         if now < self.gank_end {
             // One hit reaches the server a tick; of those due, the hardest,
@@ -1657,6 +1688,10 @@ impl Env {
         self.strength_at = -1;
         if p.opp_strength_prob > 0.0 && self.rng.chance(p.opp_strength_prob) {
             self.strength_at = self.rng.range(0.0, self.ep_len as f64 * 2.0 / 3.0).round() as i32;
+        }
+        self.drop_next = -1;
+        if p.drop_prob > 0.0 && self.rng.chance(p.drop_prob) {
+            self.drop_next = self.rng.range(0.0, self.ep_len as f64 / 2.0).round() as i32;
         }
         self.gank_next = -1;
         self.gank_end = 0;

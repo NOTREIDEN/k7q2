@@ -61,7 +61,10 @@ public final strictfp class Agent {
     /** Where the previews of a pearl thrown with the view turned first start in an observation, and the turns (degrees of yaw). */
     public static final int PEARL_AT = GRID_AT + GRID_FWD.length * GRID_RIGHT.length;
     public static final float[] PEARL_TURNS = {45.0f, -45.0f, 90.0f, -90.0f};
-    public static final int OBS_DIM = PEARL_AT + 3 * PEARL_TURNS.length;
+    /** Where what the last hit and the last second took of its health is in an observation, and how many of its own ticks that second is. */
+    public static final int HURT_AT = PEARL_AT + 3 * PEARL_TURNS.length;
+    public static final int HURT_WINDOW = 20;
+    public static final int OBS_DIM = HURT_AT + 2;
     private static final int TRAIL = 16;
     /**
      * A hurt of the other player counts as a hit of this one's for this
@@ -145,6 +148,14 @@ public final strictfp class Agent {
     private final double[][] pearlFate = new double[2][];
     /** The opponent's pearl it last saw appear, and its own ticks since. */
     private long oppPearl = -1;
+    /**
+     * Its health on its last tick (below zero before the first), what the
+     * last fall of it took, and what each of its last {@link #HURT_WINDOW}
+     * ticks took, oldest at hurtAt.
+     */
+    private float hpLast = -1.0f, hpDrop;
+    private final float[] hpLost = new float[HURT_WINDOW];
+    private int hurtAt;
     private int oppPearlAge = 100000;
     /** The drink (1) or the meal (2) it has its right button down for, and what it asked of the hotbar on its last tick. */
     private int consume, askedBar;
@@ -696,6 +707,14 @@ public final strictfp class Agent {
      * kept.
      */
     public void beforeTick(View v, Blocks blocks) {
+        float h = v.health;
+        float d = hpLast >= 0.0f ? Math.max(hpLast - h, 0.0f) : 0.0f;
+        hpLast = h;
+        if (d > 0.0f) {
+            hpDrop = d;
+        }
+        hpLost[hurtAt] = d;
+        hurtAt = (hurtAt + 1) % HURT_WINDOW;
         saidBefore = said;
         said = v.pos.clone();
         if (probe != null) {
@@ -995,6 +1014,14 @@ public final strictfp class Agent {
         o[99] = (v.health - v.oHealth) / MAX_HEALTH;
         o[100] = real ? duel.hitHealth / 4.0f : 0.0f;
         o[101] = Math.min((MAX_HEALTH - v.health) / POTION_HEAL, 2.5f);
+        // How hard it is being hit: what the last fall of its health took
+        // and what its last second took, in hearts over five.
+        float lost = 0.0f;
+        for (int w = 0; w < HURT_WINDOW; w++) {
+            lost += hpLost[(hurtAt + w) % HURT_WINDOW];
+        }
+        o[HURT_AT] = Math.min(hpDrop / 10.0f, 2.0f);
+        o[HURT_AT + 1] = Math.min(lost / 10.0f, 2.0f);
         // Potions.
         o[102] = (float) Integer.bitCount(v.potions) / 7.0f;
         o[103] = flag(potionReady(v));

@@ -89,7 +89,11 @@ pub const PITCH_BINS: [i32; 29] = [
     -89, -55, -34, -21, -13, -8, -5, -3, -2, -1, 0, 1, 2, 3, 5, 8, 13, 21, 34, 55, 89, -377, -233, -144, 144, 233, 377, -600, 600,
 ];
 
-pub const OBS_DIM: usize = PEARL_AT + 3 * PEARL_TURNS.len();
+pub const OBS_DIM: usize = HURT_AT + 2;
+/// Where what the last hit and the last second took of its health is in an
+/// observation, and how many of its own ticks that second is.
+pub const HURT_AT: usize = PEARL_AT + 3 * PEARL_TURNS.len();
+pub const HURT_WINDOW: usize = 20;
 
 /// Where the previews of a pearl thrown with the view turned first start in
 /// an observation, and the turns (degrees of yaw).
@@ -213,6 +217,13 @@ pub struct Agent {
     /// come over with.
     opp_pearl: Option<u32>,
     opp_pearl_age: i32,
+    /// Its health on its last tick (below zero before the first), what the
+    /// last fall of it took, and what each of its last `HURT_WINDOW` ticks
+    /// took, oldest at `hurt_at`.
+    hp_last: f32,
+    hp_drop: f32,
+    hp_lost: [f32; HURT_WINDOW],
+    hurt_at: usize,
     /// The drink (1) or the meal (2) it has its right button down for, and
     /// what it asked of the rest of the hotbar on its last tick.
     consume: u8,
@@ -315,6 +326,10 @@ impl Agent {
             pearl_fate: [None; 2],
             opp_pearl: None,
             opp_pearl_age: 100_000,
+            hp_last: -1.0,
+            hp_drop: 0.0,
+            hp_lost: [0.0; HURT_WINDOW],
+            hurt_at: 0,
             consume: 0,
             asked_bar: 0,
             was_consuming: false,
@@ -853,6 +868,14 @@ impl Agent {
     /// the server's answers are. And what it foresees for the potions and
     /// pearls that break on their next tick is kept.
     pub fn before_tick(&mut self, c: &Client, world: &World) {
+        let h = c.lp.health;
+        let d = if self.hp_last >= 0.0 { (self.hp_last - h).max(0.0) } else { 0.0 };
+        self.hp_last = h;
+        if d > 0.0 {
+            self.hp_drop = d;
+        }
+        self.hp_lost[self.hurt_at] = d;
+        self.hurt_at = (self.hurt_at + 1) % HURT_WINDOW;
         self.said_before = self.said;
         self.said = c.lp.l.body.pos;
         if let Some((thrown, moved, age)) = self.probe {
@@ -1095,6 +1118,14 @@ impl Agent {
         o[99] = (lp.health - rp.health) / MAX_HEALTH;
         o[100] = if real { hh / 4.0 } else { 0.0 };
         o[101] = ((MAX_HEALTH - lp.health) / POTION_HEAL).min(2.5);
+        // How hard it is being hit: what the last fall of its health took
+        // and what its last second took, in hearts over five.
+        let mut lost = 0.0f32;
+        for k in 0..HURT_WINDOW {
+            lost += self.hp_lost[(self.hurt_at + k) % HURT_WINDOW];
+        }
+        o[HURT_AT] = (self.hp_drop / 10.0).min(2.0);
+        o[HURT_AT + 1] = (lost / 10.0).min(2.0);
         // Potions: how many are left, whether one can be thrown now, where
         // the throw's key presses are, what was asked last tick, whether
         // the opponent has one in hand and how many of its potions this

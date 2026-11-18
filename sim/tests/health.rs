@@ -115,6 +115,30 @@ fn a_gank_hit_costs_health_and_knocks_back_but_is_no_hit_of_the_duel() {
 }
 
 #[test]
+fn a_sudden_hit_takes_its_health_past_the_armour_and_the_invulnerable_ticks() {
+    let mut m = duel(ServerCfg { armor: 20, ..real() });
+    let idle = Input::default();
+    for _ in 0..4 {
+        step(&mut m, &idle, &idle);
+    }
+    m.s.sudden = Some((1, 9.0, [0.0, 1.0]));
+    for _ in 0..3 {
+        step(&mut m, &idle, &idle);
+    }
+    assert_eq!(m.s.p[1].health, 11.0);
+    assert_eq!(m.c[1].lp.health, 11.0);
+    assert!(m.s.hits.is_empty());
+    // Another one right after, in the invulnerable ticks: it takes all of it too.
+    m.s.sudden = Some((1, 5.0, [0.0, 1.0]));
+    step(&mut m, &idle, &idle);
+    assert_eq!(m.s.p[1].health, 6.0);
+    for _ in 0..6 {
+        step(&mut m, &idle, &idle);
+    }
+    assert!(m.c[1].lp.l.body.pos[2] < 2.5 - 0.3, "{:?}", m.c[1].lp.l.body.pos);
+}
+
+#[test]
 fn diamond_armour_takes_four_fifths() {
     let lost = one_hit(ServerCfg { armor: 20, ..real() });
     assert!((lost - 1.6).abs() < 1e-5, "{lost}");
