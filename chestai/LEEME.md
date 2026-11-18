@@ -17,6 +17,7 @@ Espada, arco (con Punch), manzanas doradas normales, perlas y pociones splash de
 - La mira gira como mucho 10° por tick de costado y 7° por tick para arriba o abajo. En el entrenamiento se le cobra por girar de golpe, por temblar (ir y volver) y por dar vueltas en círculo, así que apunta suave y no salta de un mob a otro como un aimbot.
 - Pega solo con la espada en la mano: en el simulador un golpe con otro ítem hace 1 de daño, igual que en el juego.
 - Se le cobra quedarse quieto sin pegar y alejarse de un cofre con oleada en curso.
+- Si un mob va montado (el esqueleto en su caballo), sube la mira al jinete en vez de pegarle al caballo, con los mismos topes de giro.
 - Usa el arco con Punch para dispararse y viajar a un cofre que está a más de 12 bloques cuando no hay una oleada cerca.
 
 ## Cómo encuentra los cofres
