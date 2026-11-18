@@ -308,7 +308,7 @@ final class Reader {
             if (k < 0 || e.isDead) {
                 continue;
             }
-            if (passive(e) && !nearChest(mem, e, 12.0)) {
+            if (passive(e) && !nearChest(mem, e, 24.0)) {
                 // A farm animal out in the field, not a mob of a chest.
                 continue;
             }

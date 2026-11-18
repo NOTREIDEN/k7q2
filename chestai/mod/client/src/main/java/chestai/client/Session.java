@@ -29,6 +29,11 @@ import chestai.core.Pilot;
 public final class Session {
     private static final boolean DEBUG = Boolean.getBoolean("chestai.debug");
     private int dbgAttacks, dbgOnMob;
+    /** Blows on a mob that was not in its half second after a hit, and how many of them took health off. */
+    private int blows, blowsLanded;
+    private int blowMob = -1;
+    private float blowHp;
+    private long blowAt;
     private final java.util.Map<String, Integer> dbgClasses = new java.util.TreeMap<String, Integer>();
     private static final double PING = 200.0;
 
@@ -335,7 +340,30 @@ public final class Session {
             }
         }
         if ((DEBUG || settings.log) && tick % 100 == 0) {
-            log("CHESTAI attacks=" + dbgAttacks + " on_entity=" + dbgOnMob + " pitch=" + me.rotationPitch + " " + dbgClasses);
+            log("CHESTAI golpes=" + blows + " con_dano=" + blowsLanded + " attacks=" + dbgAttacks + " on_entity=" + dbgOnMob + " pitch=" + me.rotationPitch + " " + dbgClasses);
+        }
+        // Whether blows land: the mob's health 10 ticks after a blow on it, as the server sends it.
+        if (blowMob >= 0 && tick - blowAt >= 10) {
+            boolean landed = true;
+            for (chestai.core.Frame.Mob mm : f.mobs) {
+                if (mm.id == blowMob) {
+                    landed = mm.hp < blowHp;
+                }
+            }
+            if (landed) {
+                blowsLanded++;
+            }
+            blowMob = -1;
+        }
+        if (k.attack && blowMob < 0 && f.pickMob >= 0) {
+            for (chestai.core.Frame.Mob mm : f.mobs) {
+                if (mm.id == f.pickMob && mm.hurtTime == 0 && mm.hp < mm.maxHp + 1) {
+                    blows++;
+                    blowMob = mm.id;
+                    blowHp = mm.hp;
+                    blowAt = tick;
+                }
+            }
         }
         hands.press(k, lay);
         if (tick % 200 == 0) {

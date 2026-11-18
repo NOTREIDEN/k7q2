@@ -16,10 +16,12 @@ import chestai.core.Pilot;
  * chest, the bow, apples) is the network's.
  */
 final class Coach {
-    static final int NONE = 0, FIGHT = 1, WAIT = 2, CLAIM = 3;
+    static final int NONE = 0, FIGHT = 1, WAIT = 2, CLAIM = 3, GUARD = 4;
 
-    /** A mob this close is fought. */
-    private static final double FIGHT_R = 8.0;
+    /** A mob this close is fought; with a wave going on by the player, any of its mobs. */
+    private static final double FIGHT_R = 10.0, WAVE_R = 24.0;
+    /** A chest whose wave is on, this close, is not left until its mobs are dead. */
+    private static final double LOCK_R = 16.0;
     /** Reach of the sword, from the eyes to the mob's middle. */
     private static final double REACH = 3.2;
     /** A wave this far off at most is waited for by its chest. */
@@ -48,13 +50,13 @@ final class Coach {
         return -Math.toDegrees(Math.atan2(y - eyeY(f), Math.sqrt(dx * dx + dz * dz))) - f.pitch;
     }
 
-    private Frame.Mob pick(Frame f) {
+    private Frame.Mob pick(Frame f, double r) {
         Frame.Mob best = null, kept = null;
         double bs = 1e9;
         for (Frame.Mob m : f.mobs) {
             double dx = m.x - f.x, dz = m.z - f.z, dy = m.y - f.y;
             double d = Math.sqrt(dx * dx + dz * dz);
-            if (d > FIGHT_R || Math.abs(dy) > 5.0) {
+            if (d > r || Math.abs(dy) > 8.0) {
                 continue;
             }
             double s = d + Math.abs(yawTo(f, m.x, m.z)) / 45.0;
@@ -74,7 +76,20 @@ final class Coach {
     void before(Frame f, Memory mem, Pilot pilot, int[] a) {
         mode = NONE;
         int want = a[8] == 0 ? -1 : a[8] - 1;
-        Frame.Mob m = pick(f);
+        // A wave going on close by: its mobs are fought wherever they are around it,
+        // and the chest is not left for another until they are dead.
+        int lock = -1;
+        double ld = LOCK_R;
+        for (int i = 0; i < mem.chests.size(); i++) {
+            Memory.Known k = mem.chests.get(i);
+            double dx = k.cx() - f.x, dz = k.cz() - f.z;
+            double d = Math.sqrt(dx * dx + dz * dz);
+            if (k.seen && k.state == Frame.ACTIVE && f.tick - k.tick < 200 && d < ld) {
+                ld = d;
+                lock = i;
+            }
+        }
+        Frame.Mob m = pick(f, lock >= 0 ? WAVE_R : FIGHT_R);
         boolean anyMobNear = false;
         for (Frame.Mob o : f.mobs) {
             double dx = o.x - f.x, dz = o.z - f.z;
@@ -112,7 +127,8 @@ final class Coach {
             target = m.id;
             tx = m.x + m.mx * 2.0;
             tz = m.z + m.mz * 2.0;
-            ty = m.y + Math.min(m.h, 2.6) * 0.6;
+            // Low on the body: the name a server keeps over a mob's head can be in the way higher up.
+            ty = m.y + Math.min(m.h, 2.6) * 0.45;
             double dx = tx - f.x, dz = tz - f.z, dy = ty - eyeY(f);
             double d3 = Math.sqrt(dx * dx + dy * dy + dz * dz) - m.hw;
             // Swing only with the mob in reach and in front.
@@ -126,6 +142,17 @@ final class Coach {
                 a[7] = 0;
             }
             a[2] = 0;
+        } else if (lock >= 0) {
+            // The wave's mobs are out of sight for now: back to its chest, and look about there.
+            mode = GUARD;
+            Memory.Known k = mem.chests.get(lock);
+            tx = k.cx();
+            ty = eyeY(f);
+            tz = k.cz();
+            a[2] = 0;
+            a[6] = 0;
+            a[7] = 0;
+            a[8] = pilot.slot == Pilot.SWORD ? 0 : 1 + Pilot.SWORD;
         } else if (nk != null && !anyMobNear && !claimableFar && nk.state == Frame.CLAIMABLE && nd < 6.0) {
             mode = CLAIM;
             tx = nk.cx();
@@ -198,6 +225,21 @@ final class Coach {
             k.strafe = 0;
             k.jump = false;
             k.sprint = false;
+        } else if (mode == GUARD) {
+            double dx = tx - f.x, dz = tz - f.z;
+            if (dx * dx + dz * dz > 3.0 * 3.0) {
+                k.forward = 1;
+                k.sprint = true;
+                k.strafe = 0;
+            } else {
+                // At the chest: turn round slowly to find the mobs.
+                k.forward = 0;
+                k.strafe = 0;
+                k.sprint = false;
+                k.dyaw = 6.0f;
+                k.dpitch = (float) Math.max(-2.0, Math.min(2.0, (10.0 - f.pitch) * 0.2));
+            }
+            k.jump = f.collidedH && f.onGround;
         } else if (mode == CLAIM) {
             double dx = tx - f.x, dz = tz - f.z;
             k.forward = dx * dx + dz * dz > 3.0 * 3.0 ? 1 : 0;
