@@ -34,7 +34,7 @@ use pvpsim::sim::Match;
 use std::io::Write;
 
 /// Parameter numbers of `Params::set` and the values of the training runs.
-const SETTINGS: [(i32, f64); 26] = [
+const SETTINGS: [(i32, f64); 28] = [
     (130, 0.6),
     (131, 1.0),
     (125, 0.5),
@@ -61,6 +61,9 @@ const SETTINGS: [(i32, f64); 26] = [
     (112, 0.15),
     (37, 0.3),
     (39, 0.2),
+    // Cobwebs in half of the duels, and caught in one at the start in half of those.
+    (152, 0.5),
+    (154, 0.5),
 ];
 
 struct Out(Vec<f64>);

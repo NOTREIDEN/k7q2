@@ -687,6 +687,24 @@ def main():
     for k in ("view", "ping", "cps", "arena"):
         if k in opts:
             lines.append("%s %s" % (k, opts[k].replace(",", " ")))
+    # webs=N: that many patches of cobwebs on the floor around the start, one to two
+    # blocks across, two high in some; webtrap=1 puts one in the block the real player
+    # starts in as well.
+    if "webs" in opts:
+        wr = random.Random(seed + 7000)
+        taken = {tuple(int(v) for v in l.split()[1:4]) for l in lines if l.startswith("block ")}
+        cells = []
+        for _ in range(int(opts["webs"])):
+            x0, z0 = wr.randint(-4, 3), wr.randint(-4, 3)
+            two = wr.random() < 0.4
+            for x in range(x0, x0 + wr.randint(1, 2)):
+                for z in range(z0, z0 + wr.randint(1, 2)):
+                    cells += [(x, 4, z)] + ([(x, 5, z)] if two else [])
+        if opts.get("webtrap", "0") != "0":
+            cells += [(0, 4, 0), (0, 5, 0)]
+        for c in dict.fromkeys(cells):
+            if c not in taken:
+                lines.append("web %d %d %d" % c)
     lines += ["C " + " ".join("%d" % v for v in s) for s in seq]
     open(out, "w").write("\n".join(lines) + "\n")
     print(out, len(seq), "ticks")

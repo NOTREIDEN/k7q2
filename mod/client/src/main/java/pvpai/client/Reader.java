@@ -290,6 +290,10 @@ final class Reader {
                 double h = bb.maxY - (double) y;
                 return h <= 0.0 ? 0.0 : Math.min(h, 1.5);
             }
+
+            public boolean web(int x, int y, int z) {
+                return mc.theWorld.getBlockState(new BlockPos(x, y, z)).getBlock() == net.minecraft.init.Blocks.web;
+            }
         };
     }
 }

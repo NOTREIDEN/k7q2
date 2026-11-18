@@ -67,7 +67,12 @@ public final strictfp class Agent {
     /** Where what the last hit and the last second took of its health is in an observation, and how many of its own ticks that second is. */
     public static final int HURT_AT = PEARL_AT + 3 * PEARL_TURNS.length;
     public static final int HURT_WINDOW = 20;
-    public static final int OBS_DIM = HURT_AT + 2;
+    /**
+     * Where the cobwebs start in an observation: whether its own box is in
+     * one, whether the opponent's is, then the grid of {@link #webGrid}.
+     */
+    public static final int WEB_AT = HURT_AT + 2;
+    public static final int OBS_DIM = WEB_AT + 2 + GRID_FWD.length * GRID_RIGHT.length;
     private static final int TRAIL = 16;
     /**
      * A hurt of the other player counts as a hit of this one's for this
@@ -1129,6 +1134,52 @@ public final strictfp class Agent {
         o[153] = new float[] {0.5f, 0.0f, 1.0f}[carry + 1];
         // The ground around it: steps, walls, pits and drops.
         groundGrid(blocks, pos, yaw, o, GRID_AT);
+        // Cobwebs: in one, the opponent in one, and those around it.
+        o[WEB_AT] = flag(inWeb(blocks, pos));
+        o[WEB_AT + 1] = flag(inWeb(blocks, v.oPos));
+        webGrid(blocks, pos, yaw, o, WEB_AT + 2);
+    }
+
+    /**
+     * {@code Entity.doBlockCollisions} for cobwebs: whether a block whose
+     * cell the box of a player standing at {@code feet} reaches into by more
+     * than 0.001 is a cobweb.
+     */
+    public static boolean inWeb(Blocks blocks, double[] feet) {
+        double hw = (double) 0.3f, h = (double) 1.8f;
+        int x0 = Geo.floor(feet[0] - hw + 0.001), x1 = Geo.floor(feet[0] + hw - 0.001);
+        int y0 = Geo.floor(feet[1] + 0.001), y1 = Geo.floor(feet[1] + h - 0.001);
+        int z0 = Geo.floor(feet[2] - hw + 0.001), z1 = Geo.floor(feet[2] + hw - 0.001);
+        for (int x = x0; x <= x1; x++) {
+            for (int y = y0; y <= y1; y++) {
+                for (int z = z0; z <= z1; z++) {
+                    if (blocks.web(x, y, z)) {
+                        return true;
+                    }
+                }
+            }
+        }
+        return false;
+    }
+
+    /** The cobwebs in the column at (x, z) for feet at {@code feet}: a half for one at the level of the feet, a half for one at the head. */
+    public static double webs(Blocks blocks, int x, int z, double feet) {
+        int fy = Geo.floor(feet);
+        return ((blocks.web(x, fy, z) ? 1.0 : 0.0) + (blocks.web(x, fy + 1, z) ? 1.0 : 0.0)) / 2.0;
+    }
+
+    /** The grid of {@link #webs} around a player at {@code pos} looking along {@code yaw}, laid out as {@link #groundGrid}. */
+    public static void webGrid(Blocks blocks, double[] pos, float yaw, float[] o, int at) {
+        double r = (double) yaw * (Math.PI / 180.0);
+        double s = Math.sin(r), c = Math.cos(r);
+        for (int i = 0; i < GRID_FWD.length; i++) {
+            for (int j = 0; j < GRID_RIGHT.length; j++) {
+                double f = GRID_FWD[i], rt = GRID_RIGHT[j];
+                double x = pos[0] - s * f - c * rt;
+                double z = pos[2] + c * f - s * rt;
+                o[at + i * GRID_RIGHT.length + j] = (float) webs(blocks, Geo.floor(x), Geo.floor(z), pos[1]);
+            }
+        }
     }
 
     /**

@@ -11,7 +11,7 @@ public final strictfp class Arena implements Blocks {
     private final double floorY, half;
     private final int floorI, halfI, topI;
     private final boolean walls;
-    /** The terrain's box: its corner and sizes, its blocks (0 air, 1 full, 2 slab) and its void columns. */
+    /** The terrain's box: its corner and sizes, its blocks (0 air, 1 full, 2 slab, 3 cobweb) and its void columns. */
     private int x0, y0, z0, nx, ny, nz;
     private byte[] cells;
     private boolean[] voids;
@@ -41,7 +41,7 @@ public final strictfp class Arena implements Blocks {
         for (int c = 0; c < nx * nz; c++) {
             for (int j = ny - 1; j >= 0; j--) {
                 if (cells[c * ny + j] != 0) {
-                    t = Math.max(t, (double) (y0 + j) + height(cells[c * ny + j]));
+                    t = Math.max(t, (double) (y0 + j) + rayHeight(cells[c * ny + j]));
                     break;
                 }
             }
@@ -49,8 +49,19 @@ public final strictfp class Arena implements Blocks {
         top = t;
     }
 
+    /** The height of a block's collision box: none for air and a cobweb. */
     private static double height(int b) {
+        return b == 0 || b == 3 ? 0.0 : b == 2 ? 0.5 : 1.0;
+    }
+
+    /** The height of the box a ray meets in a block: a cobweb is a whole one. */
+    private static double rayHeight(int b) {
         return b == 0 ? 0.0 : b == 2 ? 0.5 : 1.0;
+    }
+
+    @Override
+    public boolean web(int x, int y, int z) {
+        return block(x, y, z) == 3;
     }
 
     private boolean baseSolid(int x, int y, int z) {
@@ -130,7 +141,7 @@ public final strictfp class Arena implements Blocks {
         double[] a = from.clone();
         int i = floor(b[0]), j = floor(b[1]), k = floor(b[2]);
         int l = floor(a[0]), i1 = floor(a[1]), j1 = floor(a[2]);
-        double t0 = height(l, i1, j1);
+        double t0 = rayHeight(block(l, i1, j1));
         if (t0 > 0.0) {
             double[] h = cubeTrace(l, i1, j1, t0, a, b);
             if (h != null) {
@@ -198,7 +209,7 @@ public final strictfp class Arena implements Blocks {
             l = floor(a[0]) - east;
             i1 = floor(a[1]) - up;
             j1 = floor(a[2]) - south;
-            double t = height(l, i1, j1);
+            double t = rayHeight(block(l, i1, j1));
             if (t > 0.0) {
                 double[] h = cubeTrace(l, i1, j1, t, a, b);
                 if (h != null) {

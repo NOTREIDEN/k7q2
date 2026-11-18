@@ -27,6 +27,10 @@ pub struct World {
     terrain_top: f64,
     /// Single full cubes placed on top of the floor (parity scenarios).
     extra: HashSet<[i32; 3]>,
+    /// Cobwebs placed the same way.
+    extra_webs: HashSet<[i32; 3]>,
+    /// Whether there is a cobweb anywhere, in the terrain or among those.
+    has_webs: bool,
     /// What stands on the floor and what is dug out of it, inside the walls.
     terrain: Option<Arc<Terrain>>,
     /// Below this height a player has fallen out of the world.
@@ -38,6 +42,11 @@ pub const AIR: u8 = 0;
 pub const FULL: u8 = 1;
 /// A bottom slab: a block with half the height.
 pub const SLAB: u8 = 2;
+/// A cobweb: nothing to collide with, a whole block to a ray (a throw
+/// stops in it, the crosshair and the line of sight end on it), and an
+/// entity whose box is in one moves a quarter as far sideways and a
+/// twentieth as far up or down on its next move, with its motion gone.
+pub const WEB: u8 = 3;
 
 /// How far below the floor a pit can reach and how high terrain can stand.
 pub const TERRAIN_BELOW: i32 = 6;
@@ -136,7 +145,7 @@ impl Terrain {
             for j in (0..self.ny as usize).rev() {
                 let b = self.cells[c * self.ny as usize + j];
                 if b != AIR {
-                    best = best.max((self.y0 + j as i32) as f64 + height(b));
+                    best = best.max((self.y0 + j as i32) as f64 + ray_height(b));
                     break;
                 }
             }
@@ -145,9 +154,21 @@ impl Terrain {
     }
 }
 
-/// The height of a block's box within its cell.
+/// The height of a block's collision box within its cell: none for air
+/// and a cobweb.
 #[inline]
 pub fn height(b: u8) -> f64 {
+    match b {
+        AIR | WEB => 0.0,
+        SLAB => 0.5,
+        _ => 1.0,
+    }
+}
+
+/// The height of the box a ray meets in a block (`Block.collisionRayTrace`
+/// over the block's bounds): a cobweb is a whole block to it.
+#[inline]
+pub fn ray_height(b: u8) -> f64 {
     match b {
         AIR => 0.0,
         SLAB => 0.5,
@@ -184,6 +205,8 @@ impl World {
             top_i,
             walls,
             extra: HashSet::new(),
+            extra_webs: HashSet::new(),
+            has_webs: false,
             terrain: None,
             void_y: f64::NEG_INFINITY,
             terrain_top: floor_y,
@@ -198,6 +221,7 @@ impl World {
     /// Puts terrain into the arena.
     pub fn set_terrain(&mut self, t: Terrain) {
         self.terrain_top = t.top().max(self.floor_y);
+        self.has_webs = !self.extra_webs.is_empty() || t.cells.iter().any(|&b| b == WEB);
         self.void_y = if t.void.iter().any(|&v| v) { self.floor_y - VOID_DEPTH } else { f64::NEG_INFINITY };
         self.terrain = Some(Arc::new(t));
     }
@@ -215,7 +239,49 @@ impl World {
                 return b;
             }
         }
+        if self.has_webs && self.extra_webs.contains(&[x, y, z]) {
+            return WEB;
+        }
         self.base_solid(x, y, z) as u8
+    }
+
+    /// The top of the box a ray meets in the block at these coordinates.
+    #[inline]
+    pub fn ray_block_height(&self, x: i32, y: i32, z: i32) -> f64 {
+        ray_height(self.block(x, y, z))
+    }
+
+    /// Whether there is a cobweb anywhere.
+    #[inline]
+    pub fn has_webs(&self) -> bool {
+        self.has_webs
+    }
+
+    /// Is the block at these coordinates a cobweb?
+    #[inline]
+    pub fn web(&self, x: i32, y: i32, z: i32) -> bool {
+        self.has_webs && self.block(x, y, z) == WEB
+    }
+
+    /// `Entity.doBlockCollisions` for cobwebs: whether a block whose cell
+    /// the box reaches into by more than 0.001 is a cobweb.
+    pub fn in_web(&self, bb: &Aabb) -> bool {
+        if !self.has_webs {
+            return false;
+        }
+        let (x0, x1) = (floor_d(bb.min[0] + 0.001), floor_d(bb.max[0] - 0.001));
+        let (y0, y1) = (floor_d(bb.min[1] + 0.001), floor_d(bb.max[1] - 0.001));
+        let (z0, z1) = (floor_d(bb.min[2] + 0.001), floor_d(bb.max[2] - 0.001));
+        for x in x0..=x1 {
+            for y in y0..=y1 {
+                for z in z0..=z1 {
+                    if self.block(x, y, z) == WEB {
+                        return true;
+                    }
+                }
+            }
+        }
+        false
     }
 
     /// The top of the box of the block at these coordinates, above its
@@ -228,8 +294,18 @@ impl World {
     /// A flat floor with single full cubes at the given block coordinates.
     /// Used to rebuild the scenery of a recording made in the real game.
     pub fn with_blocks(floor_y: f64, blocks: &[[i32; 3]]) -> World {
+        World::with_blocks_and_webs(floor_y, blocks, &[])
+    }
+
+    /// The same with cobwebs as well.
+    pub fn with_blocks_and_webs(floor_y: f64, blocks: &[[i32; 3]], webs: &[[i32; 3]]) -> World {
         let mut w = World::arena(floor_y, 4096.0, false);
         w.extra.extend(blocks.iter().copied());
+        w.extra_webs.extend(webs.iter().copied());
+        w.has_webs = !w.extra_webs.is_empty();
+        if w.has_webs {
+            w.terrain_top = webs.iter().map(|b| b[1] as f64 + 1.0).fold(w.terrain_top, f64::max);
+        }
         w
     }
 
@@ -258,7 +334,7 @@ impl World {
     /// the walls, and that space has no corner to cut.
     #[inline]
     pub fn clear_path(&self, a: V3, b: V3) -> bool {
-        if !self.extra.is_empty() {
+        if !self.extra.is_empty() || !self.extra_webs.is_empty() {
             return false;
         }
         let open = |p: &V3| {
@@ -328,7 +404,7 @@ impl World {
     }
 
     /// `Block.collisionRayTrace` for a block at (x, y, z) whose box is
-    /// `top` high (a full cube or a slab).
+    /// `top` high (a full cube, a cobweb or a slab).
     fn cube_trace(pos: [i32; 3], top: f64, start: V3, end: V3) -> Option<V3> {
         let hi = [1.0, top, 1.0];
         let off = [-(pos[0] as f64), -(pos[1] as f64), -(pos[2] as f64)];
@@ -362,7 +438,7 @@ impl World {
     pub fn ray_trace_blocks(&self, mut a: V3, b: V3, return_last: bool) -> RayHit {
         let (i, j, k) = (floor_d(b[0]), floor_d(b[1]), floor_d(b[2]));
         let (mut l, mut i1, mut j1) = (floor_d(a[0]), floor_d(a[1]), floor_d(a[2]));
-        let top = self.block_height(l, i1, j1);
+        let top = self.ray_block_height(l, i1, j1);
         if top > 0.0 {
             if let Some(h) = Self::cube_trace([l, i1, j1], top, a, b) {
                 return RayHit::Block(h);
@@ -443,7 +519,7 @@ impl World {
             l = floor_d(a[0]) - east as i32;
             i1 = floor_d(a[1]) - up as i32;
             j1 = floor_d(a[2]) - south as i32;
-            let top = self.block_height(l, i1, j1);
+            let top = self.ray_block_height(l, i1, j1);
             if top > 0.0 {
                 if let Some(h) = Self::cube_trace([l, i1, j1], top, a, b) {
                     return RayHit::Block(h);

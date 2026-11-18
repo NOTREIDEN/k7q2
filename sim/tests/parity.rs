@@ -29,7 +29,7 @@ fn traces() -> Vec<String> {
 #[test]
 fn the_real_game_is_reproduced_bit_for_bit() {
     let files = traces();
-    assert!(files.len() >= 63, "expected the recordings in tests/traces, found {}", files.len());
+    assert!(files.len() >= 67, "expected the recordings in tests/traces, found {}", files.len());
     let (mut views, mut flying_views, mut shown, mut played, mut twice) = (0, 0, 0, 0, 0);
     let (mut ticks, mut hits, mut sprint_hits, mut crits, mut attacks, mut teleports, mut kb) = (0, 0, 0, 0, 0, 0, 0);
     let (mut blocked, mut right_clicks, mut lost, mut silent, mut swords) = (0, 0, 0, 0, 0);

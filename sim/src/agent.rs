@@ -94,11 +94,15 @@ pub const PITCH_BINS: [i32; 29] = [
     -89, -55, -34, -21, -13, -8, -5, -3, -2, -1, 0, 1, 2, 3, 5, 8, 13, 21, 34, 55, 89, -377, -233, -144, 144, 233, 377, -600, 600,
 ];
 
-pub const OBS_DIM: usize = HURT_AT + 2;
+pub const OBS_DIM: usize = WEB_AT + 2 + GRID_FWD.len() * GRID_RIGHT.len();
 /// Where what the last hit and the last second took of its health is in an
 /// observation, and how many of its own ticks that second is.
 pub const HURT_AT: usize = PEARL_AT + 3 * PEARL_TURNS.len();
 pub const HURT_WINDOW: usize = 20;
+/// Where the cobwebs start in an observation: whether its own box is in
+/// one, whether the opponent's is (where its client has it), then the grid
+/// of `web_grid`.
+pub const WEB_AT: usize = HURT_AT + 2;
 
 /// Where the previews of a pearl thrown with the view turned first start in
 /// an observation, and the turns (degrees of yaw).
@@ -128,6 +132,27 @@ pub fn ground(world: &World, x: i32, z: i32, feet: f64) -> f64 {
         }
     }
     NO_GROUND
+}
+
+/// The cobwebs in the column of blocks at (x, z) for feet at height
+/// `feet`: a half for one at the level of the feet, a half for one at the
+/// level of the head.
+pub fn webs(world: &World, x: i32, z: i32, feet: f64) -> f64 {
+    let fy = mth::floor_d(feet);
+    (world.web(x, fy, z) as u8 as f64 + world.web(x, fy + 1, z) as u8 as f64) / 2.0
+}
+
+/// The grid of `webs` around a player at `pos` looking along `yaw`, laid
+/// out as the grid of `ground`.
+pub fn web_grid(world: &World, pos: V3, yaw: f32, o: &mut [f32]) {
+    let (s, c) = (yaw as f64).to_radians().sin_cos();
+    for (i, f) in GRID_FWD.iter().enumerate() {
+        for (j, r) in GRID_RIGHT.iter().enumerate() {
+            let x = pos[0] - s * f - c * r;
+            let z = pos[2] + c * f - s * r;
+            o[i * GRID_RIGHT.len() + j] = webs(world, mth::floor_d(x), mth::floor_d(z), pos[1]) as f32;
+        }
+    }
 }
 
 /// The grid of `ground` around a player at `pos` looking along `yaw`,
@@ -1263,6 +1288,14 @@ impl Agent {
         o[153] = [0.5, 0.0, 1.0][(self.carry + 1) as usize];
         // The ground around it: steps, walls, pits and drops.
         ground_grid(world, b.pos, yaw, &mut o[GRID_AT..OBS_DIM]);
+        // Cobwebs: in one, the opponent in one, and those around it.
+        if world.has_webs() {
+            o[WEB_AT] = world.in_web(&crate::aabb::Aabb::player(b.pos)) as u8 as f32;
+            o[WEB_AT + 1] = world.in_web(&crate::aabb::Aabb::player(rp.pos)) as u8 as f32;
+            web_grid(world, b.pos, yaw, &mut o[WEB_AT + 2..OBS_DIM]);
+        } else {
+            o[WEB_AT..OBS_DIM].fill(0.0);
+        }
     }
 }
 

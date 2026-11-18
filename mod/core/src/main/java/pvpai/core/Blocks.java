@@ -14,4 +14,7 @@ public interface Blocks {
      * through, 1 for a full block, 0.5 for a slab.
      */
     double height(int x, int y, int z);
+
+    /** Whether the block at (x, y, z) is a cobweb. */
+    boolean web(int x, int y, int z);
 }

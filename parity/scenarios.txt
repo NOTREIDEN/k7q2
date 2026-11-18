@@ -54,3 +54,7 @@ click3 pot 143 health=1 armor=1 prot=2 sharp=2 potions=7 many=1 refill=6 double=
 bot1 pot 151 health=1 armor=1 prot=2 sharp=2 potions=6 steak=64 pearls=16 inv=1 invpots=18 many=1 refill=6 fakepot=0.03 fake=0.02 ticks=1500 view=6 ping=200,60 cps=15.5 arena=6
 bot2 pot 152 health=1 armor=1 prot=4 sharp=5 potions=4 drinks=2 steak=64 pearls=16 inv=2 invpots=10 invdrinks=4 invbottles=2 many=1 refill=8 speedticks=500 food=15,1 sensitivity=0.83 fakepot=0.04 ticks=1500 view=6 ping=200,40 cps=16.5 arena=6
 bot3 pot 153 health=1 armor=1 prot=2 sharp=2 potions=7 pearls=16 many=1 roof=0 refill=6 ticks=1200 view=8 ping=190,80 cps=14.5 arena=20
+web1        fight      91    webs=7
+web2        move       92    webs=12 webtrap=1
+web3        pot        93    health=1 armor=1 prot=2 sharp=2 potions=7 pearls=16 many=1 refill=6 webs=8
+web4        fight      94    webs=4 webtrap=1 health=1 armor=1 prot=2 sharp=2

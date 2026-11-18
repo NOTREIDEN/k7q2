@@ -425,6 +425,12 @@ pub struct Params {
     /// less): long enough for the potions it has to see it through if it
     /// pots well and gets away now and then.
     pub drill_seconds: f64,
+    /// Share of duels with cobwebs (`terrain::add_webs`): `web_amount`
+    /// from 0 to 1 says how many patches, and in `web_trap_prob` of them
+    /// the first player starts caught in one.
+    pub web_prob: f64,
+    pub web_amount: f64,
+    pub web_trap_prob: f64,
     /// Share of new duels that are a retry of one the first player lost,
     /// from a few seconds before its death (as GT Sophy trained on its
     /// mistakes): the same moment of the same duel, played again. Each lost
@@ -581,6 +587,9 @@ impl Default for Params {
             drill_gankers: 5.0,
             drill_strength_max: 2.0,
             drill_seconds: 40.0,
+            web_prob: 0.0,
+            web_amount: 0.6,
+            web_trap_prob: 0.3,
             retry_prob: 0.0,
             league_steal: 0.0,
             throw_carry_prob: 0.0,
@@ -738,6 +747,9 @@ impl Params {
             149 => self.drill_strength_max = v,
             150 => self.drill_seconds = v,
             151 => self.combo_cap = v,
+            152 => self.web_prob = v,
+            153 => self.web_amount = v,
+            154 => self.web_trap_prob = v,
             132 => self.retry_prob = v,
             113 => self.extreme_share = v,
             114 => self.w_shake = v as f32,
@@ -1285,6 +1297,10 @@ pub fn new_duel(p: &Params, rng: &mut Rng, mode: Mode) -> (Match, [f64; 2], BotP
         // Drawn only when asked for, so that terrain comes out as it did.
         let gap = p.terrain_gap_prob > 0.0 && rng.chance(p.terrain_gap_prob);
         crate::terrain::build(&mut world, rng, &[a, b], p.terrain_amount, gap);
+    }
+    if p.web_prob > 0.0 && rng.chance(p.web_prob) {
+        let trap = p.web_trap_prob > 0.0 && rng.chance(p.web_trap_prob);
+        crate::terrain::add_webs(&mut world, rng, &[a, b], p.web_amount, trap);
     }
     let spawns = [Spawn { pos: a, yaw: yaw_a, pitch: pitch[0] }, Spawn { pos: b, yaw: yaw_b, pitch: pitch[1] }];
     let mut ping = [0.0; 2];

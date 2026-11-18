@@ -1518,7 +1518,12 @@ pub fn replay(text: &str, o: &Options) -> Result<Outcome, String> {
         .filter(|l| l.tag == "BLOCK")
         .map(|l| [l.words[0].parse().unwrap(), l.words[1].parse().unwrap(), l.words[2].parse().unwrap()])
         .collect();
-    let world = World::with_blocks(4.0, &blocks);
+    let webs: Vec<[i32; 3]> = lines
+        .iter()
+        .filter(|l| l.tag == "WEB")
+        .map(|l| [l.words[0].parse().unwrap(), l.words[1].parse().unwrap(), l.words[2].parse().unwrap()])
+        .collect();
+    let world = World::with_blocks_and_webs(4.0, &blocks, &webs);
     // Recordings made before blocking was modelled say nothing about the
     // sword being sent again, so the simulator must not send it either.
     let fmt = if head.has("fmt") { head.i("fmt") } else { 1 };

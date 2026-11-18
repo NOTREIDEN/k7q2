@@ -115,6 +115,8 @@ public final class Rig {
     static int speedAmp = 1;
     static float sensitivity = 0.5F;
     static final List<int[]> blocks = new ArrayList<int[]>();
+    /** Cobwebs placed for the scene, as "web x y z" lines. */
+    static final List<int[]> webs = new ArrayList<int[]>();
     static boolean unbreakable = false;
     static int pearls = 0;
     /** Splash potions of Instant Health II, one each in the hotbar slots from the third on. */
@@ -243,6 +245,8 @@ public final class Rig {
                 enchSeed = Long.parseLong(p[1]);
             } else if (p[0].equals("block")) {
                 blocks.add(new int[] {Integer.parseInt(p[1]), Integer.parseInt(p[2]), Integer.parseInt(p[3])});
+            } else if (p[0].equals("web")) {
+                webs.add(new int[] {Integer.parseInt(p[1]), Integer.parseInt(p[2]), Integer.parseInt(p[3])});
             } else if (p[0].equals("ping")) {
                 ping = Double.parseDouble(p[1]);
                 otherPing = Double.parseDouble(p[2]);
@@ -261,6 +265,7 @@ public final class Rig {
             + " sharp=" + sharp + " eseed=" + enchSeed + " potions=" + potions
             + " drinks=" + drinks + " steak=" + steak + " spt=" + speedTicks + " food=" + startFood + " sat=" + hf(startSat));
         for (int[] b : blocks) log("BLOCK " + b[0] + " " + b[1] + " " + b[2]);
+        for (int[] b : webs) log("WEB " + b[0] + " " + b[1] + " " + b[2]);
     }
 
     // ------------------------------------------------------------------ client side
@@ -840,6 +845,9 @@ public final class Rig {
             w.setWorldTime(6000L);
             for (int[] b : blocks) {
                 w.setBlockState(new net.minecraft.util.BlockPos(b[0], b[1], b[2]), net.minecraft.init.Blocks.stone.getDefaultState());
+            }
+            for (int[] b : webs) {
+                w.setBlockState(new net.minecraft.util.BlockPos(b[0], b[1], b[2]), net.minecraft.init.Blocks.web.getDefaultState());
             }
             real = server.getConfigurationManager().getPlayerByUsername(name);
             prepare(real);

@@ -34,7 +34,7 @@ on:
           --param lesson_dist_min=12 --param lesson_dist_max=28
           --param w_miss=1.5 --param w_pot_time=0.1
           --param agent_ping_min_ms=60 --param agent_ping_max_ms=260
-          --param lessons=511 --param extreme_share=0.75 --param bot_runner=0.15
+          --param lessons=511 --param extreme_share=0.75 --param bot_runner=0.3
           --param w_shake=0.1 --param w_waste=2.5 --param pot_strict_prob=0.3
           --param w_gift=1.5 --param w_hungry=0.05 --param w_slow=0.05
           --param drinks_stowed=0.6 --param bot_presser=0.5 --param drink_window_s=30
@@ -49,6 +49,7 @@ on:
           --param w_pearl_cost=1 --param pearl_kill_s=10
           --param drop_prob=0.3 --param drop_min=8 --param drop_max=14
           --param drill_prob=0.2 --league-param drill_self=1 --param drill_seconds=40
+          --param web_prob=0.2 --param web_amount=0.6 --param web_trap_prob=0.3
       combo_machines:
         description: How many of the machines play for combos (the last ones; they share weights with the rest)
         default: "3"

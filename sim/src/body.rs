@@ -12,6 +12,8 @@ pub struct Body {
     pub collided_h: bool,
     pub collided_v: bool,
     pub fall_distance: f32,
+    /// `isInWeb`: the last move ended with the box in a cobweb.
+    pub in_web: bool,
     /// Block boxes of the move in progress, kept to avoid allocating.
     scratch: Vec<Aabb>,
 }
@@ -29,6 +31,7 @@ impl Body {
             collided_h: false,
             collided_v: false,
             fall_distance: 0.0,
+            in_web: false,
             scratch: Vec::new(),
         }
     }
@@ -40,10 +43,20 @@ impl Body {
         self.bb = Aabb::player(p);
     }
 
-    /// `Entity.moveEntity(x, y, z)` without webs or the sneaking edge-stop,
-    /// with the step up of a living entity (`stepHeight` 0.6): a slab is
-    /// walked onto, a full block has to be jumped.
+    /// `Entity.moveEntity(x, y, z)` without the sneaking edge-stop, with
+    /// the step up of a living entity (`stepHeight` 0.6): a slab is walked
+    /// onto, a full block has to be jumped. A move that starts in a cobweb
+    /// goes a quarter as far sideways and a twentieth as far up or down,
+    /// and the motion is gone; one that ends in a cobweb leaves the body in
+    /// it (`doBlockCollisions`, `setInWeb`).
     pub fn move_entity(&mut self, world: &World, mut x: f64, mut y: f64, mut z: f64, track_fall: bool) {
+        if self.in_web {
+            self.in_web = false;
+            x *= 0.25;
+            y *= 0.05000000074505806;
+            z *= 0.25;
+            self.motion = [0.0; 3];
+        }
         let (d3, d4, d5) = (x, y, z);
         let start = self.bb;
         let mut list = std::mem::take(&mut self.scratch);
@@ -151,5 +164,9 @@ impl Body {
         if d3 != x { self.motion[0] = 0.0 }
         if d5 != z { self.motion[2] = 0.0 }
         if d4 != y { self.motion[1] = 0.0 }
+        if world.in_web(&self.bb) {
+            self.in_web = true;
+            self.fall_distance = 0.0;
+        }
     }
 }
