@@ -112,6 +112,12 @@ pub struct Params {
     pub w_turn: f64,
     /// Cost of turning back the other way right after a turn (jitter).
     pub w_flip: f64,
+    /// Cost per tick of being more than 8 blocks from a chest whose wave runs
+    /// (leaving it makes the wave reset).
+    pub w_away: f64,
+    /// Cost per tick of standing about: less than 1.5 blocks moved in the last 2
+    /// seconds and no blow landed in them.
+    pub w_idle: f64,
 }
 
 impl Default for Params {
@@ -180,15 +186,17 @@ impl Default for Params {
             w_death: 15.0,
             w_tp: 0.2,
             w_waste: 0.5,
-            w_shape: 0.03,
+            w_shape: 0.08,
             w_punch: 0.0,
             gamma: 0.998,
             arrow_self_dmg: 0.35,
             rival_prob: 0.5,
             rivals_max: 3.0,
             w_rival: 0.01,
-            w_turn: 0.006,
-            w_flip: 0.02,
+            w_turn: 0.004,
+            w_flip: 0.015,
+            w_away: 0.01,
+            w_idle: 0.03,
         }
     }
 }
@@ -219,7 +227,7 @@ params_table!(
     w_horseman, w_golem, w_rider, mob_hp_min, mob_hp_max, mob_dmg_min, mob_dmg_max, mob_kbr_max,
     mob_kb_extra_max, mob_speed_min, mob_speed_max, slow_prob, blind_prob, proj_dmg_max, proj_punch_max,
     extreme_share, gapples_min, gapples_max, pearls_max, potions_max, start_hurt, w_claim, w_kill, w_wave,
-    w_reset, w_dmg, w_hurt, w_death, w_tp, w_waste, w_shape, w_punch, gamma, arrow_self_dmg, rival_prob, rivals_max, w_rival, w_turn, w_flip,
+    w_reset, w_dmg, w_hurt, w_death, w_tp, w_waste, w_shape, w_punch, gamma, arrow_self_dmg, rival_prob, rivals_max, w_rival, w_turn, w_flip, w_away, w_idle,
 );
 
 /// What the client remembers of a chest it has seen: the hologram's last
@@ -252,6 +260,9 @@ pub struct Env {
     /// Seed of the next episode's level, if the trainer picked one.
     pub next_seed: Option<u64>,
     last_dyaw: f32,
+    idle_from: [f64; 3],
+    idle_tick: u64,
+    last_hit: u64,
 }
 
 fn lerp(a: f64, b: f64, t: f64) -> f64 {
@@ -378,7 +389,7 @@ impl Env {
         let mut rng = Rng::new(seed);
         let (g, ping, holo, extreme, ep) = new_game(&p, &mut rng);
         let n = g.chests.len();
-        let mut e = Env { p, rng, g, known: vec![Known::default(); n], ticks: 0, ep_ticks: ep, ping_ms: ping, holo_range: holo, extreme, last_hp: 20.0, since_hurt: 100, phi: 0.0, stats: [0.0; STATS_DIM], teacher_ate: -1000, next_seed: None, last_dyaw: 0.0 };
+        let mut e = Env { p, rng, g, known: vec![Known::default(); n], ticks: 0, ep_ticks: ep, ping_ms: ping, holo_range: holo, extreme, last_hp: 20.0, since_hurt: 100, phi: 0.0, stats: [0.0; STATS_DIM], teacher_ate: -1000, next_seed: None, last_dyaw: 0.0, idle_from: [0.0; 3], idle_tick: 0, last_hit: 0 };
         e.last_hp = e.g.sp.hp;
         e.update_known();
         e.phi = e.potential();
@@ -399,6 +410,9 @@ impl Env {
         self.extreme = extreme;
         self.last_hp = self.g.sp.hp;
         self.last_dyaw = 0.0;
+        self.idle_from = self.g.cp.l.body.pos;
+        self.idle_tick = 0;
+        self.last_hit = 0;
         self.since_hurt = 100;
         self.teacher_ate = -1000;
         self.update_known();
@@ -844,6 +858,31 @@ impl Env {
             r -= p.w_flip;
         }
         self.last_dyaw = inp.dyaw;
+        {
+            let pos = self.g.cp.l.body.pos;
+            let mut nearest_active = f64::INFINITY;
+            for ci in 0..self.g.chests.len() {
+                if self.known[ci].seen && self.known[ci].state == 2 {
+                    let c = self.g.chests[ci].center();
+                    nearest_active = nearest_active.min(((c[0] - pos[0]).powi(2) + (c[2] - pos[2]).powi(2)).sqrt());
+                }
+            }
+            if nearest_active.is_finite() && nearest_active > 8.0 {
+                r -= p.w_away;
+            }
+            // Standing about.
+            let t = self.ticks as u64;
+            if ev.hits > 0 {
+                self.last_hit = t;
+            }
+            let moved = ((pos[0] - self.idle_from[0]).powi(2) + (pos[2] - self.idle_from[2]).powi(2)).sqrt();
+            if moved >= 1.5 {
+                self.idle_from = pos;
+                self.idle_tick = t;
+            } else if t >= self.idle_tick + 40 && t >= self.last_hit + 40 {
+                r -= p.w_idle;
+            }
+        }
         // Shaping by potential; the potential of a dead player is zero.
         let phi = if ev.died { 0.0 } else { self.potential() };
         r += p.gamma * phi - self.phi;

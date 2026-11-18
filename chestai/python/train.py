@@ -29,8 +29,8 @@ from chestai.model import Policy, load_policy  # noqa: E402
 from chestai.ppo import Stream, RunningScale, ppo_update  # noqa: E402
 from chestai.levels import LevelBuffer  # noqa: E402
 
-DENSE = dict(chests_min=6, chests_max=14, cluster_gap_max=24, ready_share=0.65, init_timer_max_s=40,
-             reset_cd_max_s=30, ep_ticks_min=3600, ep_ticks_max=7200, map_size=128, relief=24, clutter=8)
+DENSE = dict(chests_min=4, chests_max=10, cluster_gap_min=6, cluster_gap_max=26, ready_share=0.6, init_timer_max_s=40,
+             reset_cd_max_s=30, ep_ticks_min=3600, ep_ticks_max=6000, map_size=112, relief=20, clutter=7, mob_hp_max=50)
 
 # Settings of each stage, on top of the simulator's defaults.
 STAGES = [
@@ -43,7 +43,7 @@ STAGES = [
     # A real farm has many chests close together and most of them ready, so a
     # good player claims one every 15 to 20 seconds.
     dict(name="full", **DENSE),
-    dict(name="extreme", **DENSE, extreme_share=0.5, mob_hp_max=120, mob_dmg_max=4.0, mob_kb_extra_max=1.2, mob_kbr_max=0.8,
+    dict(DENSE, name="extreme", extreme_share=0.5, mob_hp_max=120, mob_dmg_max=4.0, mob_kb_extra_max=1.2, mob_kbr_max=0.8,
          slow_prob=0.25, blind_prob=0.2, proj_dmg_max=3.5, proj_punch_max=1.5),
 ]
 # To move on from a stage: claims per minute of play at least this, and at
