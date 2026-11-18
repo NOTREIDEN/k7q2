@@ -78,6 +78,36 @@ public final class Session {
         this.dir = dir;
     }
 
+    private java.io.PrintWriter logOut;
+
+    /** A line of the play log (config/chestai/registro.txt), for working out what goes wrong on a server. */
+    private void log(String line) {
+        if (DEBUG) {
+            System.out.println(line);
+        }
+        if (!settings.log) {
+            return;
+        }
+        try {
+            File lf = new File(dir, "registro.txt");
+            if (logOut == null) {
+                if (lf.length() > 8L * 1024 * 1024) {
+                    lf.delete();
+                }
+                logOut = new java.io.PrintWriter(new java.io.FileWriter(lf, true), true);
+                logOut.println("== " + new java.util.Date());
+            }
+            logOut.println(line);
+        } catch (java.io.IOException e) {
+            settings.log = false;
+        }
+    }
+
+    /** {yaw, pitch} to add to the camera this frame, or null. */
+    public float[] cameraOffset(float partial) {
+        return pilot == null || hands == null ? null : hands.cameraOffset(partial);
+    }
+
     public boolean on() {
         return pilot != null;
     }
@@ -196,6 +226,10 @@ public final class Session {
             mc.mouseHelper = mouse;
         }
         saveChests();
+        if (logOut != null) {
+            logOut.close();
+            logOut = null;
+        }
         pilot = null;
     }
 
@@ -248,7 +282,7 @@ public final class Session {
         }
         float[] o = obs.build(f, mem, new WorldGrid(world));
         int[] a = net.act(o, draws, !settings.draw);
-        if (DEBUG && tick % 20 == 0) {
+        if ((DEBUG || settings.log) && tick % 10 == 0) {
             StringBuilder b = new StringBuilder();
             b.append(String.format(java.util.Locale.ROOT, "CHESTAI t=%d pos=%.1f,%.1f,%.1f yaw=%.0f hp=%.1f mobs=%d holos=%d known=%d a=%s |",
                 tick, f.x, f.y, f.z, f.yaw, f.hp, f.mobs.size(), f.holos.size(), mem.chests.size(), java.util.Arrays.toString(a)));
@@ -256,9 +290,16 @@ public final class Session {
                 b.append(String.format(java.util.Locale.ROOT, " (%d,%d,%d s%d %ds)", k.x, k.y, k.z, k.state, k.secs));
             }
             for (chestai.core.Frame.Mob m : f.mobs) {
-                b.append(String.format(java.util.Locale.ROOT, " [mob k%d %.0f,%.0f hp%.0f]", m.kind, m.x, m.z, m.hp));
+                double dx = m.x - f.x, dz = m.z - f.z, dy = m.y + m.h * 0.5 - (f.y + 1.62);
+                double want = Math.toDegrees(Math.atan2(-dx, dz));
+                double err = ((want - f.yaw) % 360.0 + 540.0) % 360.0 - 180.0;
+                double perr = -Math.toDegrees(Math.atan2(dy, Math.sqrt(dx * dx + dz * dz))) - me.rotationPitch;
+                b.append(String.format(java.util.Locale.ROOT, " [mob k%d %.0f,%.0f d%.1f hp%.0f/%.0f err%.0f/%.0f]", m.kind, m.x, m.z,
+                    Math.sqrt(dx * dx + dz * dz), m.hp, m.maxHp, err, perr));
             }
-            System.out.println(b);
+            b.append(" pick=").append(f.pickMob).append(" on=").append(mc.objectMouseOver != null && mc.objectMouseOver.entityHit != null
+                ? mc.objectMouseOver.entityHit.getClass().getSimpleName() : "-");
+            log(b.toString());
         }
         // What the agent can do with what the hotbar holds.
         int pearls = lay.real[Pilot.PEARL] >= 0 ? lay.pearls : 0;
@@ -267,7 +308,7 @@ public final class Session {
         if (k.throwIt && k.slot == Pilot.PEARL) {
             pearlUntil = tick + (long) Math.round(settings.pearlCooldownS * 20.0);
         }
-        if (DEBUG && k.attack) {
+        if ((DEBUG || settings.log) && k.attack) {
             dbgAttacks++;
             if (mc.objectMouseOver != null && mc.objectMouseOver.entityHit != null) {
                 dbgOnMob++;
@@ -277,8 +318,8 @@ public final class Session {
                 dbgClasses.put(key, c == null ? 1 : c + 1);
             }
         }
-        if (DEBUG && tick % 100 == 0) {
-            System.out.println("CHESTAI attacks=" + dbgAttacks + " on_entity=" + dbgOnMob + " pitch=" + me.rotationPitch + " " + dbgClasses);
+        if ((DEBUG || settings.log) && tick % 100 == 0) {
+            log("CHESTAI attacks=" + dbgAttacks + " on_entity=" + dbgOnMob + " pitch=" + me.rotationPitch + " " + dbgClasses);
         }
         hands.press(k, lay);
         if (tick % 200 == 0) {

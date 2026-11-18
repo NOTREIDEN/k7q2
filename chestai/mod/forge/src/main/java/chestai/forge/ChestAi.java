@@ -100,6 +100,19 @@ public final class ChestAi {
     }
 
     @SubscribeEvent
+    public void camera(net.minecraftforge.client.event.EntityViewRenderEvent.CameraSetup e) {
+        Minecraft mc = Minecraft.getMinecraft();
+        if (session == null || !session.on() || e.entity != mc.thePlayer || mc.gameSettings.thirdPersonView == 2) {
+            return;
+        }
+        float[] d = session.cameraOffset((float) e.renderPartialTicks);
+        if (d != null) {
+            e.yaw += d[0];
+            e.pitch += d[1];
+        }
+    }
+
+    @SubscribeEvent
     public void hurt(net.minecraftforge.event.entity.living.LivingHurtEvent e) {
         if (demo != null && Boolean.getBoolean("chestai.debug") && !e.entity.worldObj.isRemote) {
             net.minecraft.entity.Entity src = e.source.getEntity();

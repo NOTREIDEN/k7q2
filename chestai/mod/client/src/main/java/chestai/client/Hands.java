@@ -15,6 +15,9 @@ final class Hands {
 
     private final Minecraft mc;
     private double carryX, carryY;
+    /** The view before and after this tick's turn, for drawing the turn smoothly over the frames. */
+    private float fromYaw, fromPitch, toYaw, toPitch;
+    private boolean turned;
     private boolean useDown;
 
     Hands(Minecraft mc) {
@@ -65,12 +68,18 @@ final class Hands {
         long nx = Math.round(x), ny = Math.round(y);
         carryX = x - nx;
         carryY = y - ny;
+        fromYaw = mc.thePlayer.rotationYaw;
+        fromPitch = mc.thePlayer.rotationPitch;
         if (nx != 0 || ny != 0) {
             mc.thePlayer.setAngles(nx * f1, -(ny * f1));
             // What the crosshair is on after this turn, as the game works it out
             // later in the tick before it reads the buttons.
             mc.entityRenderer.getMouseOver(1.0F);
         }
+
+        toYaw = mc.thePlayer.rotationYaw;
+        toPitch = mc.thePlayer.rotationPitch;
+        turned = true;
 
         // The hand.
         int real = lay.real[k.slot];
@@ -86,8 +95,13 @@ final class Hands {
         // A click into the air costs half a second without clicks in 1.8, and the
         // simulator's air clicks do nothing: the left button is only pressed when
         // the crosshair is on an entity.
-        boolean onEntity = mc.objectMouseOver != null
-            && mc.objectMouseOver.typeOfHit == net.minecraft.util.MovingObjectPosition.MovingObjectType.ENTITY;
+        // Only a mob: never a hologram stand, a player or something invisible.
+        net.minecraft.entity.Entity aimed = mc.objectMouseOver != null
+            && mc.objectMouseOver.typeOfHit == net.minecraft.util.MovingObjectPosition.MovingObjectType.ENTITY ? mc.objectMouseOver.entityHit : null;
+        boolean onEntity = aimed instanceof net.minecraft.entity.EntityLivingBase
+            && !(aimed instanceof net.minecraft.entity.item.EntityArmorStand)
+            && !(aimed instanceof net.minecraft.entity.player.EntityPlayer)
+            && !aimed.isInvisible();
         if (k.attack && !onMount && onEntity) {
             KeyBinding.onTick(gs.keyBindAttack.getKeyCode());
         }
@@ -97,6 +111,20 @@ final class Hands {
         }
         key(gs.keyBindUseItem, hold);
         useDown = hold;
+    }
+
+    /**
+     * How far the drawn view is from the real one at this point of the tick:
+     * the game turns the view once a tick, a mouse turns it all through the
+     * frames, so the camera is drawn going from the old view to the new one.
+     * Only the picture changes; the game and the server see the same turns.
+     */
+    float[] cameraOffset(float partial) {
+        if (!turned) {
+            return null;
+        }
+        float p = Math.max(0f, Math.min(1f, partial));
+        return new float[] {(fromYaw - toYaw) * (1f - p), (fromPitch - toPitch) * (1f - p)};
     }
 
     void release() {
