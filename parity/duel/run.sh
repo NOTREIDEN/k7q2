@@ -38,7 +38,7 @@ until [ -e /tmp/.X11-unix/X93 ] && [ -e /tmp/.X11-unix/X94 ]; do sleep 0.2; done
 DISPLAY=:94 "$JAVA" -Xmx900M -Dduel.role=host -Dduel.port="$PORT" -Dduel.dir="$W" ${RIVAL:+-Dduel.policy="$RIVAL"} \
   -Dduel.delay="${DELAY:-100}" -Dduel.kb="${KB:-servidor}" -Dduel.rounds="${ROUNDS:-3}" -Dduel.seconds="${SECONDS_MAX:-90}" \
   -Dduel.hostspeed="${RIVAL_SPEED:-1}" -Dduel.velocity="${RIVAL_VELOCITY:-1}" -Dduel.cps="${RIVAL_CPS:-20}" -Dduel.view=5 \
-  -Dduel.layout="${LAYOUT:-}" -Dduel.speedsecs="${SPEED_SECONDS:-60}" -Dduel.food="${FOOD:-20}" -Dduel.floor="${FLOOR_KIND:-}" -Dduel.extra="${EXTRA:-0}" -Dduel.extramode="${EXTRA_MODE:-pegan}" \
+  -Dduel.layout="${LAYOUT:-}" -Dduel.speedsecs="${SPEED_SECONDS:-60}" -Dduel.food="${FOOD:-20}" -Dduel.floor="${FLOOR_KIND:-}" -Dduel.extra="${EXTRA:-0}" -Dduel.extramode="${EXTRA_MODE:-pegan}" -Dduel.noconfirm="${NO_CONFIRM:-false}" \
   -Dduel.ping=10 -Dduel.otherping=$(( 2 * ${DELAY:-100} )) \
   -cp "$CP" -Djava.library.path="${LWJGL_NATIVES:-/usr/lib/jni}" Start --username "${RIVAL_NAME:-Espejo}" --width 320 --height 240 > "$W/host.log" 2>&1 &
 J1=$!

@@ -262,16 +262,13 @@ public final class Session implements Wire.Tap {
                     }
                     return null;
                 case REJECTED:
-                case TIMED_OUT:
                     // The game takes this in stride: the client answers the
                     // refusal and the server sends the inventory again. The
                     // screen shuts and the agent plays on.
                     bot.waitForInventory();
                     started = true;
                     me.closeScreen();
-                    return step == InventoryRefill.Step.REJECTED
-                        ? "El servidor rechazo un clic de inventario: cierro el inventario y sigo."
-                        : "No llego la confirmacion de un clic de inventario: cierro el inventario y sigo.";
+                    return "El servidor rechazo un clic de inventario: cierro el inventario y sigo.";
                 default:
                     break;
             }

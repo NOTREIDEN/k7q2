@@ -1,27 +1,36 @@
 package pvpai.client;
 
 import java.lang.reflect.Field;
-import java.util.concurrent.TimeUnit;
 import net.minecraft.client.entity.EntityPlayerSP;
 import net.minecraft.client.gui.GuiScreen;
 import net.minecraft.client.gui.inventory.GuiInventory;
 import net.minecraft.inventory.Container;
 import net.minecraft.network.play.server.S32PacketConfirmTransaction;
 
-/** Follows the vanilla inventory click until the server confirms it. */
+/**
+ * Follows the clicks of a refill in the vanilla inventory screen. The
+ * clicks go one a tick, as a player makes them and as in training, without
+ * waiting for the server to confirm each one: the client has already moved
+ * the stacks itself, and the server takes the clicks in the order they were
+ * sent. Some servers never send the confirmation of a click they took, and
+ * waiting for it there held the screen open for a second. A click the
+ * server refuses still shuts the screen when its refusal comes.
+ */
 final class InventoryRefill {
-    enum Step { PLAY, WAIT, CLOSE, REJECTED, TIMED_OUT }
+    enum Step { PLAY, WAIT, CLOSE, REJECTED }
 
     private static final Field TRANSACTION = Names.field(Container.class, "transactionID", "field_75150_e");
-    private static final long CONFIRM_TIMEOUT = TimeUnit.SECONDS.toNanos(1);
     private static final int IDLE_TICKS = 8;
 
     private GuiScreen screen;
+    /** The action number the container would give the next click, before this tick's keys. */
     private short action;
-    private int windowId;
+    private int windowId = -1;
+    /** The action numbers of the clicks sent on this screen, first to last. */
+    private short first, last;
+    private boolean clicked;
     private int idleTicks;
-    private long sentAt;
-    private boolean pending, accepted, rejected, closeAfterClick;
+    private boolean rejected, closeNext;
 
     Step step(GuiScreen current, EntityPlayerSP player) {
         if (!(current instanceof GuiInventory)) {
@@ -36,9 +45,6 @@ final class InventoryRefill {
         if (rejected) {
             return Step.REJECTED;
         }
-        if (pending) {
-            return System.nanoTime() - sentAt >= CONFIRM_TIMEOUT ? Step.TIMED_OUT : Step.WAIT;
-        }
         if (player.isSprinting()) {
             // The screen has let go of the keys and the sprint ends on the
             // next tick; the click waits for it. Sliding on, or in the air
@@ -47,10 +53,10 @@ final class InventoryRefill {
             // tick the policy asked for potions, over and over.
             return Step.WAIT;
         }
-        if (accepted) {
-            // Give the client a tick to apply the inventory changes before deciding what to move next.
-            accepted = false;
-            return closeAfterClick ? Step.CLOSE : Step.WAIT;
+        if (closeNext) {
+            // The last click went out on the tick before: shut the screen.
+            closeNext = false;
+            return Step.CLOSE;
         }
         if (++idleTicks > IDLE_TICKS) {
             return Step.CLOSE;
@@ -67,11 +73,15 @@ final class InventoryRefill {
         if (number == action) {
             return;
         }
+        // The click of this tick took action numbers action .. number - 1.
+        if (!clicked) {
+            first = action;
+            clicked = true;
+        }
+        last = (short) (number - 1);
         action = number;
         windowId = container.windowId;
-        sentAt = System.nanoTime();
-        pending = true;
-        this.closeAfterClick = closeAfterClick;
+        closeNext = closeAfterClick;
         idleTicks = 0;
     }
 
@@ -80,19 +90,21 @@ final class InventoryRefill {
     }
 
     void confirmed(S32PacketConfirmTransaction packet) {
-        if (pending && windowId == packet.getWindowId() && action == packet.getActionNumber()) {
-            pending = false;
-            accepted = packet.func_148888_e();
-            rejected = !accepted;
+        if (clicked && !packet.func_148888_e() && windowId == packet.getWindowId()) {
+            // One of this screen's clicks, counted the way the shorts wrap.
+            short n = packet.getActionNumber();
+            if ((short) (n - first) >= 0 && (short) (last - n) >= 0) {
+                rejected = true;
+            }
         }
     }
 
     void reset() {
         screen = null;
         idleTicks = 0;
-        pending = false;
-        accepted = false;
+        clicked = false;
+        windowId = -1;
         rejected = false;
-        closeAfterClick = false;
+        closeNext = false;
     }
 }

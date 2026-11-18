@@ -96,6 +96,8 @@ public final class Rig {
     /** duel.floor=mesas: blocks that open under the feet and at the walls. */
     static final boolean MESAS = "mesas".equals(System.getProperty("duel.floor", ""));
     static int screens;
+    /** Ticks the inventory screen has been open on the client, for the log. */
+    static int invTicks;
     /**
      * duel.extra: players more, with no client, that the server moves to
      * the one that joins from sides of their own while a round lasts.
@@ -103,6 +105,8 @@ public final class Rig {
      * (they stand by it and hit nobody). They cannot die.
      */
     static final int EXTRA = Integer.getInteger("duel.extra", 0);
+    /** duel.noconfirm: the server does not confirm the inventory clicks it takes, as some servers do not. */
+    static final boolean NO_CONFIRM = Boolean.getBoolean("duel.noconfirm");
     static final boolean EXTRA_HIT = !"quietos".equals(System.getProperty("duel.extramode", "pegan"));
     static final java.util.List<EntityPlayerMP> extras = new java.util.ArrayList<EntityPlayerMP>();
     static final java.util.List<io.netty.channel.embedded.EmbeddedChannel> extraChannels = new java.util.ArrayList<io.netty.channel.embedded.EmbeddedChannel>();
@@ -259,6 +263,12 @@ public final class Rig {
             }
         } else {
             deadFor = 0;
+            if (mc.currentScreen instanceof GuiInventory) {
+                invTicks++;
+            } else if (invTicks > 0) {
+                say("the inventory was open " + invTicks + " ticks");
+                invTicks = 0;
+            }
             if (mc.currentScreen != null && !(mc.currentScreen instanceof GuiInventory && on())) {
                 if (!(mc.currentScreen instanceof GuiInventory) && !(mc.currentScreen instanceof net.minecraft.client.gui.GuiChat)) {
                     screens++;
@@ -531,6 +541,34 @@ public final class Rig {
         return a.getName().equals(hostName) ? new EntityPlayerMP[] {b, a} : new EntityPlayerMP[] {a, b};
     }
 
+    /** The confirmations of the clicks this player's server takes are not sent to it. */
+    static void dropConfirmations(EntityPlayerMP p) {
+        try {
+            net.minecraft.network.NetworkManager nm = p.playerNetServerHandler.getNetworkManager();
+            for (Field f : net.minecraft.network.NetworkManager.class.getDeclaredFields()) {
+                if (io.netty.channel.Channel.class.isAssignableFrom(f.getType())) {
+                    f.setAccessible(true);
+                    io.netty.channel.Channel ch = (io.netty.channel.Channel) f.get(nm);
+                    ch.pipeline().addAfter("encoder", "noconfirm", new io.netty.channel.ChannelOutboundHandlerAdapter() {
+                        @Override
+                        public void write(io.netty.channel.ChannelHandlerContext ctx, Object msg, io.netty.channel.ChannelPromise promise) throws Exception {
+                            if (msg instanceof net.minecraft.network.play.server.S32PacketConfirmTransaction
+                                    && ((net.minecraft.network.play.server.S32PacketConfirmTransaction) msg).func_148888_e()) {
+                                say("a confirmation of a click is not sent");
+                                promise.setSuccess();
+                                return;
+                            }
+                            super.write(ctx, msg, promise);
+                        }
+                    });
+                    say("the confirmations of inventory clicks are not sent to " + p.getName());
+                }
+            }
+        } catch (Exception e) {
+            say("noconfirm failed: " + e);
+        }
+    }
+
     static void tell(MinecraftServer server, String text) {
         server.getConfigurationManager().sendChatMsg(new ChatComponentText(text));
     }
@@ -545,6 +583,9 @@ public final class Rig {
             if (!met) {
                 met = true;
                 phaseAt = stick;
+                if (NO_CONFIRM) {
+                    dropConfirmations(p[0]);
+                }
                 Scoreboard sb = server.worldServerForDimension(0).getScoreboard();
                 for (int i = 0; i < 2; i++) {
                     // Got now, it is not announced in the middle of a round.
