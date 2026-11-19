@@ -24,8 +24,16 @@ import pvpai.core.Policy;
 public final class Session implements Wire.Tap {
     /** Seconds of Speed left at which the agents of training take a drink. */
     private static final double DRINK_WINDOW_S = 30.0;
-    /** What stands in for a ping the player list does not say. */
-    private static final double PING = 200.0, OTHER_PING = 60.0;
+    /**
+     * What stands in for a ping the player list does not say yet. The agent
+     * fights much worse told a ping far above its own than far below it
+     * (in training, told 200 ms at a real 40 ms it died five times as
+     * often), so the guess is low, and the list is read again on every tick
+     * until it says.
+     */
+    private static final double PING = 100.0, OTHER_PING = 60.0;
+    /** Whether its own ping is still the guess. */
+    private boolean pingGuessed;
 
     /** A mouse that does not turn the view: while the agent aims, the player's hand must not. */
     private static final class Still extends MouseHelper {
@@ -114,6 +122,7 @@ public final class Session implements Wire.Tap {
         double ping = s.ping >= 0.0 ? s.ping : Scout.ping(mc, mc.thePlayer);
         double otherPing = s.otherPing >= 0.0 ? s.otherPing : Scout.ping(mc, other);
         boolean guessed = ping < 0.0;
+        pingGuessed = guessed;
         ping = ping < 0.0 ? PING : ping;
         otherPing = otherPing < 0.0 ? OTHER_PING : otherPing;
         double cps = s.cpsMin + draws.nextDouble() * (s.cpsMax - s.cpsMin);
@@ -250,6 +259,13 @@ public final class Session implements Wire.Tap {
             if (next != null && next != bot.other()) {
                 bot.target(next);
                 switches++;
+            }
+        }
+        if (pingGuessed && bot != null && mc.thePlayer == me) {
+            double ping = Scout.ping(mc, me);
+            if (ping >= 0.0) {
+                pingGuessed = false;
+                bot.setPing(ping);
             }
         }
         String why = check();

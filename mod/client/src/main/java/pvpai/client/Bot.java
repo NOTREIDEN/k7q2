@@ -96,6 +96,13 @@ public final class Bot implements Wire.Tap {
      * one before is let go, the hit is reckoned for its armour, and the
      * view turns to it over a few ticks.
      */
+    /** Its own ping, now that the player list says it. */
+    void setPing(double ms) {
+        if (agent != null) {
+            agent.setPing(ms);
+        }
+    }
+
     void target(EntityOtherPlayerMP o) {
         other = o;
         book.newOpponent(o.hurtTime);

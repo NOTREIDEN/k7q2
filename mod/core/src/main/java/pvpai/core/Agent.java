@@ -122,7 +122,10 @@ public final strictfp class Agent {
     }
 
     /** The ping of its own player and of the other, in milliseconds. */
-    private final double pingOwn, pingOther;
+    private double pingOwn;
+    private final double pingOther;
+    /** Whether the delay of its own potions has been seen yet (else it is reckoned from the ping). */
+    private boolean lagSeen;
     /** Its click rate and what is left of its budget. */
     private final double cps;
     private double clickTokens;
@@ -248,6 +251,19 @@ public final strictfp class Agent {
      * ({@code f * f * f * 8} with {@code f = sensitivity * 0.6 + 0.2}), and
      * where its player stands.
      */
+    /**
+     * Its own ping as it has just come to be known (the player list may say
+     * none for the first half minute on a server): the agent is shown it
+     * from now on, and reckons the delay of its potions from it until it
+     * has seen one of them.
+     */
+    public void setPing(double ms) {
+        pingOwn = ms;
+        if (!lagSeen) {
+            lag = (int) Math.floor(pingOwn / 50.0) + 1;
+        }
+    }
+
     public Agent(double pingOwn, double pingOther, double cps, float mouseF1, double[] feet) {
         this.pingOwn = pingOwn;
         this.pingOther = pingOther;
@@ -867,6 +883,7 @@ public final strictfp class Agent {
             for (View.Thrown e : v.thrown) {
                 if (e.mine && e.kind == Inv.KIND_POTION && e.age == 0) {
                     lag = Math.max(sinceThrow, 1);
+                    lagSeen = true;
                     break;
                 }
             }
