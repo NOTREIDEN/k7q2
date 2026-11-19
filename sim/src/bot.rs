@@ -77,6 +77,15 @@ pub struct BotParams {
     /// the server adds the thrower's movement to the throw.
     pub perfect_pot: bool,
     pub carry: bool,
+    /// It pots as a perfect bot does (`Params::bot_pot_exact`): only when
+    /// all eight points can go in (12 health or less), at its own health
+    /// for it or as soon as the opponent is too far to get at it or at the
+    /// potion while it flies; it then sprint-jumps away and throws at the
+    /// tick and pitch at which its own run, worked out with the game's
+    /// movement, takes the potion onto it (`exact_pot`), and steers under
+    /// it while it flies. Nothing else in between: no hit, block, pearl or
+    /// drink.
+    pub pot_exact: bool,
     /// It pots as players do with the opponent on them
     /// (`Params::pot_turn_prob`): at 6 to 11 health, or after three hits
     /// taken in a row with 14 or less, it takes the potion in hand, turns
@@ -185,6 +194,7 @@ impl BotParams {
                 presser: false,
                 perfect_pot: false,
                 carry: false,
+                pot_exact: false,
                 pot_turn: false,
                 pot_run: 0,
                 spacer: false,
@@ -220,6 +230,7 @@ impl BotParams {
                 presser: false,
                 perfect_pot: false,
                 carry: false,
+                pot_exact: false,
                 pot_turn: false,
                 pot_run: 0,
                 spacer: false,
@@ -255,6 +266,7 @@ impl BotParams {
                 presser: false,
                 perfect_pot: false,
                 carry: false,
+                pot_exact: false,
                 pot_turn: false,
                 pot_run: 0,
                 spacer: false,
@@ -290,6 +302,7 @@ impl BotParams {
                 presser: false,
                 perfect_pot: false,
                 carry: false,
+                pot_exact: false,
                 pot_turn: false,
                 pot_run: 0,
                 spacer: false,
@@ -391,6 +404,16 @@ pub struct BotState {
     trade_crit: bool,
     /// A selector's (`BotParams::select`) ticks of holding its click.
     sel_wait: i32,
+    /// An exact potter's (`BotParams::pot_exact`) throw: the ticks it has
+    /// looked for one, the keys it holds (forward, strafe, jump), and the
+    /// potion as it works it out (where it is, how it moves, its age and
+    /// the ticks it still flies).
+    ex_seek: i32,
+    ex_keys: (i8, i8, bool),
+    ex_pos: V3,
+    ex_m: V3,
+    ex_age: i32,
+    ex_fly: i32,
 }
 
 fn gauss(rng: &mut Rng) -> f64 {
@@ -730,6 +753,279 @@ fn away_yaw(c: &Client, world: &World, dx: f64, dz: f64, hdist: f64) -> f64 {
 /// below which it pots after three hits taken in a row.
 const POT_TURN_NEAR: f64 = 8.0;
 const POT_TURN_COMBO_HP: f32 = 14.0;
+
+/// An exact potter (`BotParams::pot_exact`) looks for a throw that gives
+/// it all eight points with the opponent out of the way for at most this
+/// many ticks, and at this much health or less it does not wait for the
+/// opponent to be out of the way. The reach of the opponent it keeps out
+/// of while the potion flies, feet to feet, and the ticks of the throw it
+/// works out at most.
+const EXACT_SEEK: i32 = 30;
+const EXACT_URGENT: f32 = 5.0;
+const EXACT_REACH: f64 = 3.6;
+const EXACT_FLY: usize = 10;
+
+/// Where an exact potter's feet will be after each of the next ticks if it
+/// looks at `yaw` and holds `keys` (forward, strafe, jump) on each: the
+/// client's own movement (the sprint it gets with W and food enough, the
+/// pull of the keys, friction, jumps, walls), from the motion it has now.
+fn exact_run(c: &Client, world: &World, yaw: f32, keys: (i8, i8, bool), n: usize) -> [V3; EXACT_FLY + 2] {
+    let mut l = c.lp.l.clone();
+    l.yaw = yaw;
+    let food = c.lp.food > 6;
+    let mut out = [l.body.pos; EXACT_FLY + 2];
+    for k in 0..out.len() {
+        if k >= n.max(1) {
+            out[k] = out[k - 1];
+            continue;
+        }
+        let sprint = keys.0 > 0 && food && !l.body.collided_h;
+        l.sprinting = sprint;
+        l.attr.sprint = sprint;
+        l.living_update(world, keys.1 as f32, keys.0 as f32, keys.2, false);
+        l.player_post();
+        out[k] = l.body.pos;
+    }
+    out
+}
+
+/// Where the opponent may be at each tick from now, the worst case for an
+/// exact potter: coming straight at `me(t)` as fast as it runs, `lead`
+/// ticks early, and never closer than its box lets it.
+fn exact_other(c: &Client, st: &BotState, me: V3, t: i32, lead: i32) -> V3 {
+    let them = c.rp.pos;
+    let run = (crate::living::Attr { sprint: true, ..c.lp.l.attr }.value() * 2.1).max(st.seen_vel[0].hypot(st.seen_vel[1]));
+    let (dx, dz) = (me[0] - them[0], me[2] - them[2]);
+    let d = dx.hypot(dz).max(1e-9);
+    let go = (run * (t + lead) as f64).min((d - 0.7).max(0.0));
+    [them[0] + dx / d * go, them[1], them[2] + dz / d * go]
+}
+
+/// A throw of an exact potter worked out: the potion thrown along `yaw`
+/// and `pitch` on the tick after the one whose keys start `run` (its feet
+/// after that tick and each one after), with the deviation `z` of the
+/// server's random part. Where the potion starts and how it moves, the
+/// ticks it flies and the health it offers it and the opponent.
+fn exact_throw(c: &Client, world: &World, st: &BotState, carry: bool, yaw: f32, pitch: f32, run: &[V3; EXACT_FLY + 2], z: f64) -> (V3, V3, i32, [f32; 2]) {
+    let v = Kind::Potion.speed() as f64;
+    let b = c.lp.l.body.pos;
+    let (from, dir) = crate::server::throw_heading(Kind::Potion, run[0], yaw, pitch);
+    let mut m = [dir[0] * v, (dir[1] + z * crate::server::THROW_SPREAD) * v, dir[2] * v];
+    if carry {
+        m[0] += run[0][0] - b[0];
+        m[2] += run[0][2] - b[2];
+        if run[0][1] > run[1][1].min(b[1]) + 1e-6 {
+            m[1] += run[0][1] - b[1];
+        }
+    }
+    let (_, ticks, heal) = crate::agent::potion_outcome(world, from, m, 0, 0, |j, t| {
+        let me = run[((t + 1).max(0) as usize).min(EXACT_FLY + 1)];
+        if j == 0 {
+            me
+        } else {
+            exact_other(c, st, me, t + 2, 1)
+        }
+    });
+    (from, m, ticks, heal)
+}
+
+/// Whether the opponent, coming as fast as it can, stays out of reach of
+/// an exact potter that runs as `run` says for `ticks` ticks and more than
+/// four blocks from the potion's spot (it gets none of it).
+fn exact_safe(c: &Client, st: &BotState, run: &[V3; EXACT_FLY + 2], ticks: i32) -> bool {
+    (0..=(ticks + 1).min(EXACT_FLY as i32 + 1)).all(|t| {
+        let me = run[t as usize];
+        let o = exact_other(c, st, me, t + 1, 2);
+        (me[0] - o[0]).hypot(me[2] - o[2]) > EXACT_REACH
+    }) && {
+        let me = run[((ticks + 1).max(0) as usize).min(EXACT_FLY + 1)];
+        let o = exact_other(c, st, me, ticks + 2, 2);
+        (me[0] - o[0]).hypot(me[2] - o[2]) > 4.3
+    }
+}
+
+/// An exact potter's potions (`BotParams::pot_exact`), in place of the
+/// other bots' ways. Stage 0: hurt by eight points at least, it starts to
+/// look for a throw (stage 5) at its own health for it, or at once if the
+/// opponent is far enough not to get at it. Stage 5: the potion in hand,
+/// its back to the opponent, it sprint-jumps away, and each tick it works
+/// out, for a few ways to go on (that run, that run without jumps, standing,
+/// a jump on the spot) and every pitch, the health a throw on the next tick
+/// gives it; it turns to the best one when that gives all eight points
+/// with the opponent out of the way, or the best there is once it has
+/// looked for long enough or has little health left. Stage 2: the throw.
+/// Stage 6: it takes the sword again and, until the potion breaks, holds
+/// each tick the keys whose run takes the potion onto it best.
+#[allow(clippy::too_many_arguments)]
+fn exact_pot(c: &Client, world: &World, p: &BotParams, st: &mut BotState, inp: &mut Input, deg_per_count: f64, dx: f64, dz: f64, hdist: f64) {
+    use crate::server::{MAX_HEALTH, POTION_HEAL};
+    let lp = &c.lp;
+    let slot = lp.potions.trailing_zeros() as u8 + 1;
+    let hold = |inp: &mut Input, keys: (i8, i8, bool)| {
+        inp.forward = keys.0;
+        inp.strafe = keys.1;
+        inp.jump = keys.2;
+        inp.sprint_key = keys.0 > 0;
+        inp.attack = false;
+        inp.use_item = false;
+    };
+    let room = lp.health <= MAX_HEALTH - POTION_HEAL;
+    if st.potion_stage == 0 {
+        let ready = p.potion > 0.0
+            && lp.potions != 0
+            && room
+            && st.potion_wait == 0
+            && st.pearl_stage == 0
+            && st.use_stage == 0
+            && lp.held == SLOT_SWORD
+            && st.block_left == 0;
+        let want = lp.health <= st.potion_at.max(10.0) || hdist > 6.0;
+        let flying = c.thrown.iter().any(|e| e.mine && e.kind == Kind::Potion);
+        if !(ready && want) || flying {
+            return;
+        }
+        st.potion_stage = 5;
+        st.ex_seek = 0;
+    }
+    match st.potion_stage {
+        5 => {
+            if lp.potions == 0 || !room {
+                st.potion_stage = 0;
+                return;
+            }
+            st.ex_seek += 1;
+            let away = away_yaw(c, world, dx, dz, hdist);
+            let urgent = st.ex_seek > EXACT_SEEK || lp.health <= EXACT_URGENT;
+            let yaw = away as f32;
+            let run_keys = (1i8, 0i8, true);
+            // The best throw on the next tick for each way to go on.
+            let mut best: Option<(f64, f32, (i8, i8, bool), V3, V3, i32)> = None;
+            // Not worth working out while the opponent would get at it during
+            // a short throw, unless it cannot wait.
+            let open = urgent || exact_safe(c, st, &exact_run(c, world, yaw, run_keys, 7), 4);
+            if !lp.using_item && open {
+                for keys in [run_keys, (1, 0, false), (0, 0, false), (0, 0, true)] {
+                    let run = exact_run(c, world, yaw, keys, EXACT_FLY + 2);
+                    let mut pick = (f64::MIN, 90.0f32, 0i32);
+                    let try_pitch = |pitch: f32, pick: &mut (f64, f32, i32)| {
+                        let (_, _, ticks, heal) = exact_throw(c, world, st, p.carry, yaw, pitch, &run, 0.0);
+                        let score = heal[0].min(MAX_HEALTH - lp.health) as f64 * 10.0 - heal[1] as f64 * 2.0 - ticks as f64 * 0.05;
+                        if score > pick.0 {
+                            *pick = (score, pitch, ticks);
+                        }
+                    };
+                    let mut pitch = 90.0f32;
+                    while pitch >= 20.0 {
+                        try_pitch(pitch, &mut pick);
+                        pitch -= 5.0;
+                    }
+                    let mid = pick.1;
+                    for d in [-3.0f32, -2.0, -1.0, 1.0, 2.0, 3.0] {
+                        if (20.0..=90.0).contains(&(mid + d)) {
+                            try_pitch(mid + d, &mut pick);
+                        }
+                    }
+                    // The server's random part: the worst of a little either way.
+                    let mut low = POTION_HEAL;
+                    let mut gift = 0.0f32;
+                    for z in [-1.5, 0.0, 1.5] {
+                        let (_, _, _, heal) = exact_throw(c, world, st, p.carry, yaw, pick.1, &run, z);
+                        low = low.min(heal[0]);
+                        gift = gift.max(heal[1]);
+                    }
+                    let (from, m, ticks, _) = exact_throw(c, world, st, p.carry, yaw, pick.1, &run, 0.0);
+                    let safe = exact_safe(c, st, &run, ticks);
+                    let ok = low >= POTION_HEAL && gift <= 0.0 && safe;
+                    let score = if ok { 1000.0 } else { 0.0 } + low as f64 * 10.0 - gift as f64 * 2.0 - ticks as f64 * 0.05;
+                    if best.as_ref().map_or(true, |b| score > b.0) {
+                        best = Some((score, pick.1, keys, from, m, ticks));
+                    }
+                }
+            }
+            match best {
+                Some((score, pitch, keys, from, m, ticks)) if score >= 1000.0 || urgent => {
+                    // The turn to it: on the next tick the throw.
+                    inp.dx = (mth::wrap_deg(yaw as f64 - lp.l.yaw as f64) / deg_per_count).round() as i32;
+                    inp.dy = ((pitch as f64 - lp.l.pitch as f64) / deg_per_count).round() as i32;
+                    hold(inp, keys);
+                    inp.slot_key = slot;
+                    st.ex_keys = keys;
+                    st.ex_pos = from;
+                    st.ex_m = m;
+                    st.ex_age = 0;
+                    st.ex_fly = ticks + 1;
+                    st.potion_stage = 2;
+                }
+                _ => {
+                    // Away from the opponent with the potion in hand.
+                    inp.dx = (mth::wrap_deg(away - lp.l.yaw as f64) / deg_per_count).round() as i32;
+                    inp.dy = ((-(lp.l.pitch as f64)) / deg_per_count).round() as i32;
+                    hold(inp, run_keys);
+                    inp.slot_key = slot;
+                }
+            }
+        }
+        2 => {
+            hold(inp, st.ex_keys);
+            inp.slot_key = slot;
+            inp.use_item = true;
+            inp.dx = 0;
+            inp.dy = 0;
+            st.potion_stage = 6;
+            st.potion_wait = 4;
+            exact_fly(st);
+        }
+        6 => {
+            inp.slot_key = SLOT_SWORD + 1;
+            inp.dx = 0;
+            inp.dy = 0;
+            // The keys whose run, held to the end, takes the potion onto it
+            // best, the ones it holds first.
+            let yaw = lp.l.yaw;
+            let mut best = (f64::MIN, st.ex_keys);
+            let mut tries = vec![st.ex_keys, (0, 1, false), (0, -1, false)];
+            for fw in [1i8, 0, -1] {
+                for j in [false, true] {
+                    tries.push((fw, 0, j));
+                }
+            }
+            let n = (st.ex_fly + 1).max(1) as usize;
+            for keys in tries {
+                let run = exact_run(c, world, yaw, keys, n);
+                let (_, _, heal) = crate::agent::potion_outcome(world, st.ex_pos, st.ex_m, st.ex_age, 0, |j, t| {
+                    let me = run[(t.max(0) as usize).min(EXACT_FLY + 1)];
+                    if j == 0 {
+                        me
+                    } else {
+                        exact_other(c, st, me, t + 1, 1)
+                    }
+                });
+                let score = heal[0] as f64 * 10.0 - heal[1] as f64 * 2.0;
+                if score > best.0 + 1e-9 {
+                    best = (score, keys);
+                }
+            }
+            st.ex_keys = best.1;
+            hold(inp, best.1);
+            exact_fly(st);
+            if st.ex_fly <= 0 {
+                st.potion_stage = 0;
+            }
+        }
+        _ => st.potion_stage = 0,
+    }
+}
+
+/// An exact potter's potion one tick on, as the server moves it.
+fn exact_fly(st: &mut BotState) {
+    for k in 0..3 {
+        st.ex_pos[k] += st.ex_m[k];
+        st.ex_m[k] *= 0.99f32 as f64;
+    }
+    st.ex_m[1] -= Kind::Potion.gravity() as f64;
+    st.ex_age += 1;
+    st.ex_fly -= 1;
+}
 
 pub fn act(c: &Client, world: &World, cfg: &ClientCfg, p: &BotParams, st: &mut BotState, rng: &mut Rng) -> Input {
     let mut inp = act_flat(c, world, cfg, p, st, rng);
@@ -1150,6 +1446,7 @@ fn act_flat(c: &Client, world: &World, cfg: &ClientCfg, p: &BotParams, st: &mut 
         st.potion_at = rng.range(lo, hi) as f32;
     }
     match st.potion_stage {
+        _ if p.pot_exact => exact_pot(c, world, p, st, &mut inp, deg_per_count, dx, dz, hdist),
         0 => {
             // On the run it heals itself up: another potion while six of
             // its eight points would not be wasted.
