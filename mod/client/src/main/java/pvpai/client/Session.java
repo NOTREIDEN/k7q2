@@ -53,6 +53,9 @@ public final class Session implements Wire.Tap {
     private boolean started;
     private boolean openingInventory;
     private GuiInventory ownedInventory;
+    /** What writes the duel down, and why the duel ended when the agent left the keys by itself. */
+    private Recorder recorder;
+    private String endWhy;
 
     public Session(Minecraft mc, Policy policy) {
         this.mc = mc;
@@ -122,6 +125,8 @@ public final class Session implements Wire.Tap {
             }
         });
         bot.block(s.block);
+        recorder = Recorder.open(mc, other, d, ping, otherPing, cps, s.block);
+        bot.record(recorder);
         bot.release();
         // The agent starts a duel with its sword in hand. If the player holds
         // something else, the sword is taken up as the wheel of the mouse would.
@@ -168,6 +173,11 @@ public final class Session implements Wire.Tap {
         if (bot == null) {
             return;
         }
+        if (recorder != null) {
+            recorder.close(endWhy);
+            recorder = null;
+        }
+        endWhy = null;
         try {
             bot.release();
             Wire.remove(manager);
@@ -244,6 +254,7 @@ public final class Session implements Wire.Tap {
         }
         String why = check();
         if (why != null) {
+            endWhy = why;
             stop();
             return why;
         }
