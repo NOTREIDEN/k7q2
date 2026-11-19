@@ -79,10 +79,22 @@ class Syncer:
     `generation` says which network a member is carrying. A member that
     takes on a network from outside the group raises it, and the others in
     an averaging group then adopt that network instead of averaging two
-    unrelated ones."""
+    unrelated ones.
+
+    `island_dir`: another fleet trains the same agent on its own machines
+    and publishes its averaged network every round or two; the round steps
+    of the workflow fetch it into this folder. After averaging, a member
+    moves `island_beta` of the way towards the newest of those networks
+    that was published before the previous round began, so that every
+    member of this group has it and picks the same one, and each such
+    network once. The two fleets pull each other together this way without
+    waiting for each other. A network further than `island_max_dist` away
+    (relative to the size of the weights) is left out: that fleet has gone
+    elsewhere, or broke."""
 
     def __init__(self, backend, worker_id, n_workers, every_minutes, wait_seconds=30.0, mode="average",
-                 margin=5.0, origin=0.0, outer_lr=1.0, outer_mom=0.0):
+                 margin=5.0, origin=0.0, outer_lr=1.0, outer_mom=0.0, island_dir=None, island_beta=0.0,
+                 island_max_dist=0.08):
         self.b, self.id, self.n = backend, worker_id, n_workers
         # The step an averaging round takes (mode "average"): from the
         # weights all members started the round with (`anchor`) towards the
@@ -107,6 +119,8 @@ class Syncer:
         self.seen = {}
         self.tmp = tempfile.mkdtemp(prefix="pvpsync")
         self.peer_samples = {}
+        self.island_dir, self.island_beta, self.island_max_dist = island_dir, island_beta, island_max_dist
+        self.island_time = 0.0
 
     def clock_round(self):
         # No rounds before the origin.
@@ -240,7 +254,54 @@ class Syncer:
         self._load_mean(policy, vs, same, own=own)
         if self.outer:
             self._outer_step(policy)
-        return f"averaged with {len(same)} others{self.outer_log}", ""
+        island = self._island(policy, vs, rnd)
+        return f"averaged with {len(same)} others{self.outer_log}{island}", ""
+
+    def _island(self, policy, vs, rnd):
+        """After averaging: move towards the other fleet's network (see `island_dir`)."""
+        if not self.island_dir or self.island_beta <= 0 or self.mode != "average":
+            return ""
+        try:
+            names = sorted(n for n in os.listdir(self.island_dir) if n.endswith(".pt"))
+        except OSError:
+            return ""
+        start = self.origin + rnd * self.every
+        best = None
+        for n in names:
+            try:
+                ck = torch.load(os.path.join(self.island_dir, n), map_location="cpu", weights_only=False)
+            except Exception:
+                continue
+            t = ck.get("time", 0.0)
+            # Published before the previous round began, a minute to spare:
+            # every member fetched it during that round.
+            if t > start - self.every - 60 or t < start - 6 * self.every or t <= self.island_time:
+                continue
+            if best is None or (t, n) > (best[0], best[2]):
+                best = (t, ck, n)
+        if best is None:
+            return ""
+        t, ck, _ = best
+        self.island_time = t
+        other, _ = fit_state({k: v.float() for k, v in ck["policy"].items()}, policy)
+        own = {k: v.detach().clone() for k, v in policy.state_dict().items()}
+        keys = [k for k, v in own.items() if v.is_floating_point()]
+        if any(k not in other or other[k].shape != own[k].shape for k in keys):
+            return ", the other fleet's network does not fit"
+        d = math.sqrt(sum(float(((own[k] - other[k]) ** 2).sum()) for k in keys))
+        size = math.sqrt(sum(float((own[k] ** 2).sum()) for k in keys))
+        rel = d / max(size, 1e-12)
+        if rel > self.island_max_dist:
+            return f", the other fleet's network is {rel:.3f} away, left out"
+        b = self.island_beta
+        new = dict(own)
+        for k in keys:
+            new[k] = (1 - b) * own[k] + b * other[k]
+        policy.load_state_dict(new)
+        vs.var = (1 - b) * vs.var + b * ck["vs"][0]
+        if self.anchor is not None:
+            self.anchor = {k: new[k].detach().clone() for k in self.anchor}
+        return f", moved {b:.2f} towards the other fleet ({(start - t) / 60:.1f} min old, {rel:.3f} away)"
 
     @property
     def outer(self):

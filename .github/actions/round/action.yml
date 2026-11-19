@@ -135,7 +135,7 @@ runs:
           commit=$(git -c user.name='github-actions[bot]' \
             -c user.email='41898282+github-actions[bot]@users.noreply.github.com' \
             commit-tree "$tree" -m "Weights of run $GITHUB_RUN_ID after round $ROUND")
-          git push --force origin "$commit:refs/heads/$BRANCH"
+          git push --force "${SNAP_REMOTE:-origin}" "$commit:refs/heads/$BRANCH"
           exit 0
         fi
         # The earlier versions the league plays against travel in the same
@@ -172,3 +172,9 @@ runs:
         else
           bash "$GITHUB_ACTION_PATH/pool.sh"
         fi
+    - if: steps.wait.outputs.round != ''
+      shell: bash
+      continue-on-error: true
+      run: |
+        # The other fleet's newest network, when there is one (ISLAND).
+        bash "$GITHUB_ACTION_PATH/island.sh"

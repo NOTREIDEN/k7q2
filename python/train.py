@@ -71,6 +71,11 @@ def main():
     ap.add_argument("--outer-lr", type=float, default=1.0,
                     help="how far an averaging round between machines moves, as a multiple of the step to the mean")
     ap.add_argument("--outer-mom", type=float, default=0.0, help="Nesterov momentum of those steps over the rounds")
+    ap.add_argument("--island-dir", default=None, help="folder another fleet's published networks arrive in")
+    ap.add_argument("--island-beta", type=float, default=0.0,
+                    help="how far each averaging round moves towards the other fleet's newest network (0: not at all)")
+    ap.add_argument("--island-max-dist", type=float, default=0.08,
+                    help="leave the other fleet's network out when it is further than this, relative to the weights")
     ap.add_argument("--machine-mode", default="average", choices=["average", "best"],
                     help="average all machines, or let each train its own network and adopt the best when far behind")
     args = ap.parse_args()
@@ -140,7 +145,8 @@ def main():
     if args.machine_out:
         group = Syncer(DirBackend(args.machine_out, args.machine_in), args.machine_id, args.machines,
                        args.machine_minutes, args.machine_wait, args.machine_mode, origin=args.round_origin,
-                       outer_lr=args.outer_lr, outer_mom=args.outer_mom)
+                       outer_lr=args.outer_lr, outer_mom=args.outer_mom, island_dir=args.island_dir,
+                       island_beta=args.island_beta, island_max_dist=args.island_max_dist)
         # Weights the machines left behind last time come before --init.
         total_samples, iters, loaded = group.restore(policy, vs)
         total_samples //= max(args.workers, 1)

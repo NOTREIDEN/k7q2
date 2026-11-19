@@ -64,6 +64,12 @@ on:
         description: Start the next run when this one ends
         type: boolean
         default: true
+      island:
+        description: >-
+          owner/repo:branch where another fleet that trains the same agent
+          publishes its network every round (empty for none); with
+          --island-beta the machines move towards it (python/pvpai/sync.py)
+        default: ""
 
 permissions:
   contents: write
@@ -97,6 +103,8 @@ jobs:
     needs: plan
     runs-on: ubuntu-latest
     timeout-minutes: 355
+    env:
+      ISLAND: ${{ inputs.island }}
     strategy:
       fail-fast: false
       matrix:
@@ -185,7 +193,7 @@ jobs:
               --worker-id "$p" --workers 2 --sync-dir /dev/shm/pvp \
               --machine-id "$MACHINE" --machines "$MACHINES" --machine-mode "$MODE" \
               --machine-out "$S/out" --machine-in "$S/in" --round-origin "$ORIGIN" \
-              --machine-minutes "$ROUND" --machine-wait 75 --league-dir "$S/pool" \
+              --machine-minutes "$ROUND" --machine-wait 75 --league-dir "$S/pool" --island-dir "$S/island" \
               --init ../seed/stage1.pt $EXTRA > "$S/p$p.log" 2>&1 &
             echo $! > "$S/p$p.pid"
           done
@@ -351,6 +359,7 @@ jobs:
           EXTRA: ${{ inputs.args }}
           COMBO: ${{ inputs.combo_machines }}
           SOURCE: ${{ needs.collect.outputs.source }}
+          ISLAND: ${{ inputs.island }}
         run: |
           if gh api "repos/$GITHUB_REPOSITORY/contents/STOP" >/dev/null 2>&1; then
             echo "STOP file present, not starting another run"
@@ -367,4 +376,4 @@ jobs:
           gh workflow run train.yml --repo "$GITHUB_REPOSITORY" --ref "$GITHUB_REF_NAME" \
             -f machines="$MACHINES" -f minutes="$MINUTES" -f round_minutes="$ROUND" -f snapshot_rounds="$SNAPSHOT" \
             -f mode="$MODE" -f combo_machines="$COMBO" \
-            -f args="$EXTRA" -f previous="$SOURCE" -f relaunch=true
+            -f args="$EXTRA" -f previous="$SOURCE" -f relaunch=true -f island="$ISLAND"
