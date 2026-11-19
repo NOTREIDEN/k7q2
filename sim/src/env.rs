@@ -35,7 +35,7 @@ pub const FOOD_TO_SPRINT: i32 = 6;
 pub const SHAKE_DEG: f32 = 6.0;
 pub const SHAKE_TICKS: i32 = 2;
 pub const PRIV_DIM: usize = 71;
-pub const STATS_DIM: usize = 148;
+pub const STATS_DIM: usize = 152;
 /// Floats per player and in total written by `Env::write_view`.
 pub const VIEW_PLAYER: usize = 45;
 pub const VIEW_DIM: usize = 2 * VIEW_PLAYER + 24;
@@ -604,6 +604,16 @@ pub struct Params {
     /// the horizontal knockback (`Edge::kb_taken`) takes that same share
     /// of the vertical one, as a Velocity cheat does.
     pub opp_kb_v: f64,
+    /// Timing (`ServerPlayer::late_ticks`): the cost of each server tick on
+    /// which the other player could have taken a hit from this one, within
+    /// its reach, and took none. Not counted while it drinks, eats, has
+    /// the inventory open, or for `late_pot_free` ticks after a potion.
+    pub w_late: f32,
+    pub late_pot_free: f32,
+    /// The cost of each attack that reaches the server while the other
+    /// player cannot take a full hit yet (`ServerPlayer::hurt_clicks`): its
+    /// own client stopped the sprint and slowed down for nothing.
+    pub w_hurt_click: f32,
     /// A potion that breaks on its thrower while it has this much health
     /// or less (before the potion's own) pays only `pot_relief` of the
     /// accuracy costs (`w_waste`, `w_miss`, `w_pot_far`): a potion thrown
@@ -832,6 +842,9 @@ impl Default for Params {
             pearl_spam_prob: 0.0,
             crit_prob: 0.0,
             opp_kb_v: 0.0,
+            w_late: 0.0,
+            late_pot_free: 8.0,
+            w_hurt_click: 0.0,
             pearl_spam_pearls: 16.0,
             pot_relief_hp: 0.0,
             pot_relief: 1.0,
@@ -1071,6 +1084,9 @@ impl Params {
             217 => self.extras_bot_only = v,
             218 => self.crit_prob = v,
             219 => self.opp_kb_v = v,
+            240 => self.w_late = v as f32,
+            241 => self.late_pot_free = v as f32,
+            242 => self.w_hurt_click = v as f32,
             _ => return false,
         }
         true
@@ -1239,6 +1255,10 @@ pub struct Stats {
     pub spam_duels: f64,
     /// Duels against a bot that trades (`Params::bot_trader`).
     pub trader_duels: f64,
+    /// Server ticks late with a hit (`Params::w_late`, counted whether it
+    /// costs or not), and attacks into the hurt time (`Params::w_hurt_click`).
+    pub late: [f64; 2],
+    pub hurt_clicks: [f64; 2],
 }
 
 impl Stats {
@@ -1326,6 +1346,8 @@ impl Stats {
             self.combo_hits_taken[a] += o.combo_hits_taken[a];
             self.combo_breaks[a] += o.combo_breaks[a];
             self.combo_escapes[a] += o.combo_escapes[a];
+            self.late[a] += o.late[a];
+            self.hurt_clicks[a] += o.hurt_clicks[a];
         }
         self.timer_ticks += o.timer_ticks;
         self.long_bt += o.long_bt;
@@ -1483,6 +1505,10 @@ impl Stats {
             self.timer_duels,
             self.spam_duels,
             self.trader_duels,
+            self.late[0],
+            self.late[1],
+            self.hurt_clicks[0],
+            self.hurt_clicks[1],
         ];
         for (o, x) in out.iter_mut().zip(v.iter()) {
             *o = *x;
@@ -2895,6 +2921,28 @@ impl Env {
             let d = ((a[0] - b[0]).powi(2) + (a[2] - b[2]).powi(2)).sqrt();
             if d < p.close_dist {
                 r -= p.w_close * ((p.close_dist - d) / p.close_dist) as f32;
+            }
+        }
+        // Late with a hit, and clicks into the hurt time, as the server saw
+        // them since this player's last tick.
+        let late = std::mem::take(&mut self.m.s.p[id].late_ticks);
+        let hurt = std::mem::take(&mut self.m.s.p[id].hurt_clicks);
+        let p = &self.params;
+        if late > 0 {
+            self.ep.late[id] += late as f64;
+            let sp = &self.m.s.p[id];
+            let busy = (sp.using_item && sp.in_hand().0 != Item::Sword)
+                || self.m.c[id].lp.inv_open
+                || (self.pot_since[id] as f32) < p.late_pot_free
+                || self.ag[id].turned();
+            if p.w_late != 0.0 && !busy {
+                r -= p.w_late * late as f32;
+            }
+        }
+        if hurt > 0 {
+            self.ep.hurt_clicks[id] += hurt as f64;
+            if p.w_hurt_click != 0.0 {
+                r -= p.w_hurt_click * hurt as f32;
             }
         }
         // Fighting on hungry with steak at hand, and slow with a potion of

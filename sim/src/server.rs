@@ -426,6 +426,12 @@ pub struct Hit {
 pub struct ServerPlayer {
     pub l: Living,
     pub hurt_resistant_time: i32,
+    /// Server ticks on which the other player could take a full hit from
+    /// this one, its box within 3 blocks of this one's eyes, and took none;
+    /// and attacks of this one that arrived while the other could not take
+    /// a full hit yet. Counted for the environment, which takes them.
+    pub late_ticks: u32,
+    pub hurt_clicks: u32,
     pub last_damage: f32,
     pub hurt_time: i32,
     pub health: f32,
@@ -580,6 +586,8 @@ impl ServerPlayer {
             enc_pitch: mth::floor_f(l.pitch * 256.0f32 / 360.0f32),
             l,
             hurt_resistant_time: 0,
+            late_ticks: 0,
+            hurt_clicks: 0,
             last_damage: 0.0,
             hurt_time: 0,
             health: 20.0,
@@ -1884,6 +1892,9 @@ impl Server {
         // generic.attackDamage carries the sword's bonus only once an
         // update has seen the sword in hand; the enchantments are read from
         // what is in hand now.
+        if (self.p[v].hurt_resistant_time as f32) > self.cfg.max_no_damage as f32 / 2.0f32 {
+            self.p[a].hurt_clicks += 1;
+        }
         let sword_now = self.p[a].in_hand().0 == Item::Sword;
         let mut f = if self.p[a].equip.0 == Item::Sword { self.cfg.damage } else { 1.0 };
         if self.p[a].strength >= 0 {
@@ -2191,6 +2202,20 @@ impl Server {
     /// and potion in the order they were thrown), the entity tracker, then
     /// the network tick.
     pub fn tick(&mut self, world: &World, rng: &mut Rng, out: &mut Outbox) {
+        // After the packet handlers: a player still open to a full hit took
+        // none on this tick.
+        let open = self.cfg.max_no_damage as f32 / 2.0f32;
+        for a in 0..2 {
+            let v = 1 - a;
+            if (self.p[v].hurt_resistant_time as f32) <= open && self.p[v].health > 0.0 && self.p[a].health > 0.0 {
+                let e = self.p[a].l.body.pos;
+                let eye = [e[0], e[1] + EYE_HEIGHT, e[2]];
+                let near = self.p[v].l.body.bb.expand(0.1, 0.1, 0.1).closest_point(eye);
+                if dist_sq(eye, near) <= 9.0 {
+                    self.p[a].late_ticks += 1;
+                }
+            }
+        }
         if let Some((v, amount, dir)) = self.gank.take() {
             self.gank_hit(v, amount, dir, rng, out);
         }
