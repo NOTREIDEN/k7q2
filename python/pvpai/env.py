@@ -38,6 +38,7 @@ PARAM = {
     "drink_window_s": 109, "w_miss": 110, "w_pot_time": 111, "bot_runner": 112,
     "extreme_share": 113, "w_shake": 114, "pot_strict_prob": 115, "pot_strict": 116,
     "w_gift": 117, "w_hungry": 118, "w_slow": 119, "drinks_stowed": 120, "bot_presser": 121, "w_inv_near": 122, "inv_near_dist": 123, "league_steal": 124, "throw_carry_prob": 125, "teach": 126, "w_speed_refill": 127, "insane_prob": 128, "w_pearl_next": 129, "terrain_prob": 130, "terrain_amount": 131, "retry_prob": 132, "terrain_gap_prob": 133, "w_hp_pot": 134, "hp_pot_scale": 135, "opp_strength_prob": 136, "opp_strength_max": 137, "gank_prob": 138, "w_death": 139, "gank_max": 140, "w_pearl_cost": 141, "pearl_kill_s": 142, "drop_prob": 143, "drop_min": 144, "drop_max": 145, "drill_prob": 146, "drill_self": 147, "drill_gankers": 148, "drill_strength_max": 149, "drill_seconds": 150, "combo_cap": 151, "web_prob": 152, "web_amount": 153, "web_trap_prob": 154, "food_full": 155, "w_full": 156, "w_pearl_low": 157, "pearl_low_hp": 158, "insane_reach_max": 159, "w_sip_hit": 160, "fall_start_prob": 161, "fall_start_min": 162, "fall_start_max": 163, "tiny_kb_prob": 164, "tiny_kb_h_min": 165, "tiny_kb_h_max": 166, "tiny_kb_v_min": 167, "tiny_kb_v_max": 168, "tool_prob": 169, "tool_rod": 170, "tool_snowball": 171, "tool_egg": 172, "tool_balls": 173, "tool_who": 174, "zero_hits_prob": 175, "w_drop": 176, "small_arena_prob": 177, "arena_half_min": 178, "w_pot_early": 184, "w_pot_far": 185,
+    "pot_turn_prob": 189, "pot_turn_run_s": 190, "pot_turn_hurt": 191, "w_pearl_pot": 192, "w_pearl_front": 193,
 }
 
 STAT_NAMES = [
@@ -59,6 +60,7 @@ STAT_NAMES = [
     "drops0", "drops1",
     "tool_uses0", "tool_uses1", "tool_hits0", "tool_hits1",
     "pot_given0", "pot_given1", "pot_far0", "pot_far1", "pot_over0", "pot_over1", "pot_early0", "pot_early1",
+    "pearl_front0", "pearl_front1", "pearl_side0", "pearl_side1", "pearl_back0", "pearl_back1", "pearl_faced0", "pearl_faced1", "pearl_faced_lost0", "pearl_faced_lost1", "pearl_on_pot0", "pearl_on_pot1", "pearl_pots0", "pearl_pots1", "pearl_deny0", "pearl_deny1",
 ]
 
 # Per-player fields of VecEnv.view(), then the fields that follow both players.

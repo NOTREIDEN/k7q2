@@ -77,6 +77,14 @@ pub struct BotParams {
     /// the server adds the thrower's movement to the throw.
     pub perfect_pot: bool,
     pub carry: bool,
+    /// It pots as players do with the opponent on them
+    /// (`Params::pot_turn_prob`): at 6 to 11 health, or after three hits
+    /// taken in a row with 14 or less, it takes the potion in hand, turns
+    /// its back and sprints away for 1 to `pot_run` ticks (a quarter of
+    /// that at least) before it throws as it always does, and comes back
+    /// into its potion.
+    pub pot_turn: bool,
+    pub pot_run: i32,
 }
 
 impl BotParams {
@@ -104,6 +112,8 @@ impl BotParams {
                 presser: false,
                 perfect_pot: false,
                 carry: false,
+                pot_turn: false,
+                pot_run: 0,
             },
             2 => BotParams {
                 level,
@@ -127,6 +137,8 @@ impl BotParams {
                 presser: false,
                 perfect_pot: false,
                 carry: false,
+                pot_turn: false,
+                pot_run: 0,
             },
             3 => BotParams {
                 level,
@@ -150,6 +162,8 @@ impl BotParams {
                 presser: false,
                 perfect_pot: false,
                 carry: false,
+                pot_turn: false,
+                pot_run: 0,
             },
             _ => BotParams {
                 level: 4,
@@ -173,6 +187,8 @@ impl BotParams {
                 presser: false,
                 perfect_pot: false,
                 carry: false,
+                pot_turn: false,
+                pot_run: 0,
             },
         }
     }
@@ -252,6 +268,9 @@ pub struct BotState {
     pot_pitch: f64,
     pot_dir: [f64; 2],
     pot_run: i32,
+    /// Ticks of the run with its back turned still to go before the throw
+    /// (`BotParams::pot_turn`), while `potion_stage` is 4.
+    pot_turn_left: i32,
 }
 
 fn gauss(rng: &mut Rng) -> f64 {
@@ -474,6 +493,43 @@ fn pearl_target(c: &Client, world: &World, p: &BotParams, st: &BotState, hdist: 
     }
     None
 }
+
+/// The yaw to run along away from the opponent (`dx`, `dz` and `hdist`
+/// are where it is): straight away, or as near to that as the walls leave
+/// room for five blocks on, the way nearest the current view first.
+fn away_yaw(c: &Client, world: &World, dx: f64, dz: f64, hdist: f64) -> f64 {
+    let lp = &c.lp;
+    let eye = lp.eye();
+    let me = lp.l.body.pos;
+    let lim = world.half - 1.5;
+    let away = if hdist > 1e-6 { [-dx / hdist, -dz / hdist] } else { [0.0, 1.0] };
+    let yaw = (lp.l.yaw as f64).to_radians();
+    let facing = [-yaw.sin(), yaw.cos()];
+    let mut best: Option<([f64; 2], f64)> = None;
+    'turns: for k in 0..=6 {
+        for sign in [1.0, -1.0] {
+            let (sn, cs) = (sign * k as f64 * 30f64.to_radians()).sin_cos();
+            let d = [away[0] * cs - away[1] * sn, away[0] * sn + away[1] * cs];
+            if (me[0] + d[0] * 5.0).abs() <= lim && (me[2] + d[1] * 5.0).abs() <= lim {
+                let keep = d[0] * facing[0] + d[1] * facing[1];
+                if best.map_or(true, |(_, b)| keep > b) {
+                    best = Some((d, keep));
+                }
+            }
+        }
+        if best.is_some() {
+            break 'turns;
+        }
+    }
+    let d = best.map_or(away, |(d, _)| d);
+    angles_to(eye, [me[0] + d[0] * 5.0, eye[1], me[2] + d[1] * 5.0]).0
+}
+
+/// How near the opponent has to be for a bot that pots with a turn
+/// (`BotParams::pot_turn`) to turn its back first, and the health at or
+/// below which it pots after three hits taken in a row.
+const POT_TURN_NEAR: f64 = 8.0;
+const POT_TURN_COMBO_HP: f32 = 14.0;
 
 pub fn act(c: &Client, world: &World, cfg: &ClientCfg, p: &BotParams, st: &mut BotState, rng: &mut Rng) -> Input {
     let mut inp = act_flat(c, world, cfg, p, st, rng);
@@ -719,29 +775,7 @@ fn act_flat(c: &Client, world: &World, cfg: &ClientCfg, p: &BotParams, st: &mut 
             st.fleeing = false;
         }
         if st.fleeing {
-            let me = lp.l.body.pos;
-            let lim = world.half - 1.5;
-            let away = if hdist > 1e-6 { [-dx / hdist, -dz / hdist] } else { [0.0, 1.0] };
-            let yaw = (lp.l.yaw as f64).to_radians();
-            let facing = [-yaw.sin(), yaw.cos()];
-            let mut best: Option<([f64; 2], f64)> = None;
-            'turns: for k in 0..=6 {
-                for sign in [1.0, -1.0] {
-                    let (sn, cs) = (sign * k as f64 * 30f64.to_radians()).sin_cos();
-                    let d = [away[0] * cs - away[1] * sn, away[0] * sn + away[1] * cs];
-                    if (me[0] + d[0] * 5.0).abs() <= lim && (me[2] + d[1] * 5.0).abs() <= lim {
-                        let keep = d[0] * facing[0] + d[1] * facing[1];
-                        if best.map_or(true, |(_, b)| keep > b) {
-                            best = Some((d, keep));
-                        }
-                    }
-                }
-                if best.is_some() {
-                    break 'turns;
-                }
-            }
-            let d = best.map_or(away, |(d, _)| d);
-            let want = angles_to(eye, [me[0] + d[0] * 5.0, eye[1], me[2] + d[1] * 5.0]).0;
+            let want = away_yaw(c, world, dx, dz, hdist);
             let lim = p.max_turn.max(45.0);
             inp.dx = (mth::wrap_deg(want - lp.l.yaw as f64).clamp(-lim, lim) / deg_per_count).round() as i32;
             inp.dy = ((-(lp.l.pitch as f64)).clamp(-lim, lim) / deg_per_count).round() as i32;
@@ -845,16 +879,17 @@ fn act_flat(c: &Client, world: &World, cfg: &ClientCfg, p: &BotParams, st: &mut 
         st.potion_wait -= 1;
     }
     if st.potion_at == 0.0 && p.potion > 0.0 && lp.potions != 0 {
-        let (lo, hi) = if p.presser { (4.0, 6.0) } else { (7.0, 12.0) };
+        let (lo, hi) = if p.pot_turn { (6.0, 11.0) } else if p.presser { (4.0, 6.0) } else { (7.0, 12.0) };
         st.potion_at = rng.range(lo, hi) as f32;
     }
     match st.potion_stage {
         0 => {
             // On the run it heals itself up: another potion while six of
             // its eight points would not be wasted.
+            let comboed = p.pot_turn && st.taken_run >= 3 && lp.health <= POT_TURN_COMBO_HP;
             let ready = p.potion > 0.0
                 && lp.potions != 0
-                && (lp.health <= st.potion_at || (st.fleeing && lp.health <= 14.0))
+                && (lp.health <= st.potion_at || (st.fleeing && lp.health <= 14.0) || comboed)
                 && st.potion_wait == 0
                 && st.pearl_stage == 0
                 && st.use_stage == 0
@@ -864,13 +899,49 @@ fn act_flat(c: &Client, world: &World, cfg: &ClientCfg, p: &BotParams, st: &mut 
             if ready && good_moment && rng.chance(0.35 * p.potion) {
                 st.potion_stage = 1;
                 st.potion_away = st.fleeing || (p.level >= 3 && hdist < 6.0);
-                if p.perfect_pot {
+                if p.pot_turn && !st.fleeing && hdist < POT_TURN_NEAR {
+                    // The potion in hand, the back turned, a run first.
+                    let most = p.pot_run.max(1);
+                    st.pot_turn_left = ((most as f64 * rng.range(0.25, 1.0)).round() as i32).clamp(1, most);
+                    st.potion_stage = 4;
+                    st.potion_away = true;
+                    st.taken_run = 0;
+                } else if p.perfect_pot {
                     let yaw = if st.potion_away { flee_yaw.unwrap_or(yaw_to + 180.0) } else { lp.l.yaw as f64 };
                     let run = crate::agent::run_feet(c, world, yaw as f32);
                     let them = c.rp.pos;
                     let (pitch, ticks) = crate::agent::aim_potion(c, world, yaw as f32, &run, &[if p.carry { 1.0 } else { 0.0 }], |_| them);
                     let f = yaw.to_radians();
                     st.pot_yaw = yaw;
+                    st.pot_pitch = pitch as f64;
+                    st.pot_dir = [-f.sin(), f.cos()];
+                    st.pot_run = ticks + 2;
+                }
+            }
+        }
+        4 => {
+            // Its back to the opponent, sprinting away with the potion in
+            // hand; at the end of the run the throw goes on as usual.
+            let want = away_yaw(c, world, dx, dz, hdist);
+            let lim = p.max_turn.max(45.0);
+            inp.dx = (mth::wrap_deg(want - lp.l.yaw as f64).clamp(-lim, lim) / deg_per_count).round() as i32;
+            inp.dy = ((-(lp.l.pitch as f64)).clamp(-lim, lim) / deg_per_count).round() as i32;
+            inp.attack = false;
+            inp.use_item = false;
+            inp.forward = 1;
+            inp.strafe = 0;
+            inp.jump = false;
+            inp.sprint_key = true;
+            inp.slot_key = lp.potions.trailing_zeros() as u8 + 1;
+            st.pot_turn_left -= 1;
+            if st.pot_turn_left <= 0 || lp.potions == 0 {
+                st.potion_stage = if lp.potions == 0 { 3 } else { 1 };
+                if p.perfect_pot && lp.potions != 0 {
+                    let run = crate::agent::run_feet(c, world, want as f32);
+                    let them = c.rp.pos;
+                    let (pitch, ticks) = crate::agent::aim_potion(c, world, want as f32, &run, &[if p.carry { 1.0 } else { 0.0 }], |_| them);
+                    let f = want.to_radians();
+                    st.pot_yaw = want;
                     st.pot_pitch = pitch as f64;
                     st.pot_dir = [-f.sin(), f.cos()];
                     st.pot_run = ticks + 2;
@@ -944,7 +1015,7 @@ fn act_flat(c: &Client, world: &World, cfg: &ClientCfg, p: &BotParams, st: &mut 
             st.potion_stage = 0;
         }
     }
-    if p.perfect_pot && st.pot_run > 0 && st.potion_stage != 1 && st.potion_stage != 2 {
+    if p.perfect_pot && st.pot_run > 0 && st.potion_stage != 1 && st.potion_stage != 2 && st.potion_stage != 4 {
         // Backing into its potion, the view back on the opponent.
         let yaw = (lp.l.yaw as f64 + inp.dx as f64 * deg_per_count) as f32;
         let (fw, sd) = crate::agent::walk_along(yaw, st.pot_dir);
