@@ -393,6 +393,12 @@ def main():
                         refills_per_visit=st["refills0"] / max(st["inv_opens0"], 1.0),
                         inv_ticks_per_visit=st["inv_ticks0"] / max(st["inv_opens0"], 1.0),
                         inv_hits_taken=st["inv_hit0"] / max(st["inv_opens0"], 1.0),
+                        # Deaths with healing potions left, per duel, and the rod,
+                        # snowballs and eggs: uses and hits that counted per minute.
+                        drops_per_duel=st.get("drops0", 0.0) / st["episodes"],
+                        tool_uses_per_min=st.get("tool_uses0", 0.0) / mins0,
+                        tool_hits_per_min=st.get("tool_hits0", 0.0) / mins0,
+                        opp_tool_hits_per_min=st.get("tool_hits1", 0.0) / mins0,
                     )
             window.clear()
             if league is not None:
@@ -430,10 +436,12 @@ def main():
                   f"not-full {b.get('not_full_frac', 0):.2f} "
                   f"refill {b.get('refills_per_duel', 0):.2f}/{b.get('opp_refills_per_duel', 0):.2f} "
                   f"visit {b.get('refills_per_visit', 0):.1f} in {b.get('inv_ticks_per_visit', 0):.1f} "
-                  f"inv-hit {b.get('inv_hits_taken', 0):.2f} "
+                  f"inv-hit {b.get('inv_hits_taken', 0):.2f} drop {b.get('drops_per_duel', 0):.2f} "
+                  f"tool {b.get('tool_uses_per_min', 0):.1f} hit {b.get('tool_hits_per_min', 0):.1f}/{b.get('opp_tool_hits_per_min', 0):.1f} "
                   f"| self: hit/min {s.get('hits_per_min', 0):5.1f} combo {s.get('max_combo', 0):.1f} "
                   f"aim {s.get('aim_err_deg', 0):5.1f} pot {s.get('potions_per_min', 0):.1f} "
-                  f"heal {s.get('potion_heal', 0):.1f}"
+                  f"heal {s.get('potion_heal', 0):.1f} tool {s.get('tool_uses_per_min', 0):.1f} "
+                  f"hit {s.get('tool_hits_per_min', 0):.1f}"
                   + (f" | league: win {q.get('win_frac', 0):.2f} hit/min {q.get('hits_per_min', 0):5.1f} "
                      f"taken {q.get('taken_per_min', 0):5.1f} pearl {q.get('pearls_per_min', 0):.1f} "
                      f"pot {q.get('potions_per_min', 0):.1f} full {q.get('potion_perfect', 0):.2f} ["

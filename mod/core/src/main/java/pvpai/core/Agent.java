@@ -23,9 +23,10 @@ public final strictfp class Agent {
     /**
      * Choices of each control: forward, strafe, jump, sprint key, attack,
      * yaw, pitch, right button, pearl, the rest of the hotbar, a flick of
-     * the mouse, and the pitch of a potion thrown with a turn.
+     * the mouse, the pitch of a potion thrown with a turn, and the tool of
+     * a kit that has one (nothing, use it, take the sword back).
      */
-    public static final int[] ACT_DIMS = {3, 3, 2, 2, 2, 31, 29, 2, 2, 13, 6, THROW_PITCHES};
+    public static final int[] ACT_DIMS = {3, 3, 2, 2, 2, 31, 29, 2, 2, 13, 6, THROW_PITCHES, 3};
     /**
      * The first of the choices of the hotbar control that throw a potion
      * with a turn of the view, and the mouse counts of each one's turn:
@@ -72,7 +73,10 @@ public final strictfp class Agent {
      * one, whether the opponent's is, then the grid of {@link #webGrid}.
      */
     public static final int WEB_AT = HURT_AT + 2;
-    public static final int OBS_DIM = WEB_AT + 2 + GRID_FWD.length * GRID_RIGHT.length;
+    /** Where the tool, the hooks and the snowballs and eggs start in an observation, and how many numbers they take. */
+    public static final int TOOL_AT = WEB_AT + 2 + GRID_FWD.length * GRID_RIGHT.length;
+    public static final int TOOL_OBS = 25;
+    public static final int OBS_DIM = TOOL_AT + TOOL_OBS;
     private static final int TRAIL = 16;
     /**
      * A hurt of the other player counts as a hit of this one's for this
@@ -126,6 +130,8 @@ public final strictfp class Agent {
     private final float mouseF1;
     /** The keys and buttons of its last tick. */
     private Keys prev = new Keys();
+    /** The slot the tool was last seen in, -1 for none: snowballs or eggs used up in hand leave it empty, and the sword is taken back. */
+    private int toolSlot = -1;
     /** Where it is in the key presses of a pearl throw: 0 not throwing, 1 the right click comes next, 2 the sword comes next. */
     private int pearlStage;
     /** Own ticks until it may throw again, as it counts them itself. */
@@ -304,6 +310,7 @@ public final strictfp class Agent {
             twice = two;
         }
         pearlKeys(v, action.length > 8 && action[8] != 0, inp);
+        toolKeys(v, action.length > 12 ? action[12] : 0, inp);
         limitClicks(inp, rng);
         return inp;
     }
@@ -385,12 +392,59 @@ public final strictfp class Agent {
 
     /** Can the player throw a pearl now, as far as it can tell itself? */
     private boolean pearlReady(View v) {
-        return v.pearls > 0 && pearlWait <= 0 && pearlStage == 0 && potionStage == 0 && consume == 0 && v.held == Inv.SLOT_SWORD;
+        return v.pearls > 0 && pearlWait <= 0 && pearlStage == 0 && potionStage == 0 && consume == 0 && handFree(v);
+    }
+
+    /** The sword in hand, or the tool of the kit: a pearl, a potion, a drink or a meal can be started from either. */
+    private static boolean handFree(View v) {
+        return v.held == Inv.SLOT_SWORD || (v.tool != Inv.EMPTY && v.held == v.toolSlot);
+    }
+
+    /**
+     * The key presses of the tool: choice 1 uses it, 2 takes the sword
+     * back. With the sword in hand and nothing else under way, 1 presses
+     * the number key of the tool with a right click; with the tool in
+     * hand, the button is let go and pressed again between the ticks, a
+     * click out of the budget of the left ones, or with none left stays
+     * down. 2 presses the number key of the sword. Snowballs or eggs used
+     * up in hand leave the slot empty, and the sword is taken back.
+     */
+    private void toolKeys(View v, int choice, Keys inp) {
+        if (potionStage != 0 || pearlStage != 0 || consume != 0 || refill != 0 || inp.slotKey != 0) {
+            return;
+        }
+        if (v.tool == Inv.EMPTY) {
+            if (toolSlot >= 0 && v.held == toolSlot) {
+                inp.slotKey = Inv.SLOT_SWORD + 1;
+                inp.useItem = false;
+                toolSlot = -1;
+            }
+            return;
+        }
+        toolSlot = v.toolSlot;
+        boolean holding = v.held == v.toolSlot;
+        if (choice == 1 && !holding && v.held == Inv.SLOT_SWORD) {
+            inp.slotKey = v.toolSlot + 1;
+            inp.useItem = true;
+            inp.useAgain = prev.useItem;
+            inp.attack = false;
+        } else if (choice == 1 && holding) {
+            inp.useItem = true;
+            if (prev.useItem) {
+                inp.useAgain = takeClick();
+            }
+            if (inp.useAgain || !prev.useItem) {
+                inp.attack = false;
+            }
+        } else if (choice == 2 && holding) {
+            inp.slotKey = Inv.SLOT_SWORD + 1;
+            inp.useItem = false;
+        }
     }
 
     /** Can the player throw a potion now? With the sword in hand, or on the tick after another potion. */
     private boolean potionReady(View v) {
-        return v.potions != 0 && pearlStage == 0 && consume == 0 && (potionStage == 0 ? v.held == Inv.SLOT_SWORD : potionStage == 2);
+        return v.potions != 0 && pearlStage == 0 && consume == 0 && (potionStage == 0 ? handFree(v) : potionStage == 2);
     }
 
     /** Is the player without Speed or in the last seconds of it? */
@@ -418,7 +472,7 @@ public final strictfp class Agent {
             } else {
                 return;
             }
-            if (v.held != Inv.SLOT_SWORD || pearlStage != 0 || potionStage != 0) {
+            if (!handFree(v) || pearlStage != 0 || potionStage != 0) {
                 return;
             }
             inp.slotKey = slot + 1;
@@ -477,7 +531,7 @@ public final strictfp class Agent {
             if (want < 0) {
                 return null;
             }
-            if (v.held != Inv.SLOT_SWORD || pearlStage != 0 || potionStage != 0 || consume != 0) {
+            if (!handFree(v) || pearlStage != 0 || potionStage != 0 || consume != 0) {
                 return null;
             }
             if (Inv.refillClick(bar, v.rows, want) < 0) {
@@ -956,7 +1010,7 @@ public final strictfp class Agent {
         o[74] = flag(v.oItem == Inv.PEARL);
         o[75] = (float) Math.min(v.ticksSinceMoved, 20) / 20.0f;
         o[76] = (float) Math.min(v.oTicksSinceJump, 20) / 20.0f;
-        for (int i = 77; i < OBS_DIM; i++) {
+        for (int i = 77; i < TOOL_AT; i++) {
             o[i] = 0.0f;
         }
         // The newest pearl of its own in flight: where it will put this
@@ -1138,6 +1192,73 @@ public final strictfp class Agent {
         o[WEB_AT] = flag(inWeb(blocks, pos));
         o[WEB_AT + 1] = flag(inWeb(blocks, v.oPos));
         webGrid(blocks, pos, yaw, o, WEB_AT + 2);
+        toolObs(v, o, TOOL_AT);
+    }
+
+    /** {@code o[at + k] = } a place seen from the player: forward, to the right, up. */
+    private static void rel(View v, double[] p, float[] o, int at) {
+        double[] l = local(v.yaw, p[0] - v.pos[0], p[2] - v.pos[2]);
+        o[at] = clip(l[0] / 8.0, 4.0);
+        o[at + 1] = clip(l[1] / 8.0, 4.0);
+        o[at + 2] = clip((p[1] - v.pos[1]) / 3.0, 2.0);
+    }
+
+    /**
+     * The tool of its kit, the hooks out and the snowballs and eggs in
+     * flight. A hook is where the server last said it is.
+     */
+    private static void toolObs(View v, float[] o, int at) {
+        for (int i = 0; i < TOOL_OBS; i++) {
+            o[at + i] = 0.0f;
+        }
+        if (v.tool == Inv.ROD) {
+            o[at] = 1.0f;
+            o[at + 3] = 1.0f - (float) v.toolWear / (float) Inv.ROD_MAX_WEAR;
+        } else if (v.tool == Inv.SNOWBALL || v.tool == Inv.EGG) {
+            o[at + (v.tool == Inv.SNOWBALL ? 1 : 2)] = 1.0f;
+            o[at + 3] = Math.min((float) v.toolCount / 16.0f, 1.0f);
+        }
+        o[at + 4] = flag(v.tool != Inv.EMPTY && v.held == v.toolSlot);
+        View.Thrown e = newest(v, true, Inv.KIND_HOOK);
+        if (e != null) {
+            o[at + 5] = 1.0f;
+            o[at + 6] = (float) Math.min(e.age, 40) / 20.0f;
+            rel(v, e.serverSide, o, at + 7);
+            o[at + 10] = clip(Geo.dist(e.serverSide, v.oPos) / 4.0, 4.0);
+        }
+        o[at + 11] = flag(v.oItem == Inv.ROD);
+        o[at + 12] = flag(v.oItem == Inv.SNOWBALL || v.oItem == Inv.EGG);
+        e = newest(v, false, Inv.KIND_HOOK);
+        if (e != null) {
+            o[at + 13] = 1.0f;
+            rel(v, e.serverSide, o, at + 14);
+        }
+        // The opponent's snowball or egg nearest to this player, and how it moves.
+        View.Thrown near = null;
+        double least = 0.0;
+        for (View.Thrown t : v.thrown) {
+            if (t.mine || (t.kind != Inv.KIND_SNOWBALL && t.kind != Inv.KIND_EGG)) {
+                continue;
+            }
+            double d = Geo.distSq(t.pos, v.pos);
+            if (near == null || d < least) {
+                near = t;
+                least = d;
+            }
+        }
+        if (near != null) {
+            o[at + 17] = 1.0f;
+            rel(v, near.pos, o, at + 18);
+            double[] m = local(v.yaw, near.motion[0], near.motion[2]);
+            o[at + 21] = clip(m[0] / 2.0, 2.0);
+            o[at + 22] = clip(m[1] / 2.0, 2.0);
+            o[at + 23] = clip(near.motion[1] / 2.0, 2.0);
+        }
+        boolean ball = false;
+        for (View.Thrown t : v.thrown) {
+            ball |= t.mine && (t.kind == Inv.KIND_SNOWBALL || t.kind == Inv.KIND_EGG);
+        }
+        o[at + 24] = flag(ball);
     }
 
     /**

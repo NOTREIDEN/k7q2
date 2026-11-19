@@ -5,7 +5,7 @@
 //! `cargo run --release --example agent_dump -- OUT.bin [TICKS]`.
 //!
 //! The file is a row of little-endian doubles (every number an agent
-//! handles fits one exactly). It starts with 5050, the format (4), the
+//! handles fits one exactly). It starts with 5050, the format (5), the
 //! sizes of an observation and of an action; then for each tick:
 //!
 //! - 1 and the duel if a new duel starts here, else 0. The duel: half the
@@ -22,7 +22,8 @@
 //! - The observation, the action taken, and the keys and buttons it became.
 //! - After the tick: where the player stands, whether it is drinking or
 //!   eating, whether the other is seen to and what it holds, whether a
-//!   pearl and a potion were thrown, whether it swung and whether it hit,
+//!   pearl and a potion were thrown, whether a snowball or an egg was and
+//!   whether a rod was used, whether it swung and whether it hit,
 //!   and the place and the view the server had been told before the tick.
 use pvpsim::agent::{view, Agent, Duel, ACT_DIMS, ACT_HEADS, OBS_DIM};
 use pvpsim::bot::{self, BotState};
@@ -34,7 +35,13 @@ use pvpsim::sim::Match;
 use std::io::Write;
 
 /// Parameter numbers of `Params::set` and the values of the training runs.
-const SETTINGS: [(i32, f64); 28] = [
+const SETTINGS: [(i32, f64); 32] = [
+    // A tool in every duel on a server that throws as 1.8 does, rods most
+    // often, few snowballs and eggs so that some run out in hand.
+    (169, 1.0),
+    (170, 2.0),
+    (173, 8.0),
+    (175, 0.7),
     (130, 0.6),
     (131, 1.0),
     (125, 0.5),
@@ -115,7 +122,8 @@ fn duel(o: &mut Out, d: &Duel, walls: bool, ag: &Agent, ccfg: &ClientCfg, feet: 
 /// (in 8000ths of a block per tick), 2 a player was hurt (1 its own, 0 the
 /// other), 3 its own player was put somewhere, 4 the other player was (where
 /// the copy was heading before, and the new place in 32nds), 5 a pearl (0)
-/// or a potion (1) appeared (its number, the kind, the place in 32nds), 6
+/// or a potion (1), a snowball (2), an egg (3) or a hook (4) appeared (its
+/// number, the kind, for a hook whether it is its own, the place in 32nds), 6
 /// the velocity of one (number, 8000ths), 9 one is gone (number). After
 /// the client handled it: 7 one moved (number, the move in 32nds, where the
 /// copy now is), 8 one was put somewhere (number, 32nds, where the copy
@@ -165,8 +173,12 @@ fn packet(o: &mut Out, p: &S2C, c: &Client, after: bool) -> u32 {
             };
             o.n(code);
             o.n(id);
-            if let ThrownEv::Spawn { kind, .. } = ev {
+            if let ThrownEv::Spawn { kind, own, .. } = ev {
                 o.n(kind as u8);
+                // A hook's packet says whose it is.
+                if kind == pvpsim::net::Kind::Hook {
+                    o.b(own);
+                }
             }
             for v in x {
                 o.n(v);
@@ -217,7 +229,7 @@ impl Chooser {
     fn next(&mut self) -> [i32; ACT_HEADS] {
         let wild = (self.tick / 200) % 2 == 1;
         self.tick += 1;
-        let mut a = [1, 0, 0, 1, 1, 13, 10, 0, 0, 0, 0, 10];
+        let mut a = [1, 0, 0, 1, 1, 13, 10, 0, 0, 0, 0, 10, 0];
         for (k, x) in a.iter_mut().enumerate() {
             let r = self.rng.next_u64();
             if wild || r % 8 == 0 {
@@ -229,7 +241,7 @@ impl Chooser {
             return a;
         }
         if self.step >= self.len && self.rng.next_u64() % 25 == 0 {
-            self.doing = self.rng.next_u64() % 14;
+            self.doing = self.rng.next_u64() % 17;
             let some = |rng: &mut Rng, lo: u32, n: u64| lo + (rng.next_u64() % n) as u32;
             self.len = match self.doing {
                 0 | 1 => 45,
@@ -242,7 +254,8 @@ impl Chooser {
                 9 => some(&mut self.rng, 6, 20),
                 10 => 45,
                 11 | 12 => 6,
-                _ => 8,
+                13 => 8,
+                _ => some(&mut self.rng, 3, 30),
             };
             self.step = 0;
         }
@@ -252,6 +265,7 @@ impl Chooser {
             a[7] = 0;
             a[8] = 0;
             a[9] = 0;
+            a[12] = 0;
             match self.doing {
                 0 => a[9] = 2,
                 1 => a[9] = 3,
@@ -281,7 +295,17 @@ impl Chooser {
                     a[9] = (t == 3 || t == 4) as i32;
                 }
                 // Both kinds of potion from the inventory in turn.
-                _ => a[9] = 5 + (t % 2) as i32,
+                13 => a[9] = 5 + (t % 2) as i32,
+                // The tool: used once and the sword back after a while,
+                // used again and again, or used with a potion or a pearl
+                // asked for in the middle.
+                14 => a[12] = if t == 0 { 1 } else if last { 2 } else { 0 },
+                15 => a[12] = if last { 2 } else { 1 },
+                _ => {
+                    a[12] = if t < 3 { 1 } else { 0 };
+                    a[9] = (t == 4) as i32;
+                    a[8] = (t == 6) as i32;
+                }
             }
         }
         a
@@ -305,7 +329,7 @@ fn main() {
     }
     let mut o = Out(Vec::new());
     o.n(5050.0);
-    o.n(4.0);
+    o.n(5.0);
     o.n(OBS_DIM as u32);
     o.n(ACT_HEADS as u32);
     let mut rng = Rng::new(23);
@@ -313,6 +337,8 @@ fn main() {
     let (mut written, mut duels, mut thrown, mut clicks, mut done) = (0usize, 0u32, [0u32; 2], [0u32; 2], [0u32; 1]);
     // Ticks with the carry of throws not seen yet, seen not to be, seen to be.
     let mut seen = [0u32; 3];
+    // Ticks with a tool, its uses, and the tool's hits that counted.
+    let mut tools = [0u32; 3];
     while written < ticks {
         // Half of the duels against a copy that does as much at random,
         // half against the scripted bot.
@@ -349,6 +375,8 @@ fn main() {
             m.s.hits.clear();
             m.s.splashes.clear();
             m.s.landings.clear();
+            tools[2] += m.s.thrown_hits.iter().filter(|h| h.thrower == 0 && h.victim == 1).count() as u32;
+            m.s.thrown_hits.clear();
             if id == 0 {
                 left -= 1;
                 if left < 0 || written >= ticks || !m.s.p[0].alive() || !m.s.p[1].alive() {
@@ -401,12 +429,16 @@ fn main() {
                 o.n(c.rp.item as u8);
                 o.b(out.threw);
                 o.b(out.threw_potion);
+                o.b(out.threw_ball);
+                o.b(out.used_rod);
                 o.b(out.swung);
                 o.b(out.attacked);
                 o.v(said);
                 o.n(said_yaw);
                 o.n(said_pitch);
                 written += 1;
+                tools[0] += (c.lp.tool.item != Item::Empty) as u32;
+                tools[1] += (out.threw_ball || out.used_rod) as u32;
                 thrown[0] += out.threw as u32;
                 thrown[1] += out.threw_potion as u32;
                 clicks[0] += out.moved.is_some() as u32;
@@ -429,4 +461,5 @@ fn main() {
         o.0.len()
     );
     println!("carry of throws: not seen yet on {}, seen not to be on {}, seen to be on {}", seen[1], seen[0], seen[2]);
+    println!("a tool on {} ticks, used {} times, {} hits with it", tools[0], tools[1], tools[2]);
 }

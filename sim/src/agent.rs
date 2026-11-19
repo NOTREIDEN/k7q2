@@ -10,11 +10,11 @@ use crate::aabb::{dist, dist_sq, Aabb, V3};
 use crate::bot;
 use crate::client::{pearl_landing, pearl_preview, thrown_flight, Client, ClientCfg, ClientThrown, Input, TickOut, INV_SHUT};
 use crate::mth::{self, Rng};
-use crate::net::{refill_click, shift_click, Item, Kind, SLOT_FOOD, SLOT_PEARL, SLOT_SWORD, USE_TICKS, WINDOW_BAR};
+use crate::net::{refill_click, shift_click, Item, Kind, ROD_MAX_WEAR, SLOT_FOOD, SLOT_PEARL, SLOT_SWORD, USE_TICKS, WINDOW_BAR};
 use crate::server::{splash_heal, throw_heading, MAX_HEALTH, POTION_HEAL, THROW_SPREAD};
 use crate::world::{RayHit, World};
 
-pub const ACT_HEADS: usize = 12;
+pub const ACT_HEADS: usize = 13;
 /// forward, strafe, jump, sprint key, attack, yaw bin, pitch bin, right
 /// mouse button (block with the sword), throw a pearl, and what to do with
 /// the rest of the hotbar: nothing, throw a healing potion, drink the
@@ -54,7 +54,12 @@ pub const ACT_HEADS: usize = 12;
 /// Three choices more throw two potions with one turn: the same turns, and
 /// on tick three the next potion's number key and a right click with the
 /// view kept where the first one went, as a player pots twice in a row.
-pub const ACT_DIMS: [i32; ACT_HEADS] = [3, 3, 2, 2, 2, 31, 29, 2, 2, 13, 6, THROW_PITCHES as i32];
+///
+/// The control after the pitch is the tool of a kit that has one, a
+/// fishing rod or snowballs or eggs in a slot of their own: nothing, use
+/// the tool, or take the sword back (see `Agent::tool_keys`). With no tool
+/// it does nothing.
+pub const ACT_DIMS: [i32; ACT_HEADS] = [3, 3, 2, 2, 2, 31, 29, 2, 2, 13, 6, THROW_PITCHES as i32, 3];
 /// The first of the choices of the hotbar control that throw a potion with
 /// a turn, and the mouse counts of each one's turn: half a turn, a quarter
 /// to the right, a quarter to the left. The choices after those make the
@@ -94,7 +99,11 @@ pub const PITCH_BINS: [i32; 29] = [
     -89, -55, -34, -21, -13, -8, -5, -3, -2, -1, 0, 1, 2, 3, 5, 8, 13, 21, 34, 55, 89, -377, -233, -144, 144, 233, 377, -600, 600,
 ];
 
-pub const OBS_DIM: usize = WEB_AT + 2 + GRID_FWD.len() * GRID_RIGHT.len();
+pub const OBS_DIM: usize = TOOL_AT + TOOL_OBS;
+/// Where the tool of the kit, the hooks and the snowballs and eggs start
+/// in an observation (after the cobwebs), and how many numbers they take.
+pub const TOOL_AT: usize = WEB_AT + 2 + GRID_FWD.len() * GRID_RIGHT.len();
+pub const TOOL_OBS: usize = 25;
 /// Where what the last hit and the last second took of its health is in an
 /// observation, and how many of its own ticks that second is.
 pub const HURT_AT: usize = PEARL_AT + 3 * PEARL_TURNS.len();
@@ -290,7 +299,13 @@ pub struct Agent {
     /// Training only: a teacher for the potions thrown with a turn, see
     /// `Teacher`. Off, it does nothing and costs nothing.
     pub teacher: Teacher,
+    /// The slot the tool was last seen in (`NO_SLOT` for none): snowballs
+    /// or eggs used up in hand leave the slot empty, and the sword is taken
+    /// back.
+    tool_slot: u8,
 }
+
+const NO_SLOT: u8 = u8::MAX;
 
 /// Training only. The way a potion thrown with a turn used to be played
 /// for the policy, worked out from the player's own client: the pitch
@@ -376,6 +391,7 @@ impl Agent {
             carry: -1,
             probe: None,
             teacher: Teacher::default(),
+            tool_slot: NO_SLOT,
         }
     }
 
@@ -432,6 +448,7 @@ impl Agent {
                 self.double = double;
             }
             self.pearl_keys(c, action.len() > 8 && action[8] != 0, &mut inp);
+            self.tool_keys(c, if action.len() > 12 { action[12] } else { 0 }, &mut inp);
             self.limit_clicks(&mut inp, rng);
         }
         if self.teacher.on {
@@ -579,7 +596,7 @@ impl Agent {
             && self.pearl_stage == 0
             && self.potion_stage == 0
             && self.consume == 0
-            && lp.held == SLOT_SWORD
+            && hand_free(lp)
     }
 
     /// Can the player throw a potion now? With the sword in hand, or on
@@ -590,7 +607,7 @@ impl Agent {
             && self.pearl_stage == 0
             && self.consume == 0
             && match self.potion_stage {
-                0 => lp.held == SLOT_SWORD,
+                0 => hand_free(lp),
                 2 => true,
                 _ => false,
             }
@@ -627,7 +644,7 @@ impl Agent {
                 3 if lp.steak > 0 && lp.food < 20 => SLOT_FOOD,
                 _ => return,
             };
-            if lp.held != SLOT_SWORD || self.pearl_stage != 0 || self.potion_stage != 0 {
+            if !hand_free(lp) || self.pearl_stage != 0 || self.potion_stage != 0 {
                 return;
             }
             inp.slot_key = slot + 1;
@@ -692,7 +709,7 @@ impl Agent {
         let inv;
         if self.refill == 0 {
             let Some(kind) = want else { return false };
-            if lp.held != SLOT_SWORD || self.pearl_stage != 0 || self.potion_stage != 0 || self.consume != 0 {
+            if !hand_free(lp) || self.pearl_stage != 0 || self.potion_stage != 0 || self.consume != 0 {
                 return false;
             }
             if refill_click(&bar, &rows, kind).is_none() {
@@ -793,6 +810,60 @@ impl Agent {
                     self.potion_stage = 0;
                 }
             }
+        }
+    }
+
+    /// The key presses of the tool, laid over what the player asked for on
+    /// this tick: `choice` 1 uses it, 2 takes the sword back. Asked with the
+    /// sword in hand and nothing else under way, 1 presses the number key
+    /// of the tool with a right click: a rod is cast, a snowball or an egg
+    /// thrown. Asked again with the tool in hand, the button is let go and
+    /// pressed again between the two ticks, a click out of the same budget
+    /// as the left ones, which brings a hook back or throws the next ball;
+    /// with no click left the button stays down, and the game uses the tool
+    /// again every fourth tick while it is. With the tool in hand and 0
+    /// asked the right button is the right mouse control's. 2 presses the
+    /// number key of the sword. No left click is made with a right click of
+    /// the tool: one that lands on a block would swallow it. Snowballs or
+    /// eggs used up in hand leave the slot empty, and the sword is taken
+    /// back on the next tick that has nothing else under way.
+    fn tool_keys(&mut self, c: &Client, choice: i32, inp: &mut Input) {
+        let lp = &c.lp;
+        let tool = lp.tool;
+        if self.busy() || inp.slot_key != 0 {
+            return;
+        }
+        if tool.item == Item::Empty {
+            if self.tool_slot != NO_SLOT && lp.held == self.tool_slot {
+                inp.slot_key = SLOT_SWORD + 1;
+                inp.use_item = false;
+                self.tool_slot = NO_SLOT;
+            }
+            return;
+        }
+        self.tool_slot = tool.slot;
+        let holding = lp.held == tool.slot;
+        match choice {
+            1 if !holding && lp.held == SLOT_SWORD => {
+                inp.slot_key = tool.slot + 1;
+                inp.use_item = true;
+                inp.use_again = self.prev_inp.use_item;
+                inp.attack = false;
+            }
+            1 if holding => {
+                inp.use_item = true;
+                if self.prev_inp.use_item {
+                    inp.use_again = self.take_click();
+                }
+                if inp.use_again || !self.prev_inp.use_item {
+                    inp.attack = false;
+                }
+            }
+            2 if holding => {
+                inp.slot_key = SLOT_SWORD + 1;
+                inp.use_item = false;
+            }
+            _ => {}
         }
     }
 
@@ -1091,7 +1162,7 @@ impl Agent {
         // The newest pearl of its own in flight: where it will put this
         // player (relative to where it stands now), in how many ticks, and
         // how far from the opponent that is.
-        for v in o[77..OBS_DIM].iter_mut() {
+        for v in o[77..TOOL_AT].iter_mut() {
             *v = 0.0;
         }
         if let Some(e) = c.thrown.iter().rev().find(|e| e.mine && e.kind == Kind::Pearl) {
@@ -1287,16 +1358,82 @@ impl Agent {
         // Whether its throws take on its movement: not seen yet, no, yes.
         o[153] = [0.5, 0.0, 1.0][(self.carry + 1) as usize];
         // The ground around it: steps, walls, pits and drops.
-        ground_grid(world, b.pos, yaw, &mut o[GRID_AT..OBS_DIM]);
+        ground_grid(world, b.pos, yaw, &mut o[GRID_AT..TOOL_AT]);
         // Cobwebs: in one, the opponent in one, and those around it.
         if world.has_webs() {
             o[WEB_AT] = world.in_web(&crate::aabb::Aabb::player(b.pos)) as u8 as f32;
             o[WEB_AT + 1] = world.in_web(&crate::aabb::Aabb::player(rp.pos)) as u8 as f32;
-            web_grid(world, b.pos, yaw, &mut o[WEB_AT + 2..OBS_DIM]);
+            web_grid(world, b.pos, yaw, &mut o[WEB_AT + 2..TOOL_AT]);
         } else {
-            o[WEB_AT..OBS_DIM].fill(0.0);
+            o[WEB_AT..TOOL_AT].fill(0.0);
         }
+        self.tool_obs(c, &mut o[TOOL_AT..OBS_DIM]);
     }
+
+    /// The tool of its kit, the hooks out and the snowballs and eggs in
+    /// flight. A hook is where the server last said it is, in the 32nds of
+    /// a block positions come in: a client's own copy of it moves in ways
+    /// of its own between those, and the server's is the one that pulls.
+    fn tool_obs(&self, c: &Client, o: &mut [f32]) {
+        o.fill(0.0);
+        let (lp, rp) = (&c.lp, &c.rp);
+        let b = &lp.l.body;
+        let yaw = lp.l.yaw;
+        let tool = lp.tool;
+        let rel = |o: &mut [f32], p: V3| {
+            let (f, r) = local(yaw, p[0] - b.pos[0], p[2] - b.pos[2]);
+            o[0] = clip(f / 8.0, 4.0);
+            o[1] = clip(r / 8.0, 4.0);
+            o[2] = clip((p[1] - b.pos[1]) / 3.0, 2.0);
+        };
+        match tool.item {
+            Item::Rod => {
+                o[0] = 1.0;
+                o[3] = 1.0 - tool.wear as f32 / ROD_MAX_WEAR as f32;
+            }
+            Item::Snowball | Item::Egg => {
+                o[if tool.item == Item::Snowball { 1 } else { 2 }] = 1.0;
+                o[3] = (tool.n as f32 / 16.0).min(1.0);
+            }
+            _ => {}
+        }
+        o[4] = (tool.item != Item::Empty && lp.held == tool.slot) as u8 as f32;
+        if let Some(e) = c.thrown.iter().rev().find(|e| e.mine && e.kind == Kind::Hook) {
+            let p = e.server_side();
+            o[5] = 1.0;
+            o[6] = (e.age.min(40)) as f32 / 20.0;
+            rel(&mut o[7..10], p);
+            o[10] = clip(dist(p, rp.pos) / 4.0, 4.0);
+        }
+        o[11] = (rp.item == Item::Rod) as u8 as f32;
+        o[12] = matches!(rp.item, Item::Snowball | Item::Egg) as u8 as f32;
+        if let Some(e) = c.thrown.iter().rev().find(|e| !e.mine && e.kind == Kind::Hook) {
+            o[13] = 1.0;
+            rel(&mut o[14..17], e.server_side());
+        }
+        // The opponent's snowball or egg nearest to this player, and how it moves.
+        let near = c
+            .thrown
+            .iter()
+            .filter(|e| !e.mine && matches!(e.kind, Kind::Snowball | Kind::Egg))
+            .min_by(|a, b2| dist_sq(a.pos, b.pos).total_cmp(&dist_sq(b2.pos, b.pos)));
+        if let Some(e) = near {
+            o[17] = 1.0;
+            rel(&mut o[18..21], e.pos);
+            let (mf, mr) = local(yaw, e.motion[0], e.motion[2]);
+            o[21] = clip(mf / 2.0, 2.0);
+            o[22] = clip(mr / 2.0, 2.0);
+            o[23] = clip(e.motion[1] / 2.0, 2.0);
+        }
+        o[24] = c.thrown.iter().any(|e| e.mine && matches!(e.kind, Kind::Snowball | Kind::Egg)) as u8 as f32;
+    }
+}
+
+/// The sword in hand, or the tool of the kit: a pearl, a potion, a drink
+/// or a meal can be started from either, with its own number key.
+#[inline]
+fn hand_free(lp: &crate::client::LocalPlayer) -> bool {
+    lp.held == SLOT_SWORD || (lp.tool.item != Item::Empty && lp.held == lp.tool.slot)
 }
 
 /// Of W, S, A, D and their pairs, the keys that take a player looking at
@@ -1617,14 +1754,29 @@ pub fn view(c: &Client, world: &World, ccfg: &ClientCfg) -> Vec<f64> {
         o.n(e.id);
         o.n(e.kind as u8);
         o.b(e.mine);
-        o.v(e.pos);
-        o.v(e.motion);
+        if e.kind == Kind::Hook {
+            // Of a hook only where the server has it counts (`Agent::tool_obs`).
+            o.v(e.server_side());
+            o.v([0.0; 3]);
+        } else {
+            o.v(e.pos);
+            o.v(e.motion);
+        }
         o.n(e.age);
         o.n(e.air);
         o.v(e.server_side());
     }
+    let t = lp.tool;
+    o.n(t.item as u8);
+    o.n(t.slot);
+    o.n(t.n);
+    o.n(t.wear);
     o.0
 }
+
+/// The numbers at the end of `view`, after the pearls and potions: the
+/// tool of the kit, its slot, how many and its wear.
+pub const VIEW_TAIL: usize = 4;
 
 /// The numbers of `view` before the pearls and potions in flight (the last
 /// of them is how many those are), and the numbers of each of those.
@@ -1632,7 +1784,7 @@ pub const VIEW_HEAD: usize = 101;
 pub const VIEW_THROWN: usize = 14;
 
 /// What the numbers of `view` are, for a message about one of them.
-pub fn view_name(k: usize) -> String {
+pub fn view_name(k: usize, len: usize) -> String {
     const HEAD: [&str; VIEW_HEAD] = [
         "x", "y", "z", "motion x", "motion y", "motion z", "on ground", "at a wall", "fall distance", "yaw", "pitch",
         "sprinting", "jump ticks", "speed attribute", "sprint told", "hurt time",
@@ -1653,6 +1805,8 @@ pub fn view_name(k: usize) -> String {
         ["number", "kind", "own", "x", "y", "z", "motion x", "motion y", "motion z", "age", "air", "server x", "server y", "server z"];
     if k < VIEW_HEAD {
         HEAD[k].to_string()
+    } else if k >= len - VIEW_TAIL {
+        ["tool", "tool slot", "tool count", "tool wear"][k + VIEW_TAIL - len].to_string()
     } else {
         format!("thrown {} {}", (k - VIEW_HEAD) / VIEW_THROWN, THROWN[(k - VIEW_HEAD) % VIEW_THROWN])
     }

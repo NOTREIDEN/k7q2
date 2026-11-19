@@ -22,8 +22,13 @@ POTION_BIAS = [0.0, -4.5, -5.0, -5.0, -5.0, -4.0, -4.0]
 # of the yaw control as large as these had gone so far out of use that
 # nothing brought them back, and turning round took half a second.
 FLICK_BIAS = [0.0, -4.5, -4.5, -4.5, -4.5, -4.5]
+# And of the tool of a kit (a rod, snowballs or eggs): used on about one
+# tick in fifty-five, a few times a second's worth in a duel, and the sword
+# taken back on about one tick in eight with the tool in hand, so that a hook
+# has the ticks it takes to reach the opponent before the sword comes back.
+TOOL_BIAS = [0.0, -4.0, -2.0]
 # Controls that do not start evenly, by their position among the controls.
-START_BIAS = {7: USE_BIAS, 8: PEARL_BIAS, 9: POTION_BIAS, 10: FLICK_BIAS}
+START_BIAS = {7: USE_BIAS, 8: PEARL_BIAS, 9: POTION_BIAS, 10: FLICK_BIAS, 12: TOOL_BIAS}
 # The preference of every choice but the first of a control that an old
 # version kept as an opponent never had: it goes on playing as it did.
 NEVER = -30.0

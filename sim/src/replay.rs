@@ -12,7 +12,7 @@ use crate::aabb::Aabb;
 use crate::agent::{self, Agent, Duel, ACT_HEADS, OBS_DIM, VIEW_HEAD, VIEW_THROWN};
 use crate::client::{Client, ClientCfg, Input};
 use crate::mth::{JavaRandom, Rng};
-use crate::net::{Bar, Item, Kind, Rows, ThrownEv, C2S, S2C, SLOT_SWORD};
+use crate::net::{Bar, Item, Kind, Rows, ThrownEv, Tool, C2S, S2C, SLOT_SWORD};
 use crate::server::{chunk_of, feather_points, prot_points, Food, KbProfile, Server, ServerCfg, ServerPlayer, MAX_HEALTH};
 use crate::world::World;
 use std::collections::HashMap;
@@ -96,6 +96,10 @@ fn stack(s: &str) -> (Item, u32) {
         "373" if p[1] == "8226" => (Item::Drink, p[2].parse().unwrap()),
         "374" => (Item::Bottle, p[2].parse().unwrap()),
         "364" => (Item::Food, p[2].parse().unwrap()),
+        // A fishing rod by its wear, snowballs and eggs by their count.
+        "346" => (Item::Rod, 1 + p[1].parse::<u32>().unwrap()),
+        "332" => (Item::Snowball, p[2].parse().unwrap()),
+        "344" => (Item::Egg, p[2].parse().unwrap()),
         other => panic!("an item the simulator does not know: {other}"),
     }
 }
@@ -144,6 +148,37 @@ fn said(s: &str) -> (Item, u8) {
     }
 }
 
+/// The rig's number for what is thrown.
+fn kind_code(k: Kind) -> i64 {
+    match k {
+        Kind::Pearl => 0,
+        Kind::Potion => 1,
+        Kind::Snowball => 2,
+        Kind::Egg => 3,
+        Kind::Hook => 4,
+    }
+}
+
+fn kind_of_tool(i: Item) -> i64 {
+    match i {
+        Item::Rod => 1,
+        Item::Snowball => 2,
+        Item::Egg => 3,
+        _ => 0,
+    }
+}
+
+/// The tool the rig notes for a player (`tl`, `tn`, `tw` in slot `ts`).
+fn tool_of(l: &Line) -> Tool {
+    let item = match l.i("tl") {
+        1 => Item::Rod,
+        2 => Item::Snowball,
+        3 => Item::Egg,
+        _ => return Tool::default(),
+    };
+    Tool { item, slot: l.i("ts") as u8, n: l.i("tn") as u8, wear: l.i("tw") as u8 }
+}
+
 /// Turn a recorded server-to-client packet into the simulator's packet.
 /// `None` means the packet carries nothing the simulator models.
 fn s2c(l: &Line, at: usize, own_id: i64, pearls: &mut PearlIds) -> Option<S2C> {
@@ -153,11 +188,16 @@ fn s2c(l: &Line, at: usize, own_id: i64, pearls: &mut PearlIds) -> Option<S2C> {
         let kind = match l.i("type") {
             65 => Kind::Pearl,
             73 => Kind::Potion,
+            61 => Kind::Snowball,
+            62 => Kind::Egg,
+            90 => Kind::Hook,
             _ => panic!("an object the simulator does not know"),
         };
         let id = pearls.add(l.i("entityId"));
         let p = [l.i("x") as i32, l.i("y") as i32, l.i("z") as i32];
-        return Some(S2C::Thrown { id, ev: ThrownEv::Spawn { kind, p, yaw: l.i("yaw") as i8, pitch: l.i("pitch") as i8 } });
+        // A hook's packet carries the id of the player it belongs to.
+        let own = kind == Kind::Hook && l.i("field_149020_k") == own_id;
+        return Some(S2C::Thrown { id, ev: ThrownEv::Spawn { kind, p, yaw: l.i("yaw") as i8, pitch: l.i("pitch") as i8, own } });
     }
     if class == "S13PacketDestroyEntities" {
         let mut ids = [0u32; 8];
@@ -525,6 +565,9 @@ fn replay_client(lines: &[Line], world: &World, speed: i8, sens: f32, o: &Option
                 lp.speed_amp = l.i("spa") as i8;
                 lp.fx = l.i("fx") != 0;
             }
+            if l.has("tl") {
+                lp.tool = tool_of(l);
+            }
             if l.has("rows") {
                 lp.rows = rows_of(l.s("rows"));
                 lp.inv_open = l.b("open");
@@ -647,12 +690,18 @@ fn replay_client(lines: &[Line], world: &World, speed: i8, sens: f32, o: &Option
                     None => s.parse::<f64>().unwrap(),
                 };
                 let mut want: Vec<f64> = l.s("v").split(',').map(hex).collect();
-                let got = agent::view(&c, world, &cfg);
+                let mut got = agent::view(&c, world, &cfg);
                 // The game's numbers of pearls and potions are its own.
-                let mut k = VIEW_HEAD;
-                while k < want.len() {
-                    want[k] = ids.get(want[k] as i64).map(|x| x as f64).unwrap_or(-1.0);
-                    k += VIEW_THROWN;
+                let thrown = want.get(VIEW_HEAD - 1).copied().unwrap_or(0.0) as usize;
+                for i in 0..thrown {
+                    let k = VIEW_HEAD + i * VIEW_THROWN;
+                    if k < want.len() {
+                        want[k] = ids.get(want[k] as i64).map(|x| x as f64).unwrap_or(-1.0);
+                    }
+                }
+                // Recorded before views ended with the tool of the kit.
+                if want.len() + agent::VIEW_TAIL == got.len() && got[got.len() - agent::VIEW_TAIL..].iter().all(|&x| x == 0.0 || x == Item::Empty as u8 as f64) {
+                    got.truncate(want.len());
                 }
                 let off: Vec<usize> = if want.len() != got.len() {
                     vec![VIEW_HEAD - 1]
@@ -665,7 +714,7 @@ fn replay_client(lines: &[Line], world: &World, speed: i8, sens: f32, o: &Option
                     let what: Vec<String> = off
                         .iter()
                         .take(8)
-                        .map(|&k| format!("{} {:?} for {:?}", agent::view_name(k), got.get(k).copied().unwrap_or(f64::NAN), want.get(k).copied().unwrap_or(f64::NAN)))
+                        .map(|&k| format!("{} {:?} for {:?}", agent::view_name(k, got.len()), got.get(k).copied().unwrap_or(f64::NAN), want.get(k).copied().unwrap_or(f64::NAN)))
                         .collect();
                     format!("tick {tick}: the simulator has {}", what.join(", "))
                 });
@@ -828,6 +877,14 @@ fn replay_client(lines: &[Line], world: &World, speed: i8, sens: f32, o: &Option
                     ok &= fi("slot in hand", lp.held as i64, st.i("held"), &mut rep);
                     ok &= fi("slot reported", lp.synced as i64, st.i("cpi"), &mut rep);
                     ok &= fi("pearls left", lp.pearls as i64, st.i("pc"), &mut rep);
+                    if st.has("tl") {
+                        let t = tool_of(st);
+                        ok &= fi("tool", kind_of_tool(lp.tool.item), kind_of_tool(t.item), &mut rep);
+                        ok &= fi("tool count", lp.tool.n as i64 * (lp.tool.item != Item::Empty) as i64, t.n as i64, &mut rep);
+                        ok &= fi("tool wear", lp.tool.wear as i64, t.wear as i64, &mut rep);
+                        let out = c.thrown.iter().any(|e| e.kind == Kind::Hook && e.mine);
+                        ok &= fi("hook out", out as i64, (st.i("fish") >= 0) as i64, &mut rep);
+                    }
                     if st.has("pots") {
                         ok &= fi("potions left", lp.potions as i64, st.i("pots"), &mut rep);
                     }
@@ -856,9 +913,12 @@ fn replay_client(lines: &[Line], world: &World, speed: i8, sens: f32, o: &Option
                     let list = st.s("pe").trim_matches(|ch| ch == '[' || ch == ']');
                     let want: Vec<&str> = list.split(';').filter(|e| !e.is_empty()).collect();
                     let hex = |s: &str| f64::from_bits(u64::from_str_radix(s, 16).unwrap());
-                    let mut same = want.len() == c.thrown.len();
+                    // A hook flies on a client by rules of its own; the agent only asks
+                    // whether one is out, so the list leaves hooks out.
+                    let thrown: Vec<&crate::client::ClientThrown> = c.thrown.iter().filter(|e| e.kind != Kind::Hook).collect();
+                    let mut same = want.len() == thrown.len();
                     if same {
-                        for (e, w) in c.thrown.iter().zip(&want) {
+                        for (e, w) in thrown.iter().zip(&want) {
                             let q: Vec<&str> = w.split(':').collect();
                             let pos = [hex(q[1]), hex(q[2]), hex(q[3])];
                             let mo = [hex(q[4]), hex(q[5]), hex(q[6])];
@@ -869,8 +929,7 @@ fn replay_client(lines: &[Line], world: &World, speed: i8, sens: f32, o: &Option
                         }
                     }
                     ok &= rep.note("pearls", same, || {
-                        let got: Vec<String> = c
-                            .thrown
+                        let got: Vec<String> = thrown
                             .iter()
                             .map(|e| {
                                 format!(
@@ -1005,6 +1064,9 @@ fn load_server(p: &mut ServerPlayer, l: &Line) {
         if l.has("rows") {
             p.rows = rows_of(l.s("rows"));
         }
+        if l.has("tl") {
+            p.tool = tool_of(l);
+        }
         // The wear is recorded for the stack in hand only.
         if p.held == SLOT_SWORD && l.i("sd") >= 0 {
             p.sword_wear = l.i("sd") as u32;
@@ -1080,6 +1142,8 @@ fn replay_server(lines: &[Line], world: &World, speed: i8, o: &Options, wear: f3
         cfg.feather = feather_points(head.i("ff") as i32);
         cfg.ench_damage = head.i("sharp") as f32 * 1.25f32;
     }
+    // A scene where hits for no damage count, as on a CraftBukkit server.
+    cfg.zero_hits = head.has("zero") && head.i("zero") != 0;
     let mut kb = KbProfile::VANILLA;
     if o.wrong_knockback {
         // Proves that the comparison notices a small error.
@@ -1132,6 +1196,9 @@ fn replay_server(lines: &[Line], world: &World, speed: i8, o: &Options, wear: f3
             sv.frozen.clear();
             for st in &pearl_states {
                 let (id, age) = (st.i("id"), st.i("tia"));
+                if st.has("kind") && st.i("kind") == 4 {
+                    continue;
+                }
                 if ages.get(&id).copied().unwrap_or(0) == age {
                     if let Some(k) = ids.get(id) {
                         sv.frozen.push(k);
@@ -1225,8 +1292,7 @@ fn replay_server(lines: &[Line], world: &World, speed: i8, o: &Options, wear: f3
                 ok &= fd("throw pitch", e.pitch as f64, sp.f("epitch") as f64, &mut rep);
                 let m = [sp.d("emx"), sp.d("emy"), sp.d("emz")];
                 let off = (0..3).map(|a| (m[a] - e.aim[a]).abs()).fold(0.0, f64::max);
-                let is_potion = sp.i("type") == 73;
-                ok &= rep.note("throw kind", (e.kind == Kind::Potion) == is_potion, || format!("tick {tick}: simulator {:?}, game type {}", e.kind, sp.i("type")));
+                ok &= rep.note("throw kind", e.kind.spawn_type() as i64 == sp.i("type"), || format!("tick {tick}: simulator {:?}, game type {}", e.kind, sp.i("type")));
                 ok &= rep.note("throw aim", off < 0.0075 * e.kind.speed() as f64 * 6.0, || {
                     format!("tick {tick}: simulator {:?} before the random part, game {:?} after it", e.aim, m)
                 });
@@ -1264,7 +1330,18 @@ fn replay_server(lines: &[Line], world: &World, speed: i8, o: &Options, wear: f3
                 };
                 ok &= fi("pearl thrower", e.thrower as i64, st.i("th"), &mut rep);
                 if st.has("kind") {
-                    ok &= fi("pearl or potion", (e.kind == Kind::Potion) as i64, st.i("kind"), &mut rep);
+                    ok &= fi("pearl or potion", kind_code(e.kind), st.i("kind"), &mut rep);
+                }
+                if let Some(h) = &e.hook {
+                    // A hook: its box (which stays put while it holds a player), whether it
+                    // lies on a block, whom it holds, and how its last move ended.
+                    ok &= fd("hook box x", h.body.bb.min[0], st.d("bx"), &mut rep);
+                    ok &= fd("hook box y", h.body.bb.min[1], st.d("by"), &mut rep);
+                    ok &= fd("hook box z", h.body.bb.min[2], st.d("bz"), &mut rep);
+                    ok &= fi("hook on a block", h.in_ground as i64, st.i("ing"), &mut rep);
+                    ok &= fi("hook holds", h.caught.map(|v| v as i64).unwrap_or(-1), st.i("cau"), &mut rep);
+                    ok &= fi("hook on ground", h.body.on_ground as i64, st.i("og"), &mut rep);
+                    ok &= fi("hook against a wall", h.body.collided_h as i64, st.i("ch"), &mut rep);
                 }
                 ok &= fi("pearl age", e.ticks_in_air as i64, st.i("tia"), &mut rep);
                 ok &= fi("pearl count", e.update_counter as i64, st.i("uc"), &mut rep);
@@ -1315,6 +1392,13 @@ fn replay_server(lines: &[Line], world: &World, speed: i8, o: &Options, wear: f3
                 if st.has("held") {
                     ok &= fi("slot in hand", p.held as i64, st.i("held"), &mut rep);
                     ok &= fi("pearls left", p.pearls as i64, st.i("pc"), &mut rep);
+                    if st.has("tl") {
+                        let t = tool_of(st);
+                        ok &= fi("tool", kind_of_tool(p.tool.item), kind_of_tool(t.item), &mut rep);
+                        ok &= fi("tool count", p.tool.n as i64 * (p.tool.item != Item::Empty) as i64, t.n as i64, &mut rep);
+                        ok &= fi("tool wear", p.tool.wear as i64, t.wear as i64, &mut rep);
+                        ok &= fi("hook out", p.fish.is_some() as i64, (st.i("fish") >= 0) as i64, &mut rep);
+                    }
                     if st.has("pots") {
                         ok &= fi("potions left", p.potions as i64, st.i("pots"), &mut rep);
                     }
@@ -1458,6 +1542,9 @@ fn replay_server(lines: &[Line], world: &World, speed: i8, o: &Options, wear: f3
                 states.push(l);
             }
             "SE" => pearl_states.push(l),
+            // A draw of a hook that lies on a block, made during this tick.
+            "HF" => sv.hook_floats.push_back(l.f("v")),
+            "HR" => sv.kb_randoms.push_back(l.d("v")),
             // The rig gave a player its health back, before the packets of
             // this tick.
             "SH" => {

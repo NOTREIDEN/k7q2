@@ -1,4 +1,4 @@
-"""Copy the five decompiled sources that need a hook into patched/ and add the hook lines."""
+"""Copy the decompiled sources that need a hook into patched/ and add the hook lines."""
 import os, sys
 SRC = sys.argv[1]
 DST = sys.argv[2]
@@ -33,5 +33,27 @@ patch("net/minecraft/client/network/NetHandlerPlayClient.java", [
     # The answer to a server teleport goes around addToSendQueue; note it down as well.
     ("this.netManager.sendPacket(new C03PacketPlayer.C06PacketPlayerPosLook(", "rig.Rig.onClientSend(null); this.netManager.sendPacket(rig.Rig.noted(new C03PacketPlayer.C06PacketPlayerPosLook("),
     ("entityplayer.rotationYaw, entityplayer.rotationPitch, false));", "entityplayer.rotationYaw, entityplayer.rotationPitch, false)));"),
+])
+# A scene can ask for hits that do no damage to count, as CraftBukkit has them ("Don't filter
+# out 0 damage"): a snowball, an egg, a rod's hook or a pearl then hurts a player for nothing.
+patch("net/minecraft/entity/player/EntityPlayer.java", [
+    ("                if (amount == 0.0F)\n                {\n                    return false;\n                }",
+     "                if (amount == 0.0F && !rig.Rig.zeroHits)\n                {\n                    return false;\n                }"),
+])
+# The hook's random slowing where it lies on a block, noted so that a replay can use the same.
+patch("net/minecraft/entity/projectile/EntityFishHook.java", [
+    ("this.motionX *= (double)(this.rand.nextFloat() * 0.2F);", "this.motionX *= (double)(rig.Rig.hookFloat(this, this.rand.nextFloat()) * 0.2F);"),
+    ("this.motionY *= (double)(this.rand.nextFloat() * 0.2F);", "this.motionY *= (double)(rig.Rig.hookFloat(this, this.rand.nextFloat()) * 0.2F);"),
+    ("this.motionZ *= (double)(this.rand.nextFloat() * 0.2F);", "this.motionZ *= (double)(rig.Rig.hookFloat(this, this.rand.nextFloat()) * 0.2F);"),
+])
+# The random direction of a knockback from a thrower standing where the player is (a hook
+# that falls back on its own angler), noted so that a replay can use the same.
+patch("net/minecraft/entity/EntityLivingBase.java", [
+    ("d0 = (Math.random() - Math.random()) * 0.01D)", "d0 = (rig.Rig.kbRandom(this, Math.random()) - rig.Rig.kbRandom(this, Math.random())) * 0.01D)"),
+    ("d1 = (Math.random() - Math.random()) * 0.01D;", "d1 = (rig.Rig.kbRandom(this, Math.random()) - rig.Rig.kbRandom(this, Math.random())) * 0.01D;"),
+])
+# No chickens from eggs, as on duel servers: the rig keeps only the players and what they throw.
+patch("net/minecraft/entity/projectile/EntityEgg.java", [
+    ("if (!this.worldObj.isRemote && this.rand.nextInt(8) == 0)", "if (!this.worldObj.isRemote && this.rand.nextInt(8) == 0 && !rig.Rig.noChickens)"),
 ])
 print("patched")

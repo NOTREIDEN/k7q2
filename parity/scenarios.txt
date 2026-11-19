@@ -58,3 +58,11 @@ web1        fight      91    webs=7
 web2        move       92    webs=12 webtrap=1
 web3        pot        93    health=1 armor=1 prot=2 sharp=2 potions=7 pearls=16 many=1 refill=6 webs=8
 web4        fight      94    webs=4 webtrap=1 health=1 armor=1 prot=2 sharp=2
+rod1        tools      91    tool=rod
+rod2        tools      92    tool=rod many=1 dist=2.5
+rod3        tools      93    tool=rod zero=0
+rod4        tools      94    tool=rod health=1 armor=1 prot=2 sharp=2 attacks=1
+snow1       tools      95    tool=snowball
+snow2       tools      96    tool=snowball many=1 count=16 dist=5
+egg1        tools      97    tool=egg
+rod5        tools      98    tool=rod up=1 dist=3 fake=0.01 attacks=0

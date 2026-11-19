@@ -7,7 +7,7 @@ use crate::aabb::{dist_sq, Aabb, V3, EYE_HEIGHT};
 use crate::living::Living;
 use crate::mth::{self, JavaRandom, Rng};
 use crate::net::{
-    shift_click, Bar, Item, Kind, Rows, ThrownEv, BLOCK_TICKS, C2S, DRINK_AMP, DRINK_TICKS, S2C, SLOT_SWORD, STEAK_FOOD,
+    shift_click, Bar, Item, Kind, Rows, ThrownEv, Tool, BLOCK_TICKS, C2S, DRINK_AMP, DRINK_TICKS, ROD_MAX_WEAR, S2C, SLOT_SWORD, STEAK_FOOD,
     STEAK_SATURATION, USE_TICKS,
 };
 use crate::world::{RayHit, World};
@@ -126,6 +126,14 @@ pub struct ServerCfg {
     /// with the thrower; thrown at the feet while going forward, it lands
     /// ahead. 1.8 itself adds nothing.
     pub throw_carry: bool,
+    /// CraftBukkit and every server built on it (Spigot, Paper and the
+    /// rest) no longer drop a hit that does no damage ("Don't filter out 0
+    /// damage" in `EntityHuman.damageEntity`): a snowball, an egg, a rod's
+    /// hook or an ender pearl that hits a player hurts it for nothing, with
+    /// the knockback of a hit from wherever its thrower stands, and starts
+    /// its invulnerable ticks. The plain game drops such a hit, and they
+    /// fly on through.
+    pub zero_hits: bool,
 }
 
 impl ServerCfg {
@@ -157,6 +165,7 @@ impl Default for ServerCfg {
             pearl_cooldown: 0,
             potion_strict: 1.0,
             throw_carry: false,
+            zero_hits: false,
         }
     }
 }
@@ -194,6 +203,10 @@ pub enum Source {
     Wall,
     /// Hunger. Nothing lessens it.
     Starve,
+    /// A snowball, an egg, a hook or a pearl that hit, thrown by this
+    /// player (`causeThrownDamage`): it does no damage, and its knockback
+    /// is from where the thrower is.
+    Thrown(usize),
 }
 
 /// `FoodStats`.
@@ -235,10 +248,45 @@ pub struct Thrown {
     pub enc_pitch: i32,
     pub update_counter: i32,
     pub ticks_since_teleport: i32,
+    /// Whether the thing was on the ground when its tracker last sent it
+    /// whole: only a hook can be, since only a hook moves as entities do.
+    pub tracker_on_ground: bool,
     pub last_motion: V3,
     /// The direction and speed of the throw before the game added its
     /// random part.
     pub aim: V3,
+    /// For a rod's hook, what it has besides: see `Hook`.
+    pub hook: Option<Hook>,
+}
+
+/// What `EntityFishHook` keeps besides a thrown thing's position and
+/// motion: its box a quarter of a block on each side, moved through the
+/// world like any entity's (`moveEntity`, no step up); whether it lies on
+/// a block, and the player it has caught, if any.
+#[derive(Clone, Debug)]
+pub struct Hook {
+    pub body: crate::body::Body,
+    pub in_ground: bool,
+    pub caught: Option<usize>,
+}
+
+/// `EntityFishHook.setSize(0.25F, 0.25F)`: half its width, and its height.
+const HOOK_HALF: f64 = (0.25f32 / 2.0f32) as f64;
+const HOOK_HEIGHT: f64 = 0.25f32 as f64;
+
+/// The box of a hook whose feet are at `p` (`Entity.setPosition`).
+#[inline]
+pub fn hook_box(p: V3) -> Aabb {
+    Aabb::new([p[0] - HOOK_HALF, p[1], p[2] - HOOK_HALF], [p[0] + HOOK_HALF, p[1] + HOOK_HEIGHT, p[2] + HOOK_HALF])
+}
+
+/// A snowball, an egg, a hook or a pearl that hit a player and counted
+/// (see `ServerCfg::zero_hits`).
+#[derive(Clone, Copy, Debug)]
+pub struct ThrownHit {
+    pub kind: Kind,
+    pub thrower: usize,
+    pub victim: usize,
 }
 
 /// A pearl that came down and moved its thrower.
@@ -461,6 +509,10 @@ pub struct ServerPlayer {
     pub drinks: u16,
     pub bottles: u16,
     pub steak: u8,
+    /// A rod, snowballs or eggs, if the kit has one (see `Tool`).
+    pub tool: Tool,
+    /// `fishEntity`: the id of this player's hook while it is out.
+    pub fish: Option<u32>,
     /// The three rows of the inventory. `can_click` is false from a click
     /// the server did not take as the client said until the client has
     /// answered (`Container.getCanCraft`); `refused` is the number of that
@@ -560,6 +612,8 @@ impl ServerPlayer {
             drinks: 0,
             bottles: 0,
             steak: 0,
+            tool: Tool::default(),
+            fish: None,
             rows: Rows::default(),
             can_click: true,
             refused: 0,
@@ -583,7 +637,7 @@ impl ServerPlayer {
     /// The hotbar but for the sword.
     #[inline]
     pub fn bar(&self) -> Bar {
-        Bar { pearls: self.pearls, potions: self.potions, drinks: self.drinks, bottles: self.bottles, steak: self.steak }
+        Bar { pearls: self.pearls, potions: self.potions, drinks: self.drinks, bottles: self.bottles, steak: self.steak, tool: self.tool }
     }
 
     #[inline]
@@ -593,6 +647,7 @@ impl ServerPlayer {
         self.drinks = b.drinks;
         self.bottles = b.bottles;
         self.steak = b.steak;
+        self.tool = b.tool;
     }
 
     /// The stack in a slot: which item, and its wear (a sword) or its size.
@@ -770,6 +825,18 @@ pub struct Server {
     /// Pearls thrown, per player, and potions.
     pub throws: [u32; 2],
     pub potion_throws: [u32; 2],
+    /// Snowballs and eggs thrown and hooks cast, per player.
+    pub tool_uses: [u32; 2],
+    /// Snowballs, eggs, hooks and pearls that hit a player and counted,
+    /// since the caller last drained this list.
+    pub thrown_hits: Vec<ThrownHit>,
+    /// Replaying a recording: the hook's `rand.nextFloat()` draws, which
+    /// slow it where it lies on a block.
+    pub hook_floats: VecDeque<f32>,
+    /// Draws for the random direction of a knockback whose source stands
+    /// where the player is, taken before the generator's: a replay fills it
+    /// with the game's.
+    pub kb_randoms: VecDeque<f64>,
     /// Replaying a recording: the exact motion of the next pearls and
     /// potions thrown, which in the game has a random part.
     pub throw_motions: VecDeque<V3>,
@@ -816,6 +883,10 @@ impl Server {
             splashes: Vec::new(),
             throws: [0; 2],
             potion_throws: [0; 2],
+            tool_uses: [0; 2],
+            thrown_hits: Vec::new(),
+            hook_floats: VecDeque::new(),
+            kb_randoms: VecDeque::new(),
             throw_motions: VecDeque::new(),
             spawned: Vec::new(),
             frozen: Vec::new(),
@@ -829,14 +900,7 @@ impl Server {
     /// A packet handler, run at the start of a server tick in arrival order.
     pub fn handle(&mut self, from: usize, pkt: C2S, world: &World, rng: &mut Rng, out: &mut Outbox) {
         match pkt {
-            C2S::Swing => {
-                let p = &mut self.p[from];
-                if !p.swing_in_progress || p.swing_progress_int >= 3 || p.swing_progress_int < 0 {
-                    p.swing_progress_int = -1;
-                    p.swing_in_progress = true;
-                    out.push((1 - from, S2C::Swing));
-                }
-            }
+            C2S::Swing => self.swing(from, out),
             C2S::Attack => self.use_entity_attack(from, world, rng, out),
             C2S::Sprint(s) => {
                 self.p[from].set_sprinting(s);
@@ -992,7 +1056,92 @@ impl Server {
                     out.push((i, S2C::Cursor));
                 }
             }
+            // ItemSnowball / ItemEgg.onItemRightClick: one off the stack,
+            // and the rest as for a pearl.
+            Item::Snowball | Item::Egg => {
+                let kind = if self.p[i].tool.item == Item::Egg { Kind::Egg } else { Kind::Snowball };
+                let t = &mut self.p[i].tool;
+                t.n -= 1;
+                if t.n == 0 {
+                    *t = Tool::default();
+                }
+                self.tool_uses[i] += 1;
+                self.spawn_thrown(i, kind, rng, out);
+                if !self.p[i].using_item {
+                    out.push((i, S2C::WindowItems(self.p[i].bar(), self.p[i].rows)));
+                    out.push((i, S2C::Cursor));
+                }
+            }
+            // ItemFishingRod.onItemRightClick: with the hook out, it comes
+            // back (`handleHookRetraction`) and the rod wears by what that
+            // returns; without, a hook is cast. Either way the arm swings.
+            Item::Rod => {
+                if self.p[i].fish.is_some() {
+                    let wear = self.retract(i);
+                    let t = &mut self.p[i].tool;
+                    if wear > 0 {
+                        // damageItem: the rod breaks once worn past its most.
+                        let worn = t.wear as u32 + wear;
+                        if worn > ROD_MAX_WEAR as u32 {
+                            *t = Tool::default();
+                        } else {
+                            t.wear = worn as u8;
+                        }
+                        // tryUseItem: the stack changed.
+                        if !self.p[i].using_item {
+                            out.push((i, S2C::WindowItems(self.p[i].bar(), self.p[i].rows)));
+                            out.push((i, S2C::Cursor));
+                        }
+                    }
+                } else {
+                    self.tool_uses[i] += 1;
+                    self.spawn_thrown(i, Kind::Hook, rng, out);
+                }
+                self.swing(i, out);
+            }
         }
+    }
+
+    /// `EntityLivingBase.swingItem` on the server: the other player is
+    /// told, unless the arm is in the first half of a swing already.
+    fn swing(&mut self, i: usize, out: &mut Outbox) {
+        let p = &mut self.p[i];
+        if !p.swing_in_progress || p.swing_progress_int >= 3 || p.swing_progress_int < 0 {
+            p.swing_progress_int = -1;
+            p.swing_in_progress = true;
+            out.push((1 - i, S2C::Swing));
+        }
+    }
+
+    /// `EntityFishHook.handleHookRetraction` for player `i`'s hook: a
+    /// player it has caught is pulled toward the angler, on the server only
+    /// (nothing tells that player's client, so all that comes of it is the
+    /// motion the server has for the player at its next knockback). The
+    /// hook goes. Returns the wear: 3 with a player caught, 2 if it lay on
+    /// a block, 0 otherwise.
+    fn retract(&mut self, i: usize) -> u32 {
+        let Some(id) = self.p[i].fish.take() else { return 0 };
+        let Some(k) = self.thrown.iter().position(|e| e.id == id && !e.dead) else { return 0 };
+        let (pos, hook) = (self.thrown[k].pos, self.thrown[k].hook.clone());
+        let mut wear = 0;
+        if let Some(h) = &hook {
+            if let Some(v) = h.caught {
+                let a = self.p[i].l.body.pos;
+                let (d0, d2, d4) = (a[0] - pos[0], a[1] - pos[1], a[2] - pos[2]);
+                let d6 = mth::sqrt_d(d0 * d0 + d2 * d2 + d4 * d4) as f64;
+                let d8 = 0.1f64;
+                let m = &mut self.p[v].l.body.motion;
+                m[0] += d0 * d8;
+                m[1] += d2 * d8 + mth::sqrt_d(d6) as f64 * 0.08;
+                m[2] += d4 * d8;
+                wear = 3;
+            }
+            if h.in_ground {
+                wear = 2;
+            }
+        }
+        self.thrown[k].dead = true;
+        wear
     }
 
     /// `EntityPlayerMP.onItemUseFinish`: the player is told, the potion
@@ -1044,7 +1193,9 @@ impl Server {
         let f1 = mth::sqrt_d(m[0] * m[0] + m[2] * m[2]);
         let pyaw = (mth::atan2(m[0], m[2]) * 180.0 / std::f64::consts::PI) as f32;
         let ppitch = (mth::atan2(m[1], f1 as f64) * 180.0 / std::f64::consts::PI) as f32;
-        if self.cfg.throw_carry && !replaying {
+        // A newer server's thrown things take on their thrower's movement;
+        // a 1.8 hook never does.
+        if self.cfg.throw_carry && !replaying && kind != Kind::Hook {
             m[0] += p.moved[0];
             m[2] += p.moved[2];
             if !p.l.body.on_ground {
@@ -1070,15 +1221,27 @@ impl Server {
             enc_pitch: mth::floor_f(ppitch * 256.0f32 / 360.0f32),
             update_counter: 0,
             ticks_since_teleport: 0,
+            tracker_on_ground: false,
             last_motion: m,
             aim,
+            hook: None,
         };
+        let mut e = e;
+        if kind == Kind::Hook {
+            // new EntityFishHook(world, angler): angler.fishEntity = this.
+            let mut body = crate::body::Body::new(pos);
+            body.bb = hook_box(pos);
+            body.motion = m;
+            e.hook = Some(Hook { body, in_ground: false, caught: None });
+            self.p[i].fish = Some(id);
+        }
         if replaying {
             self.spawned.push(e.clone());
         }
         // EntityTrackerEntry.updatePlayerEntity for each player.
         for dest in 0..2 {
-            out.push((dest, S2C::Thrown { id, ev: ThrownEv::Spawn { kind, p: e.enc_pos, yaw: e.enc_yaw as i8, pitch: e.enc_pitch as i8 } }));
+            let own = kind == Kind::Hook && dest == i;
+            out.push((dest, S2C::Thrown { id, ev: ThrownEv::Spawn { kind, p: e.enc_pos, yaw: e.enc_yaw as i8, pitch: e.enc_pitch as i8, own } }));
             out.push((dest, S2C::Thrown { id, ev: ThrownEv::Meta }));
             out.push((dest, S2C::Thrown { id, ev: ThrownEv::Velocity(encode_velocity(m)) }));
         }
@@ -1088,6 +1251,10 @@ impl Server {
     /// `EntityThrowable.onUpdate` with `EntityEnderPearl.onImpact` or
     /// `EntityPotion.onImpact` for the pearl or potion at index `k`.
     fn thrown_update(&mut self, k: usize, world: &World, rng: &mut Rng, out: &mut Outbox) {
+        if self.thrown[k].kind == Kind::Hook {
+            self.hook_update(k, world, rng, out);
+            return;
+        }
         let e = &mut self.thrown[k];
         // Entity.onEntityUpdate
         e.prev_yaw = e.yaw;
@@ -1159,6 +1326,15 @@ impl Server {
                 self.thrown[k].dead = true;
             }
         }
+        // EntitySnowball / EntityEgg.onImpact: whatever it hits, it breaks;
+        // a player it hits is hurt for nothing, its thrower too (an egg's
+        // chickens are left out: duel servers do not let them hatch).
+        if matches!(kind, Kind::Snowball | Kind::Egg) && (hit_player.is_some() || hit_block) {
+            if let Some(j) = hit_player {
+                self.zero_hit(j, thrower, kind, rng, out);
+            }
+            self.thrown[k].dead = true;
+        }
         // EntityEnderPearl.onImpact. A pearl goes through its own thrower,
         // and while it does it does not notice a block either.
         let impact = kind == Kind::Pearl
@@ -1167,6 +1343,11 @@ impl Server {
                 None => hit_block,
             };
         if impact {
+            // EntityEnderPearl.onImpact: the player it hit is hurt for
+            // nothing first, then the thrower is moved.
+            if let Some(j) = hit_player {
+                self.zero_hit(j, thrower, kind, rng, out);
+            }
             let to = self.thrown[k].pos;
             let (bx, by, bz) = (mth::floor_d(to[0]), mth::floor_d(to[1]), mth::floor_d(to[2]));
             let inside = world.solid(bx, by, bz) || world.solid(bx, by + 1, bz);
@@ -1209,9 +1390,137 @@ impl Server {
         e.motion[1] -= f3;
     }
 
-    /// `EntityTrackerEntry.updatePlayerList` for the pearl or potion at
-    /// index `k`: update frequency 10, with velocity updates, sent to both
-    /// players.
+    /// A thrown thing of `kind` by `thrower` hits player `v`:
+    /// `attackEntityFrom(causeThrownDamage(..), 0)`, which counts only on a
+    /// server that lets hits for no damage through. Whether it counted.
+    fn zero_hit(&mut self, v: usize, thrower: usize, kind: Kind, rng: &mut Rng, out: &mut Outbox) -> bool {
+        let counted = self.attack_entity_from(v, 0.0, Source::Thrown(thrower), rng, out);
+        if counted {
+            self.thrown_hits.push(ThrownHit { kind, thrower, victim: v });
+        }
+        counted
+    }
+
+    /// `EntityFishHook.onUpdate` on the server, out of water, for the hook
+    /// at index `k`. It goes when its angler no longer holds the rod, is
+    /// dead or is more than 32 blocks away. While it has a player caught
+    /// it sits on that player, at four fifths of its height. Otherwise it
+    /// flies as anything thrown does against blocks and players, but moves
+    /// through the world as an entity (`moveEntity`), slowed to 0.92 of its
+    /// speed each tick in the air and 0.5 on the ground or against a wall,
+    /// and falling by 0.04. On a block it stops; on the next tick it comes
+    /// loose with a fifth of its speed or less, since the game never notes
+    /// which block it lies on, and its ticks in the air start over.
+    fn hook_update(&mut self, k: usize, world: &World, rng: &mut Rng, out: &mut Outbox) {
+        {
+            let e = &mut self.thrown[k];
+            e.prev_yaw = e.yaw;
+            e.prev_pitch = e.pitch;
+            if e.pos[1] < -64.0 {
+                e.dead = true;
+                return;
+            }
+        }
+        let angler = self.thrown[k].thrower;
+        let a = &self.p[angler];
+        if a.health <= 0.0 || a.in_hand().0 != Item::Rod || dist_sq(self.thrown[k].pos, a.l.body.pos) > 1024.0 {
+            self.thrown[k].dead = true;
+            return;
+        }
+        let mut hk = self.thrown[k].hook.take().expect("a hook without its state");
+        if let Some(v) = hk.caught {
+            let b = &self.p[v].l.body;
+            // Position only: the box stays where the hook last moved it.
+            self.thrown[k].pos = [b.pos[0], b.bb.min[1] + 1.8f32 as f64 * 0.8, b.pos[2]];
+            self.thrown[k].hook = Some(hk);
+            return;
+        }
+        let e = &mut self.thrown[k];
+        if hk.in_ground {
+            hk.in_ground = false;
+            for a in 0..3 {
+                let r = self.hook_floats.pop_front().unwrap_or_else(|| rng.f64() as f32);
+                e.motion[a] *= (r * 0.2f32) as f64;
+            }
+            e.ticks_in_air = 0;
+        } else {
+            e.ticks_in_air += 1;
+        }
+        let vec31 = e.pos;
+        let mut vec3 = [e.pos[0] + e.motion[0], e.pos[1] + e.motion[1], e.pos[2] + e.motion[2]];
+        let mut hit_block = false;
+        if let RayHit::Block(h) = world.ray_trace_blocks(vec31, vec3, false) {
+            vec3 = h;
+            hit_block = true;
+        }
+        let query = hk.body.bb.add_coord(e.motion[0], e.motion[1], e.motion[2]).expand(1.0, 1.0, 1.0);
+        let ticks_in_air = e.ticks_in_air;
+        let mut hit_player: Option<usize> = None;
+        let mut d0 = 0.0f64;
+        for j in 0..2 {
+            let q = &self.p[j];
+            if !filed_near(&query, q.chunk) || !q.l.body.bb.intersects(&query) {
+                continue;
+            }
+            if j == angler && ticks_in_air < 5 {
+                continue;
+            }
+            let f = 0.3f32 as f64;
+            if let Some(h) = q.l.body.bb.expand(f, f, f).calculate_intercept(vec31, vec3) {
+                let d1 = dist_sq(vec31, h);
+                if d1 < d0 || d0 == 0.0 {
+                    hit_player = Some(j);
+                    d0 = d1;
+                }
+            }
+        }
+        if let Some(j) = hit_player {
+            if self.zero_hit(j, angler, Kind::Hook, rng, out) {
+                hk.caught = Some(j);
+            }
+        } else if hit_block {
+            hk.in_ground = true;
+        }
+        let e = &mut self.thrown[k];
+        if !hk.in_ground {
+            let b = &mut hk.body;
+            b.motion = e.motion;
+            b.move_entity_step(world, e.motion[0], e.motion[1], e.motion[2], false, 0.0);
+            e.motion = b.motion;
+            e.pos = b.pos;
+            let f5 = mth::sqrt_d(e.motion[0] * e.motion[0] + e.motion[2] * e.motion[2]);
+            e.yaw = (mth::atan2(e.motion[0], e.motion[2]) * 180.0 / std::f64::consts::PI) as f32;
+            e.pitch = (mth::atan2(e.motion[1], f5 as f64) * 180.0 / std::f64::consts::PI) as f32;
+            while e.pitch - e.prev_pitch < -180.0f32 {
+                e.prev_pitch -= 360.0f32;
+            }
+            while e.pitch - e.prev_pitch >= 180.0f32 {
+                e.prev_pitch += 360.0f32;
+            }
+            while e.yaw - e.prev_yaw < -180.0f32 {
+                e.prev_yaw -= 360.0f32;
+            }
+            while e.yaw - e.prev_yaw >= 180.0f32 {
+                e.prev_yaw += 360.0f32;
+            }
+            e.pitch = e.prev_pitch + (e.pitch - e.prev_pitch) * 0.2f32;
+            e.yaw = e.prev_yaw + (e.yaw - e.prev_yaw) * 0.2f32;
+            let f6 = if b.on_ground || b.collided_h { 0.5f32 } else { 0.92f32 };
+            // No water anywhere: d10 is 0, so d11 is -1.
+            e.motion[1] += Kind::Hook.gravity() as f64 * -1.0;
+            for a in 0..3 {
+                e.motion[a] *= f6 as f64;
+            }
+            b.motion = e.motion;
+            b.pos = e.pos;
+            b.bb = hook_box(e.pos);
+        }
+        self.thrown[k].hook = Some(hk);
+    }
+
+    /// `EntityTrackerEntry.updatePlayerList` for the thrown thing at index
+    /// `k`: update frequency 10 (5 for a hook), with velocity updates, sent
+    /// to both players.
     fn thrown_tracker_update(&mut self, k: usize, out: &mut Outbox) {
         let e = &mut self.thrown[k];
         let id = e.id;
@@ -1220,7 +1529,7 @@ impl Server {
                 out.push((dest, S2C::Thrown { id, ev }));
             }
         };
-        if e.update_counter % 10 == 0 {
+        if e.update_counter % e.kind.track_every() == 0 {
             e.ticks_since_teleport += 1;
             let k0 = mth::floor_d(e.pos[0] * 32.0);
             let j1 = mth::floor_d(e.pos[1] * 32.0);
@@ -1233,21 +1542,23 @@ impl Server {
             let flag = j2.abs() >= 4 || k2.abs() >= 4 || ii.abs() >= 4 || e.update_counter % 60 == 0;
             let flag1 = (l1 - e.enc_yaw).abs() >= 4 || (i2 - e.enc_pitch).abs() >= 4;
             let mut pkt = None;
+            let og = e.hook.as_ref().is_some_and(|h| h.body.on_ground);
             if e.update_counter > 0 {
                 let in_range = |v: i32| (-128..128).contains(&v);
-                if in_range(j2) && in_range(k2) && in_range(ii) && e.ticks_since_teleport <= 400 {
+                if in_range(j2) && in_range(k2) && in_range(ii) && e.ticks_since_teleport <= 400 && e.tracker_on_ground == og {
                     if !flag || !flag1 {
                         if flag {
-                            pkt = Some(ThrownEv::RelMove { d: [j2 as i8, k2 as i8, ii as i8], on_ground: false });
+                            pkt = Some(ThrownEv::RelMove { d: [j2 as i8, k2 as i8, ii as i8], on_ground: og });
                         } else if flag1 {
-                            pkt = Some(ThrownEv::Look { yaw: l1 as i8, pitch: i2 as i8, on_ground: false });
+                            pkt = Some(ThrownEv::Look { yaw: l1 as i8, pitch: i2 as i8, on_ground: og });
                         }
                     } else {
-                        pkt = Some(ThrownEv::LookMove { d: [j2 as i8, k2 as i8, ii as i8], yaw: l1 as i8, pitch: i2 as i8, on_ground: false });
+                        pkt = Some(ThrownEv::LookMove { d: [j2 as i8, k2 as i8, ii as i8], yaw: l1 as i8, pitch: i2 as i8, on_ground: og });
                     }
                 } else {
+                    e.tracker_on_ground = og;
                     e.ticks_since_teleport = 0;
-                    pkt = Some(ThrownEv::Teleport { p: [k0, j1, k1], yaw: l1 as i8, pitch: i2 as i8, on_ground: false });
+                    pkt = Some(ThrownEv::Teleport { p: [k0, j1, k1], yaw: l1 as i8, pitch: i2 as i8, on_ground: og });
                 }
             }
             let d = [e.motion[0] - e.last_motion[0], e.motion[1] - e.last_motion[1], e.motion[2] - e.last_motion[2]];
@@ -1670,7 +1981,8 @@ impl Server {
     /// `EntityLivingBase.attackEntityFrom` as reached through
     /// `EntityPlayerMP` and `EntityPlayer`.
     fn attack_entity_from(&mut self, v: usize, amount: f32, src: Source, rng: &mut Rng, out: &mut Outbox) -> bool {
-        if self.p[v].health <= 0.0 || amount == 0.0 {
+        let counts_zero = self.cfg.zero_hits && matches!(src, Source::Thrown(_));
+        if self.p[v].health <= 0.0 || (amount == 0.0 && !counts_zero) {
             return false;
         }
         let mut flag = true;
@@ -1700,8 +2012,9 @@ impl Server {
                 let mut d1 = self.p[a].l.body.pos[0] - self.p[v].l.body.pos[0];
                 let mut d0 = self.p[a].l.body.pos[2] - self.p[v].l.body.pos[2];
                 while d1 * d1 + d0 * d0 < 1.0E-4 {
-                    d1 = (rng.f64() - rng.f64()) * 0.01;
-                    d0 = (rng.f64() - rng.f64()) * 0.01;
+                    let mut r = || self.kb_randoms.pop_front().unwrap_or_else(|| rng.f64());
+                    d1 = (r() - r()) * 0.01;
+                    d0 = (r() - r()) * 0.01;
                 }
                 self.knock_back(v, d1, d0);
                 self.hits.push(Hit {
@@ -1715,6 +2028,16 @@ impl Server {
                     damage: dealt.0,
                     dealt: dealt.1,
                 });
+            } else if let Source::Thrown(a) = src {
+                // The knockback of a thrown thing is from its thrower.
+                let mut d1 = self.p[a].l.body.pos[0] - self.p[v].l.body.pos[0];
+                let mut d0 = self.p[a].l.body.pos[2] - self.p[v].l.body.pos[2];
+                while d1 * d1 + d0 * d0 < 1.0E-4 {
+                    let mut r = || self.kb_randoms.pop_front().unwrap_or_else(|| rng.f64());
+                    d1 = (r() - r()) * 0.01;
+                    d0 = (r() - r()) * 0.01;
+                }
+                self.knock_back(v, d1, d0);
             }
         }
         true
@@ -1904,13 +2227,21 @@ impl Server {
                 k += 1;
                 continue;
             }
-            self.thrown_update(k, world, rng, out);
+            // World.updateEntities: one that died since (a hook that came
+            // back) is taken out without its update.
+            if !self.thrown[k].dead {
+                self.thrown_update(k, world, rng, out);
+            }
             if self.thrown[k].dead {
                 // World.updateEntities takes a dead entity out at once, and
                 // the tracker notes it for both players.
                 let id = self.thrown.remove(k).id;
                 for p in self.p.iter_mut() {
                     p.gone.push(id);
+                    // EntityFishHook.setDead: angler.fishEntity = null.
+                    if p.fish == Some(id) {
+                        p.fish = None;
+                    }
                 }
             } else {
                 k += 1;

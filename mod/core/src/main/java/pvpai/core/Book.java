@@ -36,6 +36,9 @@ public final strictfp class Book {
     private double[] throwEye, throwFrom;
     /** Its own pearls and potions the server has not shown yet, and potions of the other seen so far. */
     private int pearlsPending, potionsPending, potionsSeen;
+    /** Its own snowballs or eggs the server has not shown yet, where its eyes were at the last, and its ticks since. */
+    private int ballsPending, sinceBall = 1000;
+    private double[] ballEye = new double[3];
     private int otherSinceHurt = 1000, otherSinceJump = 1000;
     /** By number, oldest first. */
     private final Map<Long, Flying> flying = new LinkedHashMap<Long, Flying>();
@@ -93,8 +96,17 @@ public final strictfp class Book {
         }
     }
 
-    /** A pearl or a potion appeared, at this place in 32nds of a block. */
+    /** A pearl, a potion, a snowball or an egg appeared, at this place in 32nds of a block. */
     public void spawned(long id, int kind, int px, int py, int pz) {
+        spawned(id, kind, false, px, py, pz);
+    }
+
+    /**
+     * A pearl, a potion, a snowball, an egg or a hook appeared, at this
+     * place in 32nds of a block. The packet of a hook says whose it is:
+     * {@code own} for one of this player's.
+     */
+    public void spawned(long id, int kind, boolean own, int px, int py, int pz) {
         Flying e = new Flying();
         e.kind = kind;
         e.serverPos[0] = px;
@@ -103,12 +115,15 @@ public final strictfp class Book {
         for (int a = 0; a < 3; a++) {
             e.start[a] = (double) e.serverPos[a] / 32.0;
         }
-        int pending = kind == Inv.KIND_PEARL ? pearlsPending : potionsPending;
-        e.mine = pending > 0 && Geo.distSq(e.start, throwEye) < 1.0;
+        boolean ball = kind == Inv.KIND_SNOWBALL || kind == Inv.KIND_EGG;
+        int pending = kind == Inv.KIND_PEARL ? pearlsPending : ball ? ballsPending : potionsPending;
+        e.mine = kind == Inv.KIND_HOOK ? own : pending > 0 && Geo.distSq(e.start, ball ? ballEye : throwEye) < 1.0;
         if (e.mine) {
             if (kind == Inv.KIND_PEARL) {
                 pearlsPending--;
-            } else {
+            } else if (ball) {
+                ballsPending--;
+            } else if (kind == Inv.KIND_POTION) {
                 potionsPending--;
             }
             // Where its own throw started is known exactly; of the rest
@@ -200,6 +215,16 @@ public final strictfp class Book {
      * server had last been told (the throw starts from those).
      */
     public void ticked(boolean swung, boolean attacked, boolean threwPearl, boolean threwPotion, double[] eyeBefore, double[] saidPos, float saidYaw, float saidPitch) {
+        ticked(swung, attacked, threwPearl, threwPotion, false, eyeBefore, saidPos, saidYaw, saidPitch);
+    }
+
+    /** {@link #ticked} with whether a snowball or an egg was thrown as well. */
+    public void ticked(boolean swung, boolean attacked, boolean threwPearl, boolean threwPotion, boolean threwBall, double[] eyeBefore, double[] saidPos, float saidYaw, float saidPitch) {
+        if (threwBall) {
+            ballsPending = Math.min(ballsPending + 1, 255);
+            ballEye = eyeBefore.clone();
+            sinceBall = 0;
+        }
         if (swung) {
             sinceSwing = 0;
         }
@@ -229,6 +254,12 @@ public final strictfp class Book {
                 // A throw the server refused never shows up.
                 pearlsPending = 0;
                 potionsPending = 0;
+            }
+        }
+        if (sinceBall < 1000) {
+            sinceBall++;
+            if (sinceBall > 60) {
+                ballsPending = 0;
             }
         }
         otherSinceHurt = Math.min(otherSinceHurt + 1, 1000);
@@ -279,6 +310,14 @@ public final strictfp class Book {
             t.air = e.air;
             for (int a = 0; a < 3; a++) {
                 t.serverSide[a] = t.pos[a] + e.behind[a];
+            }
+            if (e.kind == Inv.KIND_HOOK) {
+                // Of a hook only where the server last said it is counts.
+                for (int a = 0; a < 3; a++) {
+                    t.serverSide[a] = (double) e.serverPos[a] / 32.0;
+                    t.pos[a] = t.serverSide[a];
+                    t.motion[a] = 0.0;
+                }
             }
         }
     }

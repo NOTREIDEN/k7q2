@@ -6,7 +6,7 @@ use crate::aabb::{dist, Aabb, V3, EYE_HEIGHT};
 use crate::living::Living;
 use crate::mth;
 use crate::net::{
-    shift_click, Bar, Item, Kind, Rows, ThrownEv, BLOCK_TICKS, C2S, S2C, SLOT_SWORD, STEAK_FOOD, STEAK_SATURATION, USE_TICKS,
+    shift_click, Bar, Item, Kind, Rows, ThrownEv, Tool, BLOCK_TICKS, C2S, S2C, SLOT_SWORD, STEAK_FOOD, STEAK_SATURATION, USE_TICKS,
 };
 use crate::world::{RayHit, World};
 
@@ -202,6 +202,11 @@ impl ClientThrown {
     /// Where the server had it when it moved as this copy does now.
     #[inline]
     pub fn server_side(&self) -> V3 {
+        if self.kind == Kind::Hook {
+            // Where the server last said it is.
+            let sp = self.server_pos;
+            return [sp[0] as f64 / 32.0, sp[1] as f64 / 32.0, sp[2] as f64 / 32.0];
+        }
         [self.pos[0] + self.behind[0], self.pos[1] + self.behind[1], self.pos[2] + self.behind[2]]
     }
 
@@ -209,6 +214,12 @@ impl ClientThrown {
     /// false for one that has fallen out of the world: the client then
     /// drops it on its own.
     fn tick(&mut self) -> bool {
+        if self.kind == Kind::Hook {
+            // A hook is only noted as there or not; where the server puts it is enough.
+            self.age += 1;
+            self.air += 1;
+            return true;
+        }
         let alive = !(self.pos[1] < -64.0);
         for a in 0..3 {
             self.pos[a] += self.motion[a];
@@ -421,6 +432,8 @@ pub struct LocalPlayer {
     pub drinks: u16,
     pub bottles: u16,
     pub steak: u8,
+    /// A rod, snowballs or eggs, if the kit has one (see `Tool`).
+    pub tool: Tool,
     /// The three rows of the inventory, whether its screen is open, and the
     /// number of the last click in it (`Container.transactionID`).
     pub rows: Rows,
@@ -454,8 +467,16 @@ pub struct LocalPlayer {
     pub throw_from: V3,
     pub throws_pending: u8,
     pub potions_pending: u8,
+    /// The same for snowballs and eggs: how many have not shown up, where
+    /// the eyes were at the last one, and the ticks since it.
+    pub balls_pending: u8,
+    pub ball_eye: V3,
+    pub ticks_since_ball: i32,
     /// Potions of the other player this client has seen appear.
     pub potions_seen: u8,
+    /// Hooks of either player this client has seen appear (it counts
+    /// nothing else; it stands where a hook's pending count would).
+    pub hooks_seen: u8,
 }
 
 impl LocalPlayer {
@@ -490,6 +511,7 @@ impl LocalPlayer {
             drinks: 0,
             bottles: 0,
             steak: 0,
+            tool: Tool::default(),
             rows: Rows::default(),
             inv_open: false,
             action: 0,
@@ -510,7 +532,11 @@ impl LocalPlayer {
             throw_from: pos,
             throws_pending: 0,
             potions_pending: 0,
+            balls_pending: 0,
+            ball_eye: [0.0; 3],
+            ticks_since_ball: 1000,
             potions_seen: 0,
+            hooks_seen: 0,
         }
     }
 
@@ -543,7 +569,7 @@ impl LocalPlayer {
     /// The hotbar but for the sword.
     #[inline]
     pub fn bar(&self) -> Bar {
-        Bar { pearls: self.pearls, potions: self.potions, drinks: self.drinks, bottles: self.bottles, steak: self.steak }
+        Bar { pearls: self.pearls, potions: self.potions, drinks: self.drinks, bottles: self.bottles, steak: self.steak, tool: self.tool }
     }
 
     #[inline]
@@ -553,6 +579,7 @@ impl LocalPlayer {
         self.drinks = b.drinks;
         self.bottles = b.bottles;
         self.steak = b.steak;
+        self.tool = b.tool;
     }
 
     /// What is in hand.
@@ -621,6 +648,10 @@ pub struct TickOut {
     pub threw: bool,
     /// A potion was thrown.
     pub threw_potion: bool,
+    /// A snowball or an egg was thrown, and the rod was used (cast or
+    /// brought back, which this client cannot tell apart).
+    pub threw_ball: bool,
+    pub used_rod: bool,
     /// Left clicks that were swallowed because the client was blocking.
     pub swallowed: u8,
     /// A shift click in the inventory moved a stack: what it was.
@@ -812,6 +843,45 @@ fn right_click(lp: &mut LocalPlayer, pick: &Pick, out: &mut Vec<C2S>) -> Option<
             lp.potions &= !(1 << lp.held);
             Some(Kind::Potion)
         }
+        // ItemSnowball / ItemEgg.onItemRightClick: one off the stack; the
+        // snowball or egg itself comes from the server.
+        Item::Snowball | Item::Egg => {
+            let kind = if item == Item::Egg { Kind::Egg } else { Kind::Snowball };
+            lp.tool.n = lp.tool.n.saturating_sub(1);
+            if lp.tool.n == 0 {
+                lp.tool = Tool::default();
+            }
+            Some(kind)
+        }
+        // ItemFishingRod.onItemRightClick on a client: casting spawns
+        // nothing here and bringing the hook back wears nothing here
+        // (`handleHookRetraction` returns 0 on a client); both swing the
+        // arm, which the caller sends after this packet.
+        Item::Rod => Some(Kind::Hook),
+    }
+}
+
+/// What a right click that used `k` leaves to note: a pearl, a potion or
+/// a snowball or egg thrown, or the arm swung with a rod
+/// (`EntityPlayerSP.swingItem`: the swing here, then C0A).
+fn used_kind(lp: &mut LocalPlayer, t: &mut TickOut, k: Option<Kind>, out: &mut Vec<C2S>) {
+    t.threw |= k == Some(Kind::Pearl);
+    t.threw_potion |= k == Some(Kind::Potion);
+    t.used = true;
+    match k {
+        Some(Kind::Snowball | Kind::Egg) => {
+            t.threw_ball = true;
+            lp.balls_pending = lp.balls_pending.saturating_add(1);
+            lp.ball_eye = lp.eye();
+            lp.ticks_since_ball = 0;
+        }
+        Some(Kind::Hook) => {
+            t.used_rod = true;
+            out.push(C2S::Swing);
+            t.swung = true;
+            lp.ticks_since_swing = 0;
+        }
+        _ => {}
     }
 }
 
@@ -1056,15 +1126,18 @@ impl Client {
             S2C::Thrown { id, ev } => match ev {
                 // handleSpawnObject: a pearl or a potion at rest; its speed
                 // comes in a packet of its own.
-                ThrownEv::Spawn { kind, p, .. } => {
+                ThrownEv::Spawn { kind, p, own, .. } => {
                     let pos = [p[0] as f64 / 32.0, p[1] as f64 / 32.0, p[2] as f64 / 32.0];
                     let lp = &mut self.lp;
-                    let pending = match kind {
-                        Kind::Pearl => &mut lp.throws_pending,
-                        Kind::Potion => &mut lp.potions_pending,
+                    let (pending, eye) = match kind {
+                        Kind::Pearl => (&mut lp.throws_pending, lp.throw_eye),
+                        Kind::Potion => (&mut lp.potions_pending, lp.throw_eye),
+                        Kind::Snowball | Kind::Egg => (&mut lp.balls_pending, lp.ball_eye),
+                        // The packet of a hook says whose it is.
+                        Kind::Hook => (&mut lp.hooks_seen, lp.throw_eye),
                     };
-                    let mine = *pending > 0 && crate::aabb::dist_sq(pos, lp.throw_eye) < 1.0;
-                    if mine {
+                    let mine = if kind == Kind::Hook { own } else { *pending > 0 && crate::aabb::dist_sq(pos, eye) < 1.0 };
+                    if mine && kind != Kind::Hook {
                         *pending -= 1;
                     } else if kind == Kind::Potion {
                         lp.potions_seen = lp.potions_seen.saturating_add(1);
@@ -1245,17 +1318,13 @@ impl Client {
             }
             if press && !hitting_block {
                 let k = right_click(lp, &t.pick, out);
-                t.threw |= k == Some(Kind::Pearl);
-                t.threw_potion |= k == Some(Kind::Potion);
-                t.used = true;
+                used_kind(lp, &mut t, k, out);
             }
         }
         // The button held down clicks again once the delay has run out.
         if inp.use_item && lp.right_click_delay == 0 && !lp.using_item && !hitting_block {
             let k = right_click(lp, &t.pick, out);
-            t.threw |= k == Some(Kind::Pearl);
-            t.threw_potion |= k == Some(Kind::Potion);
-            t.used = true;
+            used_kind(lp, &mut t, k, out);
         }
         if t.threw || t.threw_potion {
             lp.ticks_since_throw = 0;
@@ -1403,6 +1472,12 @@ impl Client {
                 // A throw the server refused never shows up.
                 lp.throws_pending = 0;
                 lp.potions_pending = 0;
+            }
+        }
+        if lp.ticks_since_ball < 1000 {
+            lp.ticks_since_ball += 1;
+            if lp.ticks_since_ball > 60 {
+                lp.balls_pending = 0;
             }
         }
 

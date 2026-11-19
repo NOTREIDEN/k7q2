@@ -29,7 +29,7 @@ fn traces() -> Vec<String> {
 #[test]
 fn the_real_game_is_reproduced_bit_for_bit() {
     let files = traces();
-    assert!(files.len() >= 67, "expected the recordings in tests/traces, found {}", files.len());
+    assert!(files.len() >= 79, "expected the recordings in tests/traces, found {}", files.len());
     let (mut views, mut flying_views, mut shown, mut played, mut twice) = (0, 0, 0, 0, 0);
     let (mut ticks, mut hits, mut sprint_hits, mut crits, mut attacks, mut teleports, mut kb) = (0, 0, 0, 0, 0, 0, 0);
     let (mut blocked, mut right_clicks, mut lost, mut silent, mut swords) = (0, 0, 0, 0, 0);
@@ -155,7 +155,7 @@ fn a_view_read_differently_is_noticed() {
     let text = changed("view_pot5", "\nCV 300 v=", "\nCV 300 v=");
     let line = text.lines().find(|l| l.starts_with("CV 300 ")).unwrap();
     let mut n: Vec<String> = line["CV 300 v=".len()..].split(',').map(|s| s.to_string()).collect();
-    let k = (0..n.len()).find(|&k| pvpsim::agent::view_name(k) == "other health").unwrap();
+    let k = (0..n.len()).find(|&k| pvpsim::agent::view_name(k, n.len()) == "other health").unwrap();
     n[k] = if n[k] == "19" { "18".into() } else { "19".into() };
     let r = replay(&text.replacen(line, &format!("CV 300 v={}", n.join(",")), 1), &Options::default()).unwrap();
     assert!(!r.identical() && r.client.get("views that differ") == 1, "{}", r.describe());

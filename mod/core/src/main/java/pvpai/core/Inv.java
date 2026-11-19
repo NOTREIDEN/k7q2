@@ -3,9 +3,13 @@ package pvpai.core;
 /** The hotbar and the inventory of a duel, and a shift click between them. */
 public final class Inv {
     public static final int SWORD = 0, PEARL = 1, POTION = 2, DRINK = 3, BOTTLE = 4, FOOD = 5, EMPTY = 6;
+    /** The tool of a kit that has one, in a slot of its own: a fishing rod, snowballs or eggs. */
+    public static final int ROD = 7, SNOWBALL = 8, EGG = 9;
     /** Something a duel has no use for: its slot is taken, and that is all an agent goes by. */
-    public static final int OTHER = 7;
-    public static final int KIND_PEARL = 0, KIND_POTION = 1;
+    public static final int OTHER = 10;
+    public static final int KIND_PEARL = 0, KIND_POTION = 1, KIND_SNOWBALL = 2, KIND_EGG = 3, KIND_HOOK = 4;
+    /** The wear a fishing rod takes before it breaks. */
+    public static final int ROD_MAX_WEAR = 64;
     /** Hotbar slot of the sword, of the pearls and of the steak. */
     public static final int SLOT_SWORD = 0, SLOT_PEARL = 1, SLOT_FOOD = 8;
     /** The ticks a drink or a meal takes. */
@@ -21,6 +25,8 @@ public final class Inv {
         public int pearls, potions, drinks, bottles, steak;
         /** One bit per slot taken by something else, which stays where it is. */
         public int others;
+        /** The tool ({@link #EMPTY} for none) and its slot. */
+        public int tool = EMPTY, toolSlot;
 
         public Bar(int pearls, int potions, int drinks, int bottles, int steak) {
             this.pearls = pearls;
@@ -33,6 +39,8 @@ public final class Inv {
         public static Bar of(View v) {
             Bar b = new Bar(v.pearls, v.potions, v.drinks, v.bottles, v.steak);
             b.others = v.others;
+            b.tool = v.tool;
+            b.toolSlot = v.toolSlot;
             return b;
         }
 
@@ -40,6 +48,9 @@ public final class Inv {
         public int item(int slot) {
             if (slot > 8 || slot == SLOT_SWORD) {
                 return EMPTY;
+            }
+            if (tool != EMPTY && slot == toolSlot) {
+                return tool;
             }
             if ((potions >> slot & 1) != 0) {
                 return POTION;
@@ -75,6 +86,9 @@ public final class Inv {
             }
             if (slot == SLOT_FOOD) {
                 steak = 0;
+            }
+            if (slot == toolSlot) {
+                tool = EMPTY;
             }
             if (count == 0) {
                 return;

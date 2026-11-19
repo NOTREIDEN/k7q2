@@ -7,7 +7,7 @@ use pvpsim::env::{Env, Mode, Params, ACT_DIMS, ACT_HEADS, OBS_DIM, PITCH_BINS, P
 use pvpsim::net::SLOT_SWORD;
 
 /// Stand still, mouse at rest, no button down.
-const IDLE: [i32; ACT_HEADS] = [0, 0, 0, 0, 0, 13, 10, 0, 0, 0, 0, 0];
+const IDLE: [i32; ACT_HEADS] = [0, 0, 0, 0, 0, 13, 10, 0, 0, 0, 0, 0, 0];
 /// The pitch choice that looks down the fastest of the first set.
 const DOWN: i32 = 26;
 /// A quarter turn up and down in one tick.
@@ -76,7 +76,7 @@ fn obs(e: &Env) -> [f32; OBS_DIM] {
 
 #[test]
 fn the_controls_are_what_the_trainer_is_told() {
-    assert_eq!(ACT_DIMS, [3, 3, 2, 2, 2, 31, 29, 2, 2, 13, 6, 36]);
+    assert_eq!(ACT_DIMS, [3, 3, 2, 2, 2, 31, 29, 2, 2, 13, 6, 36, 3]);
     assert_eq!(YAW_BINS[13], 0);
     assert_eq!(&YAW_BINS[..27], &[-377, -233, -144, -89, -55, -34, -21, -13, -8, -5, -3, -2, -1, 0, 1, 2, 3, 5, 8, 13, 21, 34, 55, 89, 144, 233, 377]);
     assert_eq!(PITCH_BINS[10], 0);

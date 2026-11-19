@@ -128,7 +128,7 @@ fn cobweb_duels_show_the_webs_and_some_start_caught_in_one() {
     p.web_prob = 1.0;
     p.web_trap_prob = 1.0;
     let mut e = Env::new(Mode::Bot, p, 9);
-    let a: [i32; ACT_HEADS] = [0, 0, 0, 0, 0, 13, 10, 0, 0, 0, 0, 0];
+    let a: [i32; ACT_HEADS] = [0, 0, 0, 0, 0, 13, 10, 0, 0, 0, 0, 0, 0];
     e.step(&a);
     let mut o = [0.0f32; OBS_DIM];
     e.write_obs(0, &mut o);

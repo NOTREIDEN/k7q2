@@ -189,8 +189,10 @@ public final class Bot implements Wire.Tap {
             }
         } else if (p instanceof S0EPacketSpawnObject) {
             S0EPacketSpawnObject s = (S0EPacketSpawnObject) p;
-            if (s.getType() == 65 || s.getType() == 73) {
-                book.spawned(s.getEntityID(), s.getType() == 65 ? Inv.KIND_PEARL : Inv.KIND_POTION, s.getX(), s.getY(), s.getZ());
+            int kind = Reader.kindOfSpawn(s.getType());
+            if (kind >= 0) {
+                // A hook's packet carries the number of its angler.
+                book.spawned(s.getEntityID(), kind, kind == Inv.KIND_HOOK && s.func_149009_m() == me.getEntityId(), s.getX(), s.getY(), s.getZ());
             }
         } else if (p instanceof S13PacketDestroyEntities) {
             for (int id : ((S13PacketDestroyEntities) p).getEntityIDs()) {
@@ -309,8 +311,12 @@ public final class Bot implements Wire.Tap {
         EntityPlayerSP me = mc.thePlayer;
         // A tick that belongs to the inventory screen reads no key.
         boolean screen = pressed.inv != 0 || view.invOpen;
-        boolean swung = !screen && pressed.attack && !view.usingItem;
-        boolean attacked = swung && me.getLastAttackerTime() == ticksBefore;
+        boolean attacked = !screen && pressed.attack && !view.usingItem && me.getLastAttackerTime() == ticksBefore;
+        // A right click this tick leaves the click delay at 4; with a rod
+        // in hand it cast or reeled in, and ItemFishingRod swings the arm
+        // either way.
+        boolean usedRod = !screen && Reader.clickDelay(mc) == 4 && Reader.item(me.inventory.getCurrentItem()) == Inv.ROD;
+        boolean swung = !screen && (pressed.attack && !view.usingItem || usedRod);
         int pearls = 0, potions = 0;
         for (int r = 0; r < 9; r++) {
             int kind = Reader.item(me.inventory.mainInventory[r]);
@@ -323,7 +329,14 @@ public final class Bot implements Wire.Tap {
         }
         boolean threwPearl = !screen && pearls < view.pearls;
         boolean threwPotion = !screen && (view.potions & ~potions) != 0;
-        book.ticked(swung, attacked, threwPearl, threwPotion, eyeBefore, saidBefore, saidYawBefore, saidPitchBefore);
+        // A snowball or an egg thrown: the client takes it off its stack at the click.
+        boolean threwBall = false;
+        if (!screen && (view.tool == Inv.SNOWBALL || view.tool == Inv.EGG)) {
+            net.minecraft.item.ItemStack t = me.inventory.mainInventory[layout.real[view.toolSlot]];
+            int left = Reader.item(t) == view.tool ? t.stackSize : 0;
+            threwBall = left < view.toolCount;
+        }
+        book.ticked(swung, attacked, threwPearl, threwPotion, threwBall, eyeBefore, saidBefore, saidYawBefore, saidPitchBefore);
         if (agent != null) {
             boolean consuming = me.isUsingItem() && layout.agent[me.inventory.currentItem] != Inv.SLOT_SWORD;
             int holds = Reader.shown(other.getHeldItem());

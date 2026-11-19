@@ -4,7 +4,7 @@
 use pvpsim::env::{Env, Mode, Params, ACT_HEADS, OBS_DIM, PRIV_DIM, SHAKE_DEG};
 
 /// Stand still, mouse at rest, no button down.
-const IDLE: [i32; ACT_HEADS] = [0, 0, 0, 0, 0, 13, 10, 0, 0, 0, 0, 0];
+const IDLE: [i32; ACT_HEADS] = [0, 0, 0, 0, 0, 13, 10, 0, 0, 0, 0, 0, 0];
 /// Five mouse counts to the left and to the right, three quarters of a degree.
 const LEFT: i32 = 9;
 const RIGHT: i32 = 17;

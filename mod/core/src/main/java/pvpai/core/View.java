@@ -12,7 +12,7 @@ public final class View {
     /** A pearl or a potion in flight, as this client has it. */
     public static final class Thrown {
         public long id;
-        /** {@link Inv#KIND_PEARL} or {@link Inv#KIND_POTION}. */
+        /** {@link Inv#KIND_PEARL}, {@link Inv#KIND_POTION}, a snowball, an egg or a hook ({@link Inv#KIND_HOOK}). */
         public int kind;
         /** Thrown by this client's own player. */
         public boolean mine;
@@ -52,6 +52,11 @@ public final class View {
     public int potionsSeen, potionsPending;
     public int food;
     public float saturation;
+    /**
+     * The tool of the kit, {@link Inv#EMPTY} for none: a fishing rod, snowballs
+     * or eggs, its slot, how many (1 for a rod) and its wear.
+     */
+    public int tool = Inv.EMPTY, toolSlot, toolCount, toolWear;
     /** Ticks of Speed left. */
     public int speedTicks;
     public float health;
@@ -93,8 +98,8 @@ public final class View {
         return new double[] {pos[0], pos[1] + Geo.EYE_HEIGHT, pos[2]};
     }
 
-    /** The numbers of {@link #list} before the pearls and potions in flight, and of each of those. */
-    public static final int HEAD = 101, PER_THROWN = 14;
+    /** The numbers of {@link #list} before the pearls and potions in flight, of each of those, and after them. */
+    public static final int HEAD = 101, PER_THROWN = 14, TAIL = 4;
 
     /**
      * The whole view as a row of numbers, in the order the simulator writes
@@ -102,7 +107,7 @@ public final class View {
      * are told only while one is in use.
      */
     public double[] list() {
-        double[] l = new double[HEAD + PER_THROWN * thrown.size()];
+        double[] l = new double[HEAD + PER_THROWN * thrown.size() + TAIL];
         int at = 0;
         at = put(l, at, pos);
         at = put(l, at, motion);
@@ -175,6 +180,10 @@ public final class View {
             l[at++] = t.air;
             at = put(l, at, t.serverSide);
         }
+        l[at++] = tool;
+        l[at++] = toolSlot;
+        l[at++] = toolCount;
+        l[at++] = toolWear;
         return l;
     }
 

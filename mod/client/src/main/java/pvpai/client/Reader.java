@@ -11,7 +11,10 @@ import net.minecraft.entity.Entity;
 import net.minecraft.entity.EntityLivingBase;
 import net.minecraft.entity.SharedMonsterAttributes;
 import net.minecraft.entity.item.EntityEnderPearl;
+import net.minecraft.entity.projectile.EntityEgg;
+import net.minecraft.entity.projectile.EntityFishHook;
 import net.minecraft.entity.projectile.EntityPotion;
+import net.minecraft.entity.projectile.EntitySnowball;
 import net.minecraft.init.Items;
 import net.minecraft.item.Item;
 import net.minecraft.item.ItemFood;
@@ -89,7 +92,21 @@ final class Reader {
         if (it instanceof ItemFood && it != Items.golden_apple) {
             return Inv.FOOD;
         }
-        return Inv.OTHER;
+        return tool(it, Inv.OTHER);
+    }
+
+    /** A fishing rod, snowballs or eggs as the tool of a kit, else {@code or}. */
+    private static int tool(Item it, int or) {
+        if (it == Items.fishing_rod) {
+            return Inv.ROD;
+        }
+        if (it == Items.snowball) {
+            return Inv.SNOWBALL;
+        }
+        if (it == Items.egg) {
+            return Inv.EGG;
+        }
+        return or;
     }
 
     /** What the other player is seen to hold: thrown, drunk or eaten, whatever it does. */
@@ -113,7 +130,7 @@ final class Reader {
         if (it instanceof ItemFood) {
             return Inv.FOOD;
         }
-        return Inv.EMPTY;
+        return tool(it, Inv.EMPTY);
     }
 
     /** {@code Minecraft.rightClickDelayTimer} as it stands. */
@@ -144,7 +161,43 @@ final class Reader {
     }
 
     static boolean thrown(Entity e) {
-        return e instanceof EntityEnderPearl || e instanceof EntityPotion;
+        return e instanceof EntityEnderPearl || e instanceof EntityPotion || e instanceof EntitySnowball || e instanceof EntityEgg
+            || e instanceof EntityFishHook;
+    }
+
+    /** The kind of a thrown thing, see {@link Inv#KIND_PEARL}. */
+    static int kind(Entity e) {
+        if (e instanceof EntityEnderPearl) {
+            return Inv.KIND_PEARL;
+        }
+        if (e instanceof EntitySnowball) {
+            return Inv.KIND_SNOWBALL;
+        }
+        if (e instanceof EntityEgg) {
+            return Inv.KIND_EGG;
+        }
+        if (e instanceof EntityFishHook) {
+            return Inv.KIND_HOOK;
+        }
+        return Inv.KIND_POTION;
+    }
+
+    /** The kind of a thrown thing by the type its spawn packet gives, or -1 for none of them. */
+    static int kindOfSpawn(int type) {
+        switch (type) {
+            case 65:
+                return Inv.KIND_PEARL;
+            case 73:
+                return Inv.KIND_POTION;
+            case 61:
+                return Inv.KIND_SNOWBALL;
+            case 62:
+                return Inv.KIND_EGG;
+            case 90:
+                return Inv.KIND_HOOK;
+            default:
+                return -1;
+        }
     }
 
     /** The other player nearest to this one, or null. */
@@ -205,6 +258,12 @@ final class Reader {
                 v.pearls = s.stackSize;
             } else if (kind == Inv.FOOD && i == Inv.SLOT_FOOD) {
                 v.steak = s.stackSize;
+            } else if ((kind == Inv.ROD || kind == Inv.SNOWBALL || kind == Inv.EGG) && v.tool == Inv.EMPTY && i != Inv.SLOT_SWORD) {
+                // The first of them is the tool; a rod counts as one, and wears.
+                v.tool = kind;
+                v.toolSlot = i;
+                v.toolCount = kind == Inv.ROD ? 1 : s.stackSize;
+                v.toolWear = kind == Inv.ROD ? s.getItemDamage() : 0;
             } else if (kind != Inv.EMPTY && i != Inv.SLOT_SWORD) {
                 // More pearls, more food, another sword or something else.
                 v.others |= 1 << i;
@@ -262,11 +321,18 @@ final class Reader {
             Entity t = (Entity) e;
             View.Thrown x = new View.Thrown();
             x.id = t.getEntityId();
-            x.kind = t instanceof EntityEnderPearl ? Inv.KIND_PEARL : Inv.KIND_POTION;
-            System.arraycopy(pos(t), 0, x.pos, 0, 3);
-            x.motion[0] = t.motionX;
-            x.motion[1] = t.motionY;
-            x.motion[2] = t.motionZ;
+            x.kind = kind(t);
+            if (x.kind == Inv.KIND_HOOK) {
+                // Where the server last said it is: the client's copy moves in ways of its own.
+                x.pos[0] = (double) t.serverPosX / 32.0;
+                x.pos[1] = (double) t.serverPosY / 32.0;
+                x.pos[2] = (double) t.serverPosZ / 32.0;
+            } else {
+                System.arraycopy(pos(t), 0, x.pos, 0, 3);
+                x.motion[0] = t.motionX;
+                x.motion[1] = t.motionY;
+                x.motion[2] = t.motionZ;
+            }
             v.thrown.add(x);
         }
         return v;

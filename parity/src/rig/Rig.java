@@ -127,6 +127,12 @@ public final class Rig {
     static final int SPEED_II = 8226;
     /** Steaks in the last hotbar slot. */
     static int steak = 0;
+    /** A tool for both players, as "tool rod|snowball|egg SLOT [COUNT]": 0 none, 1 a fishing
+        rod, 2 snowballs, 3 eggs, in hotbar slot toolSlot (0 to 8). */
+    static int tool = 0, toolSlot = 7, toolCount = 16;
+    /** "zero 1": hits for no damage count, as on a CraftBukkit server (see patch.py). */
+    public static boolean noChickens = true;
+    public static boolean zeroHits = false;
     /** What the three rows of the inventory hold: slot of the window (9 to 35), kind (1 a splash
         potion, 2 a potion to drink, 3 empty bottles) and how many. */
     static final List<int[]> rows = new ArrayList<int[]>();
@@ -221,6 +227,12 @@ public final class Rig {
                 drinks = Integer.parseInt(p[1]);
             } else if (p[0].equals("steak")) {
                 steak = Integer.parseInt(p[1]);
+            } else if (p[0].equals("tool")) {
+                tool = java.util.Arrays.asList("none", "rod", "snowball", "egg").indexOf(p[1]);
+                toolSlot = Integer.parseInt(p[2]);
+                if (p.length > 3) toolCount = Integer.parseInt(p[3]);
+            } else if (p[0].equals("zero")) {
+                zeroHits = !p[1].equals("0");
             } else if (p[0].equals("row")) {
                 String kinds = "PDB";
                 rows.add(new int[] {Integer.parseInt(p[1]), 1 + kinds.indexOf(p[2]), p.length > 3 ? Integer.parseInt(p[3]) : 1});
@@ -263,7 +275,8 @@ public final class Rig {
             + " fake=" + (fakeStart != null ? 1 : 0) + " blocks=" + blocks.size() + " fmt=5 wear=" + (unbreakable ? 0 : 1) + " pearls=" + pearls
             + " res=" + (health ? 0 : 1) + " armor=" + (armor ? 20 : 0) + " prot=" + (armor ? prot : 0) + " ff=" + (armor ? feather : 0)
             + " sharp=" + sharp + " eseed=" + enchSeed + " potions=" + potions
-            + " drinks=" + drinks + " steak=" + steak + " spt=" + speedTicks + " food=" + startFood + " sat=" + hf(startSat));
+            + " drinks=" + drinks + " steak=" + steak + " spt=" + speedTicks + " food=" + startFood + " sat=" + hf(startSat)
+            + " tool=" + tool + " tslot=" + toolSlot + " zero=" + (zeroHits ? 1 : 0));
         for (int[] b : blocks) log("BLOCK " + b[0] + " " + b[1] + " " + b[2]);
         for (int[] b : webs) log("WEB " + b[0] + " " + b[1] + " " + b[2]);
     }
@@ -651,6 +664,28 @@ public final class Rig {
     /** The hotbar slots that hold a potion to drink and those that hold an empty bottle, the
         steaks in the last slot, the ticks of use left, the ticks of Speed left (-1: none) and
         whether particles of an effect show. */
+    /** The tool's slot, when the scene has one: what it holds (0 nothing, 1 a rod, 2 snowballs,
+        3 eggs, 9 something else), how many and how worn, and the id of the player's hook (-1 none). */
+    static String toolLine(EntityPlayer p) {
+        if (tool == 0) return "";
+        ItemStack s = p.inventory.mainInventory[toolSlot];
+        int k = s == null || s.stackSize <= 0 ? 0 : s.getItem() == Items.fishing_rod ? 1 : s.getItem() == Items.snowball ? 2
+            : s.getItem() == Items.egg ? 3 : 9;
+        return " ts=" + toolSlot + " tl=" + k + " tn=" + (k == 0 ? 0 : s.stackSize) + " tw=" + (k == 0 ? 0 : s.getItemDamage())
+            + " fish=" + (p.fishEntity == null ? -1 : p.fishEntity.getEntityId());
+    }
+
+    /** The hook's draws that slow it where it lies, as they are made (on the server only). */
+    public static float hookFloat(net.minecraft.entity.projectile.EntityFishHook h, float v) {
+        if (!h.worldObj.isRemote && serverRecording && !finished) log("HF " + stick + " v=" + hf(v));
+        return v;
+    }
+
+    public static double kbRandom(net.minecraft.entity.Entity e, double v) {
+        if (!e.worldObj.isRemote && serverRecording && !finished) log("HR " + stick + " v=" + hd(v));
+        return v;
+    }
+
     static String more(EntityPlayer p) {
         int dr = 0, bt = 0;
         for (int i = 0; i < 9; i++) {
@@ -663,14 +698,15 @@ public final class Rig {
         PotionEffect e = p.getActivePotionEffect(Potion.moveSpeed);
         return " dr=" + dr + " bt=" + bt + " fd=" + (f != null && f.getItem() == Items.cooked_beef ? f.stackSize : 0)
             + " iuc=" + p.getItemInUseCount() + " spt=" + (e == null ? -1 : e.getDuration()) + " spa=" + (e == null ? -1 : e.getAmplifier())
-            + " fx=" + p.getDataWatcher().getWatchableObjectInt(7) + " rows=" + rows(p);
+            + " fx=" + p.getDataWatcher().getWatchableObjectInt(7) + " rows=" + rows(p) + toolLine(p);
     }
 
     /** The pearls and potions in flight as this client has them. */
     static String clientPearls(Minecraft mc) {
         StringBuilder sb = new StringBuilder("[");
         for (Object o : mc.theWorld.loadedEntityList) {
-            if (!(o instanceof EntityEnderPearl) && !(o instanceof net.minecraft.entity.projectile.EntityPotion)) continue;
+            if (!(o instanceof EntityEnderPearl) && !(o instanceof net.minecraft.entity.projectile.EntityPotion)
+                && !(o instanceof net.minecraft.entity.projectile.EntitySnowball) && !(o instanceof net.minecraft.entity.projectile.EntityEgg)) continue;
             Entity e = (Entity) o;
             sb.append(e.getEntityId()).append(':').append(hd(e.posX)).append(':').append(hd(e.posY)).append(':').append(hd(e.posZ))
                 .append(':').append(hd(e.motionX)).append(':').append(hd(e.motionY)).append(':').append(hd(e.motionZ))
@@ -909,6 +945,9 @@ public final class Rig {
         for (int i = 0; i < potions; i++) p.inventory.mainInventory[2 + i] = new ItemStack(Items.potionitem, 1, HEAL_II);
         for (int i = 0; i < drinks && 2 + potions + i < 9; i++) p.inventory.mainInventory[2 + potions + i] = new ItemStack(Items.potionitem, 1, SPEED_II);
         if (steak > 0) p.inventory.mainInventory[8] = new ItemStack(Items.cooked_beef, steak);
+        if (tool == 1) p.inventory.mainInventory[toolSlot] = new ItemStack(Items.fishing_rod);
+        if (tool == 2) p.inventory.mainInventory[toolSlot] = new ItemStack(Items.snowball, toolCount);
+        if (tool == 3) p.inventory.mainInventory[toolSlot] = new ItemStack(Items.egg, toolCount);
         for (int[] r : rows) {
             p.inventory.mainInventory[r[0]] = r[1] == 1 ? new ItemStack(Items.potionitem, 1, HEAL_II)
                 : r[1] == 2 ? new ItemStack(Items.potionitem, 1, SPEED_II) : new ItemStack(Items.glass_bottle, r[2]);
@@ -983,11 +1022,35 @@ public final class Rig {
     /** A pearl or a potion in flight on the server, with its entity tracker entry. */
     static String pearl(net.minecraft.entity.projectile.EntityThrowable e) {
         Entity th = e.getThrower();
-        String s = "id=" + e.getEntityId() + " th=" + (th == fake ? 1 : 0) + " kind=" + (e instanceof EntityEnderPearl ? 0 : 1)
+        int kind = e instanceof EntityEnderPearl ? 0 : e instanceof net.minecraft.entity.projectile.EntityPotion ? 1
+            : e instanceof net.minecraft.entity.projectile.EntitySnowball ? 2 : 3;
+        String s = "id=" + e.getEntityId() + " th=" + (th == fake ? 1 : 0) + " kind=" + kind
             + " x=" + hd(e.posX) + " y=" + hd(e.posY) + " z=" + hd(e.posZ)
             + " mx=" + hd(e.motionX) + " my=" + hd(e.motionY) + " mz=" + hd(e.motionZ)
             + " yaw=" + hf(e.rotationYaw) + " pitch=" + hf(e.rotationPitch)
             + " tia=" + get(e, net.minecraft.entity.projectile.EntityThrowable.class, "ticksInAir");
+        return s + trackerOf(e);
+    }
+
+    /** A rod's hook on the server: as a pearl, with whether it lies on a block and whom it holds
+        (-1 nobody, 0 the real player, 1 the scripted one). */
+    static String hook(net.minecraft.entity.projectile.EntityFishHook e) {
+        Class<?> c = net.minecraft.entity.projectile.EntityFishHook.class;
+        Entity caught = e.caughtEntity;
+        String s = "id=" + e.getEntityId() + " th=" + (e.angler == fake ? 1 : 0) + " kind=4"
+            + " x=" + hd(e.posX) + " y=" + hd(e.posY) + " z=" + hd(e.posZ)
+            + " mx=" + hd(e.motionX) + " my=" + hd(e.motionY) + " mz=" + hd(e.motionZ)
+            + " yaw=" + hf(e.rotationYaw) + " pitch=" + hf(e.rotationPitch)
+            + " tia=" + get(e, c, "ticksInAir") + " ing=" + (((Boolean) get(e, c, "inGround")) ? 1 : 0)
+            + " cau=" + (caught == null ? -1 : caught == fake ? 1 : 0)
+            + " bx=" + hd(e.getEntityBoundingBox().minX) + " by=" + hd(e.getEntityBoundingBox().minY) + " bz=" + hd(e.getEntityBoundingBox().minZ)
+            + " og=" + (e.onGround ? 1 : 0) + " ch=" + (e.isCollidedHorizontally ? 1 : 0);
+        return s + trackerOf(e);
+    }
+
+    /** The entity tracker's entry of a thrown thing. */
+    static String trackerOf(Entity e) {
+        String s = "";
         WorldServer w = (WorldServer) e.worldObj;
         Object set = get(w.getEntityTracker(), net.minecraft.entity.EntityTracker.class, "trackedEntities");
         for (Object o : (java.util.Set<?>) set) {
@@ -1015,7 +1078,10 @@ public final class Rig {
             if (real == null || finished) return;
             WorldServer w = server.worldServerForDimension(0);
             for (Object o : new ArrayList<Object>(w.loadedEntityList)) {
-                if (!(o instanceof EntityPlayer) && !(o instanceof EntityEnderPearl) && !(o instanceof net.minecraft.entity.projectile.EntityPotion)) ((Entity) o).setDead();
+                // Anything else than the players and what they throw goes (an egg's chickens too).
+                if (!(o instanceof EntityPlayer) && !(o instanceof EntityEnderPearl) && !(o instanceof net.minecraft.entity.projectile.EntityPotion)
+                    && !(o instanceof net.minecraft.entity.projectile.EntitySnowball) && !(o instanceof net.minecraft.entity.projectile.EntityEgg)
+                    && !(o instanceof net.minecraft.entity.projectile.EntityFishHook)) ((Entity) o).setDead();
             }
             if (!recording) {
                 // A client reports in every tick; do the same for the scripted player.
@@ -1183,7 +1249,11 @@ public final class Rig {
             log("ST " + stick + " " + sp(real));
             if (fake != null) log("ST " + stick + " " + sp(fake));
             for (Object o : real.worldObj.loadedEntityList) {
-                if (o instanceof EntityEnderPearl || o instanceof net.minecraft.entity.projectile.EntityPotion) log("SE " + stick + " " + pearl((net.minecraft.entity.projectile.EntityThrowable) o));
+                if (o instanceof EntityEnderPearl || o instanceof net.minecraft.entity.projectile.EntityPotion
+                    || o instanceof net.minecraft.entity.projectile.EntitySnowball || o instanceof net.minecraft.entity.projectile.EntityEgg) {
+                    log("SE " + stick + " " + pearl((net.minecraft.entity.projectile.EntityThrowable) o));
+                }
+                if (o instanceof net.minecraft.entity.projectile.EntityFishHook) log("SE " + stick + " " + hook((net.minecraft.entity.projectile.EntityFishHook) o));
             }
         } catch (Throwable t) {
             t.printStackTrace();

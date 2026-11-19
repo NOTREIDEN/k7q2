@@ -6,7 +6,7 @@ use pvpsim::net::Kind;
 use pvpsim::server::throw_heading;
 
 /// Stand still, mouse at rest, no button down.
-const IDLE: [i32; ACT_HEADS] = [0, 0, 0, 0, 0, 13, 10, 0, 0, 0, 0, 0];
+const IDLE: [i32; ACT_HEADS] = [0, 0, 0, 0, 0, 13, 10, 0, 0, 0, 0, 0, 0];
 /// The pitch choice that looks down the fastest of the first set.
 const DOWN: i32 = 26;
 

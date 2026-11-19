@@ -49,7 +49,13 @@ impl Body {
     /// goes a quarter as far sideways and a twentieth as far up or down,
     /// and the motion is gone; one that ends in a cobweb leaves the body in
     /// it (`doBlockCollisions`, `setInWeb`).
-    pub fn move_entity(&mut self, world: &World, mut x: f64, mut y: f64, mut z: f64, track_fall: bool) {
+    pub fn move_entity(&mut self, world: &World, x: f64, y: f64, z: f64, track_fall: bool) {
+        self.move_entity_step(world, x, y, z, track_fall, STEP_HEIGHT);
+    }
+
+    /// The same move for an entity of `stepHeight` `step`: 0 for one that
+    /// never steps up, as a rod's hook. The box keeps its size, whatever it is.
+    pub fn move_entity_step(&mut self, world: &World, mut x: f64, mut y: f64, mut z: f64, track_fall: bool, step: f64) {
         if self.in_web {
             self.in_web = false;
             x *= 0.25;
@@ -77,11 +83,11 @@ impl Body {
         }
         self.bb = self.bb.offset(0.0, 0.0, z);
 
-        if flag1 && (d3 != x || d5 != z) {
+        if step > 0.0 && flag1 && (d3 != x || d5 != z) {
             let (d11, d7, d8) = (x, y, z);
             let bb3 = self.bb;
             self.bb = start;
-            y = STEP_HEIGHT;
+            y = step;
             list.clear();
             world.colliding_boxes(&self.bb.add_coord(d3, y, d5), &mut list);
             let mut bb4 = self.bb;

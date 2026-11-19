@@ -10,7 +10,7 @@
 use pvpsim::agent::{throw_pitch, ACT_HEADS, BAR_TURN, OBS_DIM, THROW_PITCHES};
 use pvpsim::env::{Env, Mode, Params, PRIV_DIM};
 
-const IDLE: [i32; ACT_HEADS] = [0, 0, 0, 0, 0, 13, 10, 0, 0, 0, 0, 0];
+const IDLE: [i32; ACT_HEADS] = [0, 0, 0, 0, 0, 13, 10, 0, 0, 0, 0, 0, 0];
 
 fn params() -> Params {
     let mut p = Params::default();

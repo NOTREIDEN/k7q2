@@ -400,8 +400,64 @@ def stock(rng, lines, opts):
             lines.append("row %d B %d" % (slot, 64 if i == n_p + n_d else rng.choice([1, 3, 63])))
     return slots[:n_p + n_d]
 
+def with_tool(rng, seq, kind, slot, gap=(10, 40), up=False):
+    """Add uses of the tool in hotbar slot `slot` (0-based) to the inputs: its number key with a
+    right click on the same tick, then, for a rod, the rod kept in hand from a tick to most of a
+    second (the hook flies, catches or falls) and often a second click that brings the hook
+    back, sometimes a third that casts again, before the number key of the sword; snowballs or
+    eggs are thrown one after the other, some with the button held so that the game repeats
+    the click, and the sword comes back at once or a little later. Clicks with the left button
+    go on all along, so that some of them are punches with the tool."""
+    n = len(seq)
+    out = [list(s) + [0] * (9 - len(s)) for s in seq]
+    key = slot + 1
+    t = rng.randint(14, 40)
+    while t < n - 40:
+        out[t][8] = key
+        out[t][7] = 2 if t > 0 and out[t - 1][7] else 1
+        if kind == "rod" and up and t + 80 < n:
+            # Cast straight up, stand still and wait for the hook to come down on its own angler,
+            # then look back down as far.
+            out[t - 1][6] += 700
+            for j in range(t + 1, t + 74):
+                out[j][7] = 0
+                out[j][0] = out[j][1] = out[j][2] = out[j][3] = out[j][4] = 0
+                out[j][5] = out[j][6] = 0
+            out[t + 74][6] -= 700
+            end = t + 75
+        elif kind == "rod":
+            k = t + 1
+            for _ in range(rng.choice([0, 1, 1, 2])):
+                k += rng.randint(1, 16)
+                if k >= n - 2:
+                    break
+                # Let go in between, then press again.
+                for j in range(t + 1, k):
+                    out[j][7] = 0
+                out[k][7] = 1
+            end = k + rng.choice([0, 1, 2, 4, 9])
+        else:
+            end = t
+            for _ in range(rng.choice([0, 0, 1, 2])):
+                end += rng.choice([1, 2, 4])
+                if end < n - 2:
+                    out[end][7] = 2 if out[end - 1][7] else 1
+            if rng.random() < 0.3:
+                hold = rng.randint(4, 12)
+                for j in range(end, min(n - 2, end + hold)):
+                    out[j][7] = 1
+                end += hold
+            end += rng.choice([0, 0, 1, 3])
+        if end < n:
+            out[end][8] = 1
+            if out[end][7] and rng.random() < 0.7:
+                out[end][7] = 0
+        t = end + rng.randint(*gap)
+    return [tuple(o) for o in out]
+
+
 def fight_fake(rng, n, lines, hops=True, attacks=True, blocks=False, pearls=0.0, potions=0, potion_rate=0.0,
-               drinks=0, steak=False, drink_rate=0.0):
+               drinks=0, steak=False, drink_rate=0.0, tool=None, tool_slot=7, tool_rate=0.0):
     """What the scripted player does on each server tick."""
     arc, air = jump_arc(), []
     full = list(range(2, 2 + potions))
@@ -452,6 +508,24 @@ def fight_fake(rng, n, lines, hops=True, attacks=True, blocks=False, pearls=0.0,
                 if rng.random() < 0.2:
                     later.setdefault(k + 1, []).append("USE")
                 later.setdefault(k + rng.choice([0, 1, 1, 2, 5]), []).append("SLOT 0")
+            if tool and not later and rng.random() < tool_rate:
+                # The tool in hand and used: a rod as a client uses it (the click, then the
+                # swing it sends after), held for a while and maybe brought back; snowballs or
+                # eggs thrown, one or a few.
+                lines.append("F %d SLOT %d" % (t, tool_slot))
+                k = t + rng.choice([0, 0, 1, 3])
+                later.setdefault(k, []).append("USE")
+                if tool == "rod":
+                    later.setdefault(k, []).append("SWING")
+                    back = k + rng.randint(1, 18)
+                    if rng.random() < 0.6:
+                        later.setdefault(back, []).append("USE")
+                        later.setdefault(back, []).append("SWING")
+                    later.setdefault(back + rng.choice([0, 1, 3]), []).append("SLOT 0")
+                else:
+                    for j in range(rng.choice([0, 0, 1, 2])):
+                        later.setdefault(k + 4 * (j + 1), []).append("USE")
+                    later.setdefault(k + rng.choice([0, 1, 2, 9]), []).append("SLOT 0")
             if potion_rate and not later and rng.random() < potion_rate and (full or empty):
                 # The same with a potion: mostly at its own feet, sometimes ahead or up.
                 if empty and (not full or rng.random() < 0.1):
@@ -598,6 +672,20 @@ def main():
         fight_fake(rng, len(seq) + 60, lines, blocks=blocking, pearls=float(opts.get("fake", "0.02")) if n_pearls else 0.0,
                    potions=n_pots, potion_rate=float(opts.get("fakepot", "0.02")),
                    drinks=n_drinks, steak=n_steak > 0, drink_rate=float(opts.get("fakedrink", "0.015")) if n_drinks or n_steak else 0.0)
+    elif name == "tools":
+        # A fight with a rod, snowballs or eggs on both sides (tool=rod|snowball|egg in hotbar
+        # slot 8), on a server where hits for no damage count (zero=1, the default) or do not
+        # (zero=0). Inside low walls, with a roof for the snowballs and eggs.
+        kind = opts.get("tool", "rod")
+        pen(lines, half=6, height=9, roof=True) if kind != "rod" else pen(lines)
+        lines.append("fake 0.5 4 %s 180 0" % opts.get("dist", "3.5"))
+        lines.append("tool %s 7 %s" % (kind, opts.get("count", "16")))
+        lines.append("zero %s" % opts.get("zero", "1"))
+        seq = fight_inputs(rng, int(opts.get("ticks", "1000")), per_count=per_count)
+        seq = [(0,) * 9] * 12 + with_tool(rng, seq, kind, 7, gap=(6, 30) if opts.get("many", "0") != "0" else (10, 40),
+                                          up=opts.get("up", "0") != "0")
+        fight_fake(rng, len(seq) + 60, lines, tool=kind, tool_rate=float(opts.get("fake", "0.03")),
+                   attacks=opts.get("attacks", "1") != "0")
     elif name == "potsolo":
         # Alone under the roof: potions (and pearls) in every direction.
         pen(lines, half=6, height=9, roof=True)

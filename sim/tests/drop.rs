@@ -2,7 +2,7 @@
 //! dying.
 use pvpsim::env::{Env, Mode, Params, ACT_HEADS, OBS_DIM, PRIV_DIM};
 
-const IDLE: [i32; ACT_HEADS] = [0, 0, 0, 0, 0, 13, 10, 0, 0, 0, 0, 0];
+const IDLE: [i32; ACT_HEADS] = [0, 0, 0, 0, 0, 13, 10, 0, 0, 0, 0, 0, 0];
 
 /// Player 0 stands still with a heart and a half against the bot until it
 /// dies: the rewards of its ticks added up, and the deaths with potions

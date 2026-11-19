@@ -13,7 +13,7 @@ pub use crate::agent::{decode_action, ACT_DIMS, ACT_HEADS, BAR_TURN, BAR_TURNS, 
 use crate::bot::{self, BotParams, BotState};
 use crate::client::{Client, ClientCfg, Edge, Input, TickOut, INV_SHUT, MAX_BACKTRACK};
 use crate::mth::Rng;
-use crate::net::{potion_mask, Item, Kind, Rows, SLOT_PEARL, SLOT_SWORD, USE_TICKS};
+use crate::net::{potion_mask, Item, Kind, Rows, Tool, BALL_STACK, SLOT_FOOD, SLOT_PEARL, SLOT_SWORD, USE_TICKS};
 use crate::server::{
     feather_points, prot_points, Food, KbPlugin, KbProfile, ServerCfg, DRINK_SHOWN, FOR_GOOD, MAX_HEALTH, PEARL_DAMAGE,
     POTION_HEAL,
@@ -35,7 +35,7 @@ pub const FOOD_TO_SPRINT: i32 = 6;
 pub const SHAKE_DEG: f32 = 6.0;
 pub const SHAKE_TICKS: i32 = 2;
 pub const PRIV_DIM: usize = 71;
-pub const STATS_DIM: usize = 107;
+pub const STATS_DIM: usize = 111;
 /// Floats per player and in total written by `Env::write_view`.
 pub const VIEW_PLAYER: usize = 45;
 pub const VIEW_DIM: usize = 2 * VIEW_PLAYER + 24;
@@ -466,6 +466,19 @@ pub struct Params {
     pub tiny_kb_prob: f64,
     pub tiny_kb_h: [f64; 2],
     pub tiny_kb_v: [f64; 2],
+    /// Share of the duels on a server that throws as 1.8 does (no
+    /// `throw_carry`) in which each kit has a tool in a hotbar slot of its
+    /// own, after the potions (the last potion makes room when the hotbar
+    /// is full): a fishing rod, snowballs or eggs, in proportion to the
+    /// three weights, `tool_balls` of those. `tool_who` 0 gives it to both
+    /// players, 1 or 2 to that one alone. On `zero_hits_prob` of those
+    /// servers a hit for no damage counts as a hit (Spigot), on the rest it
+    /// does nothing (vanilla).
+    pub tool_prob: f64,
+    pub tool_mix: [f64; 3],
+    pub tool_balls: f64,
+    pub tool_who: u8,
+    pub zero_hits_prob: f64,
     /// Share of new duels that are a retry of one the first player lost,
     /// from a few seconds before its death (as GT Sophy trained on its
     /// mistakes): the same moment of the same duel, played again. Each lost
@@ -637,6 +650,11 @@ impl Default for Params {
             tiny_kb_prob: 0.0,
             tiny_kb_h: [0.05, 0.25],
             tiny_kb_v: [0.1, 0.3],
+            tool_prob: 0.0,
+            tool_mix: [1.0, 1.0, 0.5],
+            tool_balls: 16.0,
+            tool_who: 0,
+            zero_hits_prob: 0.8,
             retry_prob: 0.0,
             league_steal: 0.0,
             throw_carry_prob: 0.0,
@@ -812,6 +830,13 @@ impl Params {
             166 => self.tiny_kb_h[1] = v,
             167 => self.tiny_kb_v[0] = v,
             168 => self.tiny_kb_v[1] = v,
+            169 => self.tool_prob = v,
+            170 => self.tool_mix[0] = v,
+            171 => self.tool_mix[1] = v,
+            172 => self.tool_mix[2] = v,
+            173 => self.tool_balls = v,
+            174 => self.tool_who = v as u8,
+            175 => self.zero_hits_prob = v,
             132 => self.retry_prob = v,
             113 => self.extreme_share = v,
             114 => self.w_shake = v as f32,
@@ -933,6 +958,11 @@ pub struct Stats {
     pub not_full: [f64; 2],
     /// Deaths with healing potions left (`Params::w_drop`).
     pub drops: [f64; 2],
+    /// Uses of the tool (rods cast, snowballs and eggs
+    /// thrown), and the snowballs, eggs and hooks of each that hit the
+    /// other player and counted.
+    pub tool_uses: [f64; 2],
+    pub tool_hits: [f64; 2],
 }
 
 impl Stats {
@@ -999,6 +1029,10 @@ impl Stats {
         self.not_full[1] += o.not_full[1];
         self.drops[0] += o.drops[0];
         self.drops[1] += o.drops[1];
+        for a in 0..2 {
+            self.tool_uses[a] += o.tool_uses[a];
+            self.tool_hits[a] += o.tool_hits[a];
+        }
     }
     pub fn write(&self, out: &mut [f64]) {
         let v = [
@@ -1109,6 +1143,10 @@ impl Stats {
             self.not_full[1],
             self.drops[0],
             self.drops[1],
+            self.tool_uses[0],
+            self.tool_uses[1],
+            self.tool_hits[0],
+            self.tool_hits[1],
         ];
         for (o, x) in out.iter_mut().zip(v.iter()) {
             *o = *x;
@@ -1518,6 +1556,20 @@ pub fn new_duel(p: &Params, rng: &mut Rng, mode: Mode) -> (Match, [f64; 2], BotP
         scfg.potion_strict = p.pot_strict.clamp(0.0, 1.0) as f32;
     }
     scfg.throw_carry = p.throw_carry_prob > 0.0 && rng.chance(p.throw_carry_prob);
+    // The tool of the kits, drawn only when asked for.
+    let mut tool = Item::Empty;
+    if !scfg.throw_carry && p.tool_prob > 0.0 && rng.chance(p.tool_prob) {
+        let w = p.tool_mix.map(|x| x.max(0.0));
+        let r = rng.f64() * (w[0] + w[1] + w[2]);
+        tool = if r < w[0] {
+            Item::Rod
+        } else if r < w[0] + w[1] {
+            Item::Snowball
+        } else {
+            Item::Egg
+        };
+        scfg.zero_hits = rng.chance(p.zero_hits_prob);
+    }
     // Cornered with no pearl to leave with, most of the time.
     let stuck = lesson == 7 && rng.chance(0.7);
     let seed = rng.next_u64();
@@ -1639,6 +1691,31 @@ pub fn new_duel(p: &Params, rng: &mut Rng, mode: Mode) -> (Match, [f64; 2], BotP
                 m.c[i].lp.health = h;
                 m.c[1 - i].rp.health = h;
             }
+        }
+    }
+    if tool != Item::Empty {
+        for i in 0..2 {
+            if p.tool_who != 0 && p.tool_who as usize != i + 1 {
+                continue;
+            }
+            let sp = &mut m.s.p[i];
+            let held = sp.potions | sp.drinks | sp.bottles;
+            let free = (2..9u8).find(|&k| held >> k & 1 == 0 && !(k == SLOT_FOOD && sp.steak > 0));
+            let slot = match free {
+                Some(k) => k,
+                None if sp.potions == 0 => continue,
+                None => {
+                    // The last potion makes room.
+                    let k = 15 - sp.potions.leading_zeros() as u8;
+                    sp.potions &= !(1 << k);
+                    m.c[i].lp.potions = sp.potions;
+                    k
+                }
+            };
+            let n = if tool == Item::Rod { 1 } else { p.tool_balls.clamp(1.0, BALL_STACK as f64) as u8 };
+            let t = Tool { item: tool, slot, n, wear: 0 };
+            m.s.p[i].tool = t;
+            m.c[i].lp.tool = t;
         }
     }
     if insane {
@@ -2055,6 +2132,18 @@ impl Env {
     fn collect_hits(&mut self) {
         self.collect_landings();
         self.collect_splashes();
+        // Counted where the server used the tool: a client that throws
+        // faster than the server's word on its stack comes back can throw
+        // snowballs it no longer has, which the server ignores.
+        for a in 0..2 {
+            self.ep.tool_uses[a] += self.m.s.tool_uses[a] as f64;
+            self.m.s.tool_uses[a] = 0;
+        }
+        for h in self.m.s.thrown_hits.drain(..) {
+            if h.kind != Kind::Pearl && h.thrower != h.victim {
+                self.ep.tool_hits[h.thrower] += 1.0;
+            }
+        }
         if !self.over {
             let dead = [!self.m.s.p[0].alive(), !self.m.s.p[1].alive()];
             if dead[0] || dead[1] {
@@ -2605,7 +2694,7 @@ impl Env {
             }
             // As the server has them: what is in the hand (0 sword, 1 pearl,
             // 2 healing potion, 3 potion of Speed, 4 bottle, 5 steak, 6
-            // nothing), whether it is being drunk (1) or eaten (2), the
+            // nothing, 7 rod, 8 snowballs, 9 eggs), whether it is being drunk (1) or eaten (2), the
             // seconds of Speed left (-1 without it), food, potions of Speed
             // left, and whether the effect's particles show.
             let sp = &self.m.s.p[id];
@@ -2618,6 +2707,9 @@ impl Env {
                 Item::Bottle => 4.0,
                 Item::Food => 5.0,
                 Item::Empty => 6.0,
+                Item::Rod => 7.0,
+                Item::Snowball => 8.0,
+                Item::Egg => 9.0,
             };
             o[b + 37] = match (sp.using_item && sp.use_slot == sp.held, item) {
                 (true, Item::Drink) => 1.0,

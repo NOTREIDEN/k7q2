@@ -113,6 +113,10 @@ public final class AgentCheck {
             v(e.serverSide);
             v.thrown.add(e);
         }
+        v.tool = i();
+        v.toolSlot = i();
+        v.toolCount = i();
+        v.toolWear = i();
     }
 
     /** The counts of a view that a {@link Book} keeps. */
@@ -144,7 +148,7 @@ public final class AgentCheck {
     public static void main(String[] args) throws IOException {
         byte[] raw = Files.readAllBytes(Paths.get(args[0]));
         d = ByteBuffer.wrap(raw).order(ByteOrder.LITTLE_ENDIAN).asDoubleBuffer();
-        if (n() != 5050.0 || n() != 4.0) {
+        if (n() != 5050.0 || n() != 5.0) {
             throw new IOException("not a file of duels, or of another format");
         }
         int obsDim = i(), heads = i();
@@ -221,9 +225,10 @@ public final class AgentCheck {
                 } else {
                     long id = (long) n();
                     int kind = code == 5 ? i() : 0;
+                    boolean own = code == 5 && kind == Inv.KIND_HOOK && b();
                     int x = i(), y = i(), z = i();
                     if (code == 5) {
-                        book.spawned(id, kind, x, y, z);
+                        book.spawned(id, kind, own, x, y, z);
                     } else if (code == 6) {
                         book.thrownVelocity(id, x, y, z);
                     } else {
@@ -310,10 +315,10 @@ public final class AgentCheck {
             v(feet);
             boolean consuming = b(), oppUsing = b();
             int oppItem = i();
-            boolean threw = b(), threwPotion = b(), swung = b(), attacked = b();
+            boolean threw = b(), threwPotion = b(), threwBall = b(), usedRod = b(), swung = b(), attacked = b();
             v(said);
             float saidYaw = (float) n(), saidPitch = (float) n();
-            book.ticked(swung, attacked, threw, threwPotion, eye, said, saidYaw, saidPitch);
+            book.ticked(swung, attacked, threw, threwPotion, threwBall, eye, said, saidYaw, saidPitch);
             agent.ticked(pressed, duel, feet, consuming, oppUsing && (oppItem == Inv.DRINK || oppItem == Inv.FOOD), threw, threwPotion);
             ticks++;
         }

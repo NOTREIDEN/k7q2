@@ -4,7 +4,7 @@
 use pvpsim::env::{Env, Mode, Params, ACT_HEADS};
 
 /// Stand still, mouse at rest, no button down.
-const IDLE: [i32; ACT_HEADS] = [0, 0, 0, 0, 0, 13, 10, 0, 0, 0, 0, 0];
+const IDLE: [i32; ACT_HEADS] = [0, 0, 0, 0, 0, 13, 10, 0, 0, 0, 0, 0, 0];
 
 fn params() -> Params {
     let mut p = Params::default();

@@ -7,8 +7,9 @@ use std::collections::VecDeque;
 /// pearls in the second. Each of the other seven holds one splash potion of
 /// Instant Health II (`Potion`), one potion of Swiftness II to drink
 /// (`Drink`), the bottle a drink leaves behind, or nothing; the last of
-/// them can hold steak instead (`Food`).
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+/// them can hold steak instead (`Food`). In some kits one of those slots
+/// holds a tool instead (see `Tool`): a fishing rod, snowballs or eggs.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub enum Item {
     Sword,
     Pearl,
@@ -16,7 +17,11 @@ pub enum Item {
     Drink,
     Bottle,
     Food,
+    #[default]
     Empty,
+    Rod,
+    Snowball,
+    Egg,
 }
 
 impl Item {
@@ -43,6 +48,37 @@ pub const DRINK_TICKS: i32 = 1800;
 pub const STEAK_FOOD: i32 = 8;
 pub const STEAK_SATURATION: f32 = 0.8;
 
+/// `getMaxDamage` of a fishing rod: it breaks on the use that takes its
+/// wear past this.
+pub const ROD_MAX_WEAR: u8 = 64;
+/// `getMaxStackSize` of snowballs and of eggs.
+pub const BALL_STACK: u8 = 16;
+
+/// A tool in one slot of the hotbar: a fishing rod, whose stack is one rod
+/// worn by `wear` uses, or a stack of `n` snowballs or eggs. `Item::Empty`
+/// for none.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub struct Tool {
+    pub item: Item,
+    pub slot: u8,
+    pub n: u8,
+    pub wear: u8,
+}
+
+impl Tool {
+    /// The stack as `Bar::stack` gives it: for a rod one rod, counted as 1
+    /// and its wear, since two rods are the same stack only when equally
+    /// worn.
+    #[inline]
+    pub fn stack(&self) -> (Item, u32) {
+        match self.item {
+            Item::Rod => (Item::Rod, 1 + self.wear as u32),
+            Item::Snowball | Item::Egg if self.n > 0 => (self.item, self.n as u32),
+            _ => (Item::Empty, 0),
+        }
+    }
+}
+
 /// The part of the hotbar that changes during a duel.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub struct Bar {
@@ -55,6 +91,8 @@ pub struct Bar {
     pub bottles: u16,
     /// Steaks in the last slot.
     pub steak: u8,
+    /// A rod, snowballs or eggs, in a slot no potion is in.
+    pub tool: Tool,
 }
 
 impl Bar {
@@ -64,6 +102,7 @@ impl Bar {
         let bit = |m: u16| m >> slot & 1 != 0;
         match slot {
             s if s > 8 || s == SLOT_SWORD => (Item::Empty, 0),
+            s if s == self.tool.slot && self.tool.item != Item::Empty => self.tool.stack(),
             _ if bit(self.potions) => (Item::Potion, 1),
             _ if bit(self.drinks) => (Item::Drink, 1),
             _ if bit(self.bottles) => (Item::Bottle, 1),
@@ -89,10 +128,16 @@ impl Bar {
         if slot == SLOT_FOOD {
             self.steak = 0;
         }
+        if slot == self.tool.slot {
+            self.tool = Tool::default();
+        }
         if count == 0 {
             return;
         }
         match item {
+            // The count of a rod's stack is 1 and its wear (see `Tool::stack`).
+            Item::Rod => self.tool = Tool { item, slot, n: 1, wear: (count as u32).saturating_sub(1).min(255) as u8 },
+            Item::Snowball | Item::Egg => self.tool = Tool { item, slot, n: count, wear: 0 },
             Item::Potion => self.potions |= bit,
             Item::Drink => self.drinks |= bit,
             Item::Bottle => self.bottles |= bit,
@@ -239,11 +284,16 @@ pub fn potion_mask(n: u8) -> u16 {
     (((1u32 << n.min(7)) - 1) << 2) as u16
 }
 
-/// What is thrown: an ender pearl or a splash potion.
+/// What is thrown: an ender pearl, a splash potion, a snowball, an egg, or
+/// the hook of a fishing rod (`EntityFishHook`, which flies by rules of its
+/// own; see `Server::hook_update`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Kind {
     Pearl,
     Potion,
+    Snowball,
+    Egg,
+    Hook,
 }
 
 impl Kind {
@@ -251,15 +301,17 @@ impl Kind {
     #[inline]
     pub fn gravity(self) -> f32 {
         match self {
-            Kind::Pearl => 0.03f32,
+            Kind::Pearl | Kind::Snowball | Kind::Egg => 0.03f32,
             Kind::Potion => 0.05f32,
+            // EntityFishHook.onUpdate: motionY -= 0.04 out of water.
+            Kind::Hook => 0.03999999910593033f32,
         }
     }
     /// `getVelocity`.
     #[inline]
     pub fn speed(self) -> f32 {
         match self {
-            Kind::Pearl => 1.5f32,
+            Kind::Pearl | Kind::Snowball | Kind::Egg | Kind::Hook => 1.5f32,
             Kind::Potion => 0.5f32,
         }
     }
@@ -268,8 +320,27 @@ impl Kind {
     #[inline]
     pub fn pitch_offset(self) -> f32 {
         match self {
-            Kind::Pearl => 0.0f32,
+            Kind::Pearl | Kind::Snowball | Kind::Egg | Kind::Hook => 0.0f32,
             Kind::Potion => -20.0f32,
+        }
+    }
+    /// `EntityTracker.trackEntity`: ticks between the tracker's updates.
+    #[inline]
+    pub fn track_every(self) -> i32 {
+        match self {
+            Kind::Hook => 5,
+            _ => 10,
+        }
+    }
+    /// The type of `S0EPacketSpawnObject`.
+    #[inline]
+    pub fn spawn_type(self) -> i32 {
+        match self {
+            Kind::Pearl => 65,
+            Kind::Potion => 73,
+            Kind::Snowball => 61,
+            Kind::Egg => 62,
+            Kind::Hook => 90,
         }
     }
 }
@@ -320,9 +391,11 @@ pub enum C2S {
 /// What the server tells a client about a pearl or a potion in flight.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum ThrownEv {
-    /// S0E spawn object, type 65 (pearl) or 73 (potion): position in 1/32
-    /// block, angles in 1/256 turn.
-    Spawn { kind: Kind, p: [i32; 3], yaw: i8, pitch: i8 },
+    /// S0E spawn object, type 65 (pearl), 73 (potion), 61 (snowball), 62
+    /// (egg) or 90 (a rod's hook): position in 1/32 block, angles in 1/256
+    /// turn. A hook's packet names the player it belongs to, and `own` says
+    /// whether that is the receiving player.
+    Spawn { kind: Kind, p: [i32; 3], yaw: i8, pitch: i8, own: bool },
     /// S1C entity metadata sent with the spawn. It carries nothing.
     Meta,
     /// S12 entity velocity, in 1/8000 block per tick.
