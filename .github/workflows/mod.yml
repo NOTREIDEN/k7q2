@@ -8,6 +8,10 @@ on:
       rest:
         description: Controls, by number, that stay at rest in the game (one the weights are still learning)
         default: ""
+      publish:
+        description: Put the jar on the branch "mod" (false only builds and tests it)
+        type: boolean
+        default: true
 
 permissions:
   contents: write
@@ -77,6 +81,7 @@ jobs:
           name: mod
           path: mod/build/libs/pvpai.jar
       - name: Put the jar on the branch "mod"
+        if: ${{ inputs.publish }}
         run: |
           blob=$(git hash-object -w mod/build/libs/pvpai.jar)
           tree=$(printf '100644 blob %s\tpvpai-1.8.9.jar\n' "$blob" | git mktree)
