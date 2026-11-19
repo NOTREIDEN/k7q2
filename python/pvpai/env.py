@@ -44,6 +44,7 @@ PARAM = {
     "pearl_spam_prob": 204, "pearl_spam_pearls": 205,
     "pot_relief_hp": 206, "pot_relief": 207, "insane_lessons": 208, "w_sip_near": 209, "sip_near_dist": 210, "bot_trader": 211, "trade_block": 212, "trade_crit": 213, "trade_heal": 214,
     "w_comboed": 179, "comboed_free": 180, "comboed_cap": 181, "combo_gap": 182, "bot_spacer": 183,
+    "w_pot_stock": 215, "pot_stock_cap": 216, "extras_bot_only": 217,
 }
 
 STAT_NAMES = [
