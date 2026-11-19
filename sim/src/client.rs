@@ -675,11 +675,19 @@ pub struct Edge {
     /// to this many ticks ago (the game: 0). This is what holding back the
     /// other player's movement packets gives.
     pub backtrack: u8,
+    /// A sprint reset by packets before each attack (the game: off): the
+    /// client tells the server it stopped and started sprinting again, so
+    /// that every hit made sprinting carries the sprint's knockback with no
+    /// W-tap, S-tap or block in between.
+    pub sprint_packets: bool,
+    /// Keep Sprint (the game: off): a hit made sprinting neither slows the
+    /// client down (the game keeps 0.6 of its motion) nor stops its sprint.
+    pub keep_sprint: bool,
 }
 
 impl Default for Edge {
     fn default() -> Self {
-        Edge { reach: 3.0, kb_taken: 1.0, kb_v_taken: 1.0, backtrack: 0 }
+        Edge { reach: 3.0, kb_taken: 1.0, kb_v_taken: 1.0, backtrack: 0, sprint_packets: false, keep_sprint: false }
     }
 }
 
@@ -1259,6 +1267,7 @@ impl Client {
         t.pick = self.pick_ray(world, self.lp.l.pitch, ray_yaw);
         self.shown.copy_within(0..MAX_BACKTRACK - 1, 1);
         self.shown[0] = self.rp.bb;
+        let edge = self.edge;
         let lp = &mut self.lp;
 
         // The number keys.
@@ -1305,6 +1314,13 @@ impl Client {
                     break;
                 }
                 lp.sync_slot(out);
+                if edge.sprint_packets && lp.l.sprinting {
+                    // A sprint reset by packets: the server sees a fresh
+                    // sprint at the attack, whatever its last hit did to it.
+                    out.push(C2S::Sprint(false));
+                    out.push(C2S::Sprint(true));
+                    lp.server_sprint_state = true;
+                }
                 out.push(C2S::Attack);
                 t.attacked = true;
                 lp.ticks_since_attack = 0;
@@ -1314,9 +1330,11 @@ impl Client {
                 let ench = if lp.held == SLOT_SWORD { cfg.kb_ench } else { 0 };
                 let i = ench + if lp.l.sprinting { 1 } else { 0 };
                 if i > 0 {
-                    lp.l.body.motion[0] *= 0.6;
-                    lp.l.body.motion[2] *= 0.6;
-                    lp.set_sprinting(false);
+                    if !edge.keep_sprint {
+                        lp.l.body.motion[0] *= 0.6;
+                        lp.l.body.motion[2] *= 0.6;
+                        lp.set_sprinting(false);
+                    }
                     t.sprint_attack = true;
                 }
             }

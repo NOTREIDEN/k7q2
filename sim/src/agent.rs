@@ -8,6 +8,7 @@
 //! statistics and what the critic is shown, stays in the environment.
 use crate::aabb::{dist, dist_sq, Aabb, V3};
 use crate::bot;
+use crate::fullheal;
 use crate::client::{pearl_landing, pearl_preview, thrown_flight, Client, ClientCfg, ClientThrown, Input, TickOut, INV_SHUT};
 use crate::mth::{self, Rng};
 use crate::net::{refill_click, shift_click, Item, Kind, ROD_MAX_WEAR, SLOT_FOOD, SLOT_PEARL, SLOT_SWORD, USE_TICKS, WINDOW_BAR};
@@ -303,6 +304,15 @@ pub struct Agent {
     /// or eggs used up in hand leave the slot empty, and the sword is taken
     /// back.
     tool_slot: u8,
+    /// Plans for potions thrown with a turn that give all eight points
+    /// (`fullheal`), when set; off by default (`Params::full_heal`).
+    pub full_heal: Option<fullheal::FullHealCfg>,
+    /// The plan of the potion thrown with a turn under way, its tick (0
+    /// the turn's), and the pitch from before it.
+    heal_plan: Option<fullheal::HealPlan>,
+    plan_t: usize,
+    plan_pitch: f32,
+    plan_pitch0: f32,
 }
 
 const NO_SLOT: u8 = u8::MAX;
@@ -392,6 +402,11 @@ impl Agent {
             probe: None,
             teacher: Teacher::default(),
             tool_slot: NO_SLOT,
+            full_heal: None,
+            heal_plan: None,
+            plan_t: 0,
+            plan_pitch: 0.0,
+            plan_pitch0: 0.0,
         }
     }
 
@@ -446,15 +461,108 @@ impl Agent {
             self.potion_keys(c, bar == 1 || turn != 0, turn, pitch, &mut inp);
             if turn != 0 && self.turned == 1 {
                 self.double = double;
+                if self.potion_stage == 1 && self.full_heal.is_some() {
+                    self.heal_plan_start(c, world, double, &mut inp);
+                }
             }
             self.pearl_keys(c, action.len() > 8 && action[8] != 0, &mut inp);
             self.tool_keys(c, if action.len() > 12 { action[12] } else { 0 }, &mut inp);
             self.limit_clicks(&mut inp, rng);
+            self.heal_plan_keys(c, &mut inp);
         }
         if self.teacher.on {
             self.teach(c, world, mouse, if self.turned == 1 { turn } else { 0 });
         }
         inp
+    }
+
+    /// The plan under way and its tick, for the dump that checks the mod's
+    /// copy (examples/fh_dump.rs).
+    pub fn heal_plan_info(&self) -> Option<(&fullheal::HealPlan, usize)> {
+        self.heal_plan.as_ref().map(|p| (p, self.plan_t))
+    }
+
+    /// On the tick of the turn of a potion thrown
+    /// with a turn, a plan that gives all eight points, if there is one:
+    /// its pitch for the throw now, its keys from this tick on.
+    fn heal_plan_start(&mut self, c: &Client, world: &World, double: bool, inp: &mut Input) {
+        self.heal_plan = None;
+        if double {
+            return;
+        }
+        fullheal::count(0);
+        let s = c.lp.ticks_since_hurt;
+        let (a, b) = (c.lp.l.body.pos, c.rp.pos);
+        let (dx, dz) = (a[0] - b[0], a[2] - b[2]);
+        let d = (dx * dx + dz * dz).sqrt();
+        fullheal::count(24 + s.clamp(0, 11) as usize);
+        fullheal::count(36 + (d.max(0.0) as usize).min(9));
+        let Some(cfg) = self.full_heal else { return };
+        if !fullheal::gate_open(&cfg, s, d) {
+            fullheal::count(46);
+            return;
+        }
+        let own = fullheal::PKey { fw: inp.forward, st: inp.strafe, sprint: inp.sprint_key, jump: inp.jump };
+        match fullheal::plan(c, world, inp, own, self.carry) {
+            Some(p) => {
+                fullheal::count(1 + p.class as usize);
+                fullheal::count((7 + p.jump as i32) as usize);
+                fullheal::count((12 + (p.ticks - 3).clamp(0, 6)) as usize);
+                fullheal::count(if p.pitch < 0.0 { 19 } else { 20 });
+                if self.carry >= 0 {
+                    fullheal::count(21);
+                }
+                // The pitch the policy chose for this tick: the view goes
+                // back to it on the click's tick (the throw has this one's).
+                self.plan_pitch = fullheal::pitch_of(c.lp.l.pitch, inp.dy);
+                self.plan_pitch0 = c.lp.l.pitch;
+                inp.dy = p.dy;
+                self.plan_t = 0;
+                self.heal_plan = Some(p);
+            }
+            None => {
+                fullheal::count(4);
+                if self.carry < 0 {
+                    fullheal::count(22);
+                }
+                if !c.lp.l.body.on_ground {
+                    fullheal::count(23);
+                }
+            }
+        }
+    }
+
+    /// The movement keys of the plan under way, laid over the policy's,
+    /// until the potion is due or a hit has moved the player. On the
+    /// click's tick the view takes the pitch the policy had chosen for the
+    /// turn's tick (plus its own turn of this one): the server throws with
+    /// the turn tick's view, so from here on the policy sees what it would
+    /// have without the plan.
+    fn heal_plan_keys(&mut self, c: &Client, inp: &mut Input) {
+        let Some(p) = &self.heal_plan else { return };
+        let t = self.plan_t;
+        let restore = self.full_heal.map_or(4, |cfg| cfg.restore);
+        match (restore, t) {
+            (1, 1) => inp.dy += counts(self.plan_pitch - c.lp.l.pitch),
+            (2, 2) => inp.dy = counts(self.plan_pitch0 - c.lp.l.pitch),
+            (3, 1) => inp.dy = counts(self.plan_pitch - c.lp.l.pitch),
+            (4, 1) => inp.dy = counts(self.plan_pitch0 - c.lp.l.pitch),
+            _ => {}
+        }
+        if t >= p.len || (t > 0 && c.lp.ticks_since_kb == 0) {
+            if t < p.len {
+                fullheal::count(5);
+            }
+            self.heal_plan = None;
+            return;
+        }
+        let yaw = (c.lp.l.yaw as f64 + inp.dx as f64 * COUNT_DEG as f64) as f32;
+        let k = fullheal::keys_now(p, t, yaw);
+        inp.forward = k.fw;
+        inp.strafe = k.st;
+        inp.sprint_key = k.sprint;
+        inp.jump = k.jump;
+        self.plan_t += 1;
     }
 
     /// What the teacher would have chosen on this tick (see `Teacher`):

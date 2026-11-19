@@ -1429,7 +1429,9 @@ fn act_flat(c: &Client, world: &World, cfg: &ClientCfg, p: &BotParams, st: &mut 
         st.trade_block = rng.chance(p.trade_block);
         st.trade_crit = rng.chance(p.trade_crit);
     }
-    if p.wtap {
+    // A client that resets its sprint by packets needs no W-tap or block
+    // for it (`Edge::sprint_packets`).
+    if p.wtap && !c.edge.sprint_packets {
         if rp.hurt_time == 10 && lp.ticks_since_attack <= 12 {
             // A hit landed: reset the sprint, by letting go of W or by a
             // short block.

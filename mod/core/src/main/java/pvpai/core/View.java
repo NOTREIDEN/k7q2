@@ -86,6 +86,19 @@ public final class View {
 
     /** The crosshair is on the other player within reach. */
     public boolean onTarget;
+
+    /**
+     * The rest of what the client's own player moves by, for an agent that
+     * works out its own movement ahead ({@link Walk}): its box, whether it
+     * is in a cobweb, the speed attribute's parts, jumpMovementFactor, the
+     * sprint's timers, the last moveForward, and what the server was last
+     * told. Of this the fields the view has already (the place, the motion,
+     * the view, the sprint flag...) are taken from the view, not from here.
+     * walkKnown says whether the client filled it in. Not part of
+     * {@link #list}.
+     */
+    public final Walk walk = new Walk();
+    public boolean walkKnown;
     /** Oldest first. */
     public final List<Thrown> thrown = new ArrayList<Thrown>();
 

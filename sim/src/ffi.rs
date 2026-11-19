@@ -137,3 +137,22 @@ pub unsafe extern "C" fn pvp_vec_sudden(p: *mut VecEnv, index: i32, amount: f32,
     let v = &mut *p;
     v.envs[index as usize].m.s.sudden = Some((0, amount, [dx, dz]));
 }
+
+/// Prototype counters of `fullheal` (see `fullheal::COUNTS`), into `out`
+/// (`fullheal::NCOUNTS` numbers).
+#[no_mangle]
+pub extern "C" fn pvp_fullheal_counts(out: *mut u64) {
+    for i in 0..crate::fullheal::NCOUNTS {
+        unsafe { *out.add(i) = crate::fullheal::COUNTS[i].load(std::sync::atomic::Ordering::Relaxed) };
+    }
+}
+
+/// Copy duel `src` of one vector over duel `dst` of another (or the same),
+/// random streams included, for rollouts from the same moment.
+/// # Safety
+/// `from` and `to` must come from `pvp_vec_new`; the indices in range.
+#[no_mangle]
+pub unsafe extern "C" fn pvp_vec_clone_env(from: *const VecEnv, src: i32, to: *mut VecEnv, dst: i32) {
+    let e = (&(*from).envs)[src as usize].clone();
+    (&mut (*to).envs)[dst as usize] = e;
+}

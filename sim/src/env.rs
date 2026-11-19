@@ -619,6 +619,16 @@ pub struct Params {
     /// backtrack on top, above that).
     pub insane_ping_min_ms: f64,
     pub insane_ping_max_ms: f64,
+    /// Above 0: the agents plan their potions thrown with a turn so that
+    /// they give all eight points (`fullheal`, `Agent::full_heal`), when the
+    /// last hurt is at most `full_heal_s` ticks ago or the other player at
+    /// least `full_heal_d` blocks away (0: no such test), the view going
+    /// back after the throw as `full_heal_r` says (see `FullHealCfg`). The
+    /// jar does the same (`Agent.fullHeal`).
+    pub full_heal: f64,
+    pub full_heal_s: f64,
+    pub full_heal_d: f64,
+    pub full_heal_r: f64,
     /// Share of the duels against a scripted bot of level 3 or more (the
     /// hardest one too) in which it does not hit into a block
     /// (`BotParams::select`): it holds its click for up to `select_wait`
@@ -699,6 +709,21 @@ pub struct Params {
     pub pearl_punish_far: f64,
     pub pearl_punish_rush: f64,
     pub pearl_punish_noise: f64,
+    /// Share of the duels against a bot (lessons aside) in which its client
+    /// resets its sprint by packets before every attack
+    /// (`Edge::sprint_packets`), so that each of its hits made sprinting
+    /// carries sprint knockback, and it lets go of neither W nor its block
+    /// for a reset. Drawn only when above zero.
+    pub opp_sprint_reset: f64,
+    /// Share of the duels against a bot (lessons aside) in which its client
+    /// keeps its sprint and its speed through its own hits
+    /// (`Edge::keep_sprint`). Drawn only when above zero.
+    pub opp_keep_sprint: f64,
+    /// The share of the horizontal knockback the hardest bot
+    /// (`insane_prob`) takes, drawn per duel from this range, and the
+    /// shortest reach it is drawn with (up to `insane_reach_max`).
+    pub insane_kb: [f64; 2],
+    pub insane_reach_min: f64,
 }
 
 impl Default for Params {
@@ -885,6 +910,10 @@ impl Default for Params {
             w_hurt_click: 0.0,
             insane_ping_min_ms: 0.0,
             insane_ping_max_ms: 60.0,
+            full_heal: 0.0,
+            full_heal_s: 4.0,
+            full_heal_d: 0.0,
+            full_heal_r: 4.0,
             bot_select: 0.0,
             select_wait: 8.0,
             select_block: 0.5,
@@ -908,6 +937,10 @@ impl Default for Params {
             pearl_punish_far: bot::PearlPunish::OFF.far,
             pearl_punish_rush: bot::PearlPunish::OFF.rush,
             pearl_punish_noise: bot::PearlPunish::OFF.noise,
+            opp_sprint_reset: 0.0,
+            opp_keep_sprint: 0.0,
+            insane_kb: [0.0, 0.4],
+            insane_reach_min: 3.0,
         }
     }
 }
@@ -1139,6 +1172,10 @@ impl Params {
             242 => self.w_hurt_click = v as f32,
             244 => self.insane_ping_min_ms = v,
             245 => self.insane_ping_max_ms = v,
+            250 => self.full_heal = v,
+            251 => self.full_heal_s = v,
+            252 => self.full_heal_d = v,
+            253 => self.full_heal_r = v,
             225 => self.bot_select = v,
             226 => self.select_wait = v,
             227 => self.select_block = v,
@@ -1149,6 +1186,11 @@ impl Params {
             232 => self.pearl_punish_far = v,
             233 => self.pearl_punish_rush = v,
             234 => self.pearl_punish_noise = v,
+            260 => self.opp_sprint_reset = v,
+            261 => self.opp_keep_sprint = v,
+            262 => self.insane_kb[0] = v,
+            263 => self.insane_kb[1] = v,
+            264 => self.insane_reach_min = v,
             _ => return false,
         }
         true
@@ -1639,6 +1681,7 @@ const MOMENTS: usize = 5;
 const LOSSES: usize = 4;
 const RETRIES: u8 = 2;
 
+#[derive(Clone)]
 pub struct Env {
     pub m: Match,
     pub params: Params,
@@ -2183,7 +2226,14 @@ pub fn new_duel(p: &Params, rng: &mut Rng, mode: Mode) -> (Match, [f64; 2], BotP
         }
     }
     if insane {
-        m.c[1].edge = Edge { reach: rng.range(3.0, p.insane_reach_max.max(3.0)), kb_taken: rng.range(0.0, 0.4), kb_v_taken: 1.0, backtrack: 0 };
+        let r0 = p.insane_reach_min;
+        m.c[1].edge = Edge {
+            reach: rng.range(r0, p.insane_reach_max.max(r0)),
+            kb_taken: rng.range(p.insane_kb[0], p.insane_kb[1].max(p.insane_kb[0])),
+            kb_v_taken: 1.0,
+            backtrack: 0,
+            ..Edge::default()
+        };
     } else if rng.chance(p.opp_edge_prob) {
         let ms = rng.range(p.opp_backtrack_ms[0], p.opp_backtrack_ms[1].max(p.opp_backtrack_ms[0]));
         m.c[1].edge = Edge {
@@ -2191,6 +2241,7 @@ pub fn new_duel(p: &Params, rng: &mut Rng, mode: Mode) -> (Match, [f64; 2], BotP
             kb_taken: rng.range(p.opp_kb_taken[0], p.opp_kb_taken[1].max(p.opp_kb_taken[0])),
             kb_v_taken: 1.0,
             backtrack: ((ms / 50.0).round().max(0.0) as usize).min(MAX_BACKTRACK) as u8,
+            ..Edge::default()
         };
         if rng.chance(p.opp_autoblock) {
             m.s.p[1].autoblock = true;
@@ -2336,6 +2387,14 @@ pub fn new_duel(p: &Params, rng: &mut Rng, mode: Mode) -> (Match, [f64; 2], BotP
             rush: p.pearl_punish_rush,
             noise: p.pearl_punish_noise.max(0.0),
         };
+    }
+    // Drawn only when asked for, so that duels without them come out as
+    // they did.
+    if cheat && p.opp_sprint_reset > 0.0 && rng.chance(p.opp_sprint_reset) {
+        m.c[1].edge.sprint_packets = true;
+    }
+    if cheat && p.opp_keep_sprint > 0.0 && rng.chance(p.opp_keep_sprint) {
+        m.c[1].edge.keep_sprint = true;
     }
     (m, ping, bot, lesson)
 }
@@ -2632,6 +2691,14 @@ impl Env {
         let other = self.rng.range(lo, hi.max(lo));
         let cps = [own.max(1.0), other.max(1.0)];
         self.ag = [0, 1].map(|a| Agent::new([self.ping_ms[a], self.ping_ms[1 - a]], cps[a], self.m.c[a].lp.l.body.pos));
+        let heal = (p.full_heal > 0.0).then(|| crate::fullheal::FullHealCfg {
+            s: p.full_heal_s as i32,
+            d: p.full_heal_d as i32,
+            restore: p.full_heal_r as i32,
+        });
+        for ag in self.ag.iter_mut() {
+            ag.full_heal = heal;
+        }
         self.pending = self.m.advance();
         debug_assert_eq!(self.pending, 0);
         for a in 0..2 {

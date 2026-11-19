@@ -15,6 +15,17 @@ import java.util.Random;
  * agent, and compares the counts it keeps, what it shows the policy and
  * the keys it presses with the simulator's, number by number:
  * {@code java pvpai.core.AgentCheck FILE}.
+ *
+ * A file of format 6 ({@code cargo run --release --example fh_dump}) is of
+ * an agent with the fullheal macro on ({@link Agent#fullHeal}): it has the
+ * movement state of the client's own player as well, which goes to
+ * {@link View#walk}, the plan under way after each tick's keys, which is
+ * compared with this agent's, and the movement state after the tick,
+ * which is compared with what {@link Walk#tick} makes of the state before
+ * on every tick it applies to (no item in use before or after, no hit, no
+ * inventory). Format 7 has the potion guard and the decision rule of the
+ * agent in its head as well ({@link Agent#potionGuard},
+ * {@link Agent#potionRule}).
  */
 public final class AgentCheck {
     private static DoubleBuffer d;
@@ -33,6 +44,112 @@ public final class AgentCheck {
 
     private static void v(double[] out) {
         d.get(out, 0, 3);
+    }
+
+    /** The movement state beyond the view (fh_dump.rs, walk). */
+    private static void walk(Walk w) {
+        v(w.min);
+        v(w.max);
+        w.inWeb = b();
+        w.attrBase = n();
+        w.attrSprint = b();
+        w.speedModifier = n();
+        w.jumpFactor = (float) n();
+        w.moveForward = (float) n();
+        w.sprintingTicksLeft = i();
+        w.sprintToggleTimer = i();
+        v(w.said);
+        w.saidYaw = (float) n();
+        w.saidPitch = (float) n();
+        w.positionUpdateTicks = i();
+    }
+
+    /** The whole movement state after a tick (fh_dump.rs, walk_after). */
+    private static Walk walkAfter() {
+        Walk w = new Walk();
+        v(w.pos);
+        v(w.motion);
+        w.onGround = b();
+        w.collidedH = b();
+        w.fallDistance = (float) n();
+        w.yaw = (float) n();
+        w.pitch = (float) n();
+        w.sprinting = b();
+        w.jumpTicks = i();
+        w.serverSprint = b();
+        w.usingItem = b();
+        walk(w);
+        return w;
+    }
+
+    private static boolean same(double a, double b) {
+        return Double.doubleToRawLongBits(a) == Double.doubleToRawLongBits(b);
+    }
+
+    private static boolean same3(double[] a, double[] b) {
+        return same(a[0], b[0]) && same(a[1], b[1]) && same(a[2], b[2]);
+    }
+
+    /** What of two movement states differs, empty if nothing. */
+    private static String walkDiff(Walk got, Walk want) {
+        StringBuilder s = new StringBuilder();
+        if (!same3(got.pos, want.pos)) s.append(" pos ").append(Arrays.toString(got.pos)).append(" want ").append(Arrays.toString(want.pos));
+        if (!same3(got.motion, want.motion)) s.append(" motion ").append(Arrays.toString(got.motion)).append(" want ").append(Arrays.toString(want.motion));
+        if (!same3(got.min, want.min) || !same3(got.max, want.max)) s.append(" box");
+        if (got.onGround != want.onGround) s.append(" onGround");
+        if (got.collidedH != want.collidedH) s.append(" collidedH");
+        if (got.inWeb != want.inWeb) s.append(" inWeb");
+        if (!same(got.fallDistance, want.fallDistance)) s.append(" fall ").append(got.fallDistance).append(" want ").append(want.fallDistance);
+        if (!same(got.yaw, want.yaw) || !same(got.pitch, want.pitch)) s.append(" view");
+        if (got.sprinting != want.sprinting || got.attrSprint != want.attrSprint) s.append(" sprint");
+        if (!same(got.attrBase, want.attrBase) || !same(got.speedModifier, want.speedModifier)) s.append(" attribute");
+        if (!same(got.jumpFactor, want.jumpFactor)) s.append(" jumpFactor");
+        if (got.jumpTicks != want.jumpTicks) s.append(" jumpTicks");
+        if (!same(got.moveForward, want.moveForward)) s.append(" moveForward");
+        if (got.sprintingTicksLeft != want.sprintingTicksLeft || got.sprintToggleTimer != want.sprintToggleTimer) s.append(" sprintTimers");
+        if (got.serverSprint != want.serverSprint) s.append(" serverSprint");
+        if (!same3(got.said, want.said) || !same(got.saidYaw, want.saidYaw) || !same(got.saidPitch, want.saidPitch)) s.append(" said");
+        if (got.positionUpdateTicks != want.positionUpdateTicks) s.append(" positionUpdateTicks");
+        return s.toString();
+    }
+
+    /** The plan of this agent after the keys against the simulator's (fh_dump.rs, plan): what differs, empty if nothing. */
+    private static String planDiff(Agent agent) {
+        int t = i();
+        int got = agent.healPlanTick();
+        StringBuilder s = new StringBuilder();
+        if (t != got) {
+            s.append(" plan tick ").append(got).append(" want ").append(t);
+        }
+        if (t == 1) {
+            FullHeal.Plan p = agent.healPlan();
+            int dy = i();
+            float yaw = (float) n();
+            int len = i(), ticks = i(), cls = i(), window = i();
+            float pitch = (float) n();
+            int jump = i();
+            int[] keys = new int[4 * FullHeal.PLAN_TICKS];
+            for (int k = 0; k < keys.length; k++) {
+                keys[k] = i();
+            }
+            if (p != null && got == 1) {
+                int[] mine = new int[keys.length];
+                for (int k = 0; k < FullHeal.PLAN_TICKS; k++) {
+                    mine[4 * k] = p.keys[k].fw;
+                    mine[4 * k + 1] = p.keys[k].st;
+                    mine[4 * k + 2] = p.keys[k].sprint ? 1 : 0;
+                    mine[4 * k + 3] = p.keys[k].jump ? 1 : 0;
+                }
+                if (p.dy != dy || !same(p.yaw, yaw) || p.len != len || p.ticks != ticks || p.cls != cls || p.window != window
+                        || !same(p.pitch, pitch) || p.jump != jump || !Arrays.equals(mine, keys)) {
+                    s.append(" plan (dy ").append(p.dy).append(" pitch ").append(p.pitch).append(" ticks ").append(p.ticks).append(" class ")
+                        .append(p.cls).append(" window ").append(p.window).append(" jump ").append(p.jump).append(") want (dy ").append(dy)
+                        .append(" pitch ").append(pitch).append(" ticks ").append(ticks).append(" class ").append(cls).append(" window ")
+                        .append(window).append(" jump ").append(jump).append(")");
+                }
+            }
+        }
+        return s.toString();
     }
 
     private static void view(View v) {
@@ -148,13 +265,33 @@ public final class AgentCheck {
     public static void main(String[] args) throws IOException {
         byte[] raw = Files.readAllBytes(Paths.get(args[0]));
         d = ByteBuffer.wrap(raw).order(ByteOrder.LITTLE_ENDIAN).asDoubleBuffer();
-        if (n() != 5050.0 || n() != 5.0) {
-            throw new IOException("not a file of duels, or of another format");
+        if (n() != 5050.0) {
+            throw new IOException("not a file of duels");
+        }
+        int format = i();
+        if (format < 5 || format > 7) {
+            throw new IOException("a file of another format");
         }
         int obsDim = i(), heads = i();
         if (obsDim != Agent.OBS_DIM || heads != Agent.ACT_DIMS.length) {
             throw new IOException("the file is of an agent with other sizes");
         }
+        boolean heal = format >= 6;
+        int healS = heal ? i() : 0, healD = heal ? i() : 0, healR = heal ? i() : 1;
+        // Format 7: the potion guard and the decision rule of the agent as well.
+        boolean guard = false;
+        float[] rule = new float[10];
+        if (format == 7) {
+            guard = b();
+            for (int k = 0; k < 10; k++) {
+                rule[k] = (float) n();
+            }
+        }
+        int plansMade = 0, planTicks = 0, planTicksSame = 0, plansSame = 0, walkTicks = 0, walkSame = 0;
+        int firstPlan = -1, firstWalk = -1;
+        int plansTried = 0, ruleActs = 0;
+        double planFirstMs = 0.0, planMaxMs = 0.0, planSumMs = 0.0;
+        float mouseF1 = 1.0f;
         Random rng = new Random(1);
         Agent agent = null;
         Book book = null;
@@ -184,6 +321,7 @@ public final class AgentCheck {
                 duel.drinkWindowS = n();
                 double pingOwn = n(), pingOther = n(), cps = n();
                 float mouse = (float) n();
+                mouseF1 = mouse;
                 v(feet);
                 Arena arena = new Arena(duel.floorY, duel.arenaHalf, walls);
                 if (b()) {
@@ -203,8 +341,19 @@ public final class AgentCheck {
                     terrains++;
                 }
                 blocks = arena;
+                if (heal && duels == 0 && Integer.getInteger("warm", 0) > 0) {
+                    // As the mod does when the agent starts (-Dwarm=N plans).
+                    long w0 = System.nanoTime();
+                    FullHeal.warmUp(arena, feet, Integer.getInteger("warm", 0));
+                    System.out.println(String.format(java.util.Locale.ROOT, "warm-up: %.0f ms", (System.nanoTime() - w0) / 1e6));
+                }
                 agent = new Agent(pingOwn, pingOther, cps, mouse, feet);
-                agent.potionGuard = false;
+                agent.potionGuard = guard;
+                System.arraycopy(rule, 0, agent.potionRule, 0, 10);
+                agent.fullHeal = heal;
+                agent.fullHealS = healS;
+                agent.fullHealD = healD;
+                agent.fullHealRestore = healR;
                 book = new Book(feet);
                 duels++;
             }
@@ -250,6 +399,10 @@ public final class AgentCheck {
             if (!Arrays.equals(row, view.list())) {
                 throw new IllegalStateException("tick " + ticks + ": a view is not written as it was read");
             }
+            if (heal) {
+                walk(view.walk);
+                view.walkKnown = true;
+            }
             double[] told = counts(view);
             book.fill(view);
             if (Arrays.equals(told, counts(view))) {
@@ -289,16 +442,52 @@ public final class AgentCheck {
             for (int k = 0; k < heads; k++) {
                 action[k] = i();
             }
+            int tried = agent.healPlansTried, acts = agent.potionRuleActs;
+            long t0 = System.nanoTime();
             int[] got = agent.keys(view, blocks, duel, action, rng).list();
+            ruleActs += agent.potionRuleActs - acts;
+            if (agent.healPlansTried != tried) {
+                double ms = (System.nanoTime() - t0) / 1e6;
+                if (plansTried == 0) {
+                    planFirstMs = ms;
+                } else {
+                    planMaxMs = Math.max(planMaxMs, ms);
+                    planSumMs += ms;
+                }
+                plansTried++;
+            }
             int[] want = new int[got.length];
             for (int k = 0; k < want.length; k++) {
                 want[k] = i();
             }
-            if (Arrays.equals(got, want)) {
+            boolean keysOk = Arrays.equals(got, want);
+            if (keysOk) {
                 keysSame++;
             } else if (firstKeys < 0) {
                 firstKeys = ticks;
                 System.out.println("tick " + ticks + ": keys " + Arrays.toString(got) + ", the simulator's " + Arrays.toString(want) + ", for " + Arrays.toString(action));
+            }
+            if (heal) {
+                int pt = agent.healPlanTick();
+                int at = d.position();
+                int want0 = (int) d.get(at);
+                String pd = planDiff(agent);
+                if (want0 == 1) {
+                    plansMade++;
+                    if (pd.isEmpty()) {
+                        plansSame++;
+                    }
+                }
+                if (want0 > 0 || pt > 0) {
+                    planTicks++;
+                    if (pd.isEmpty() && keysOk) {
+                        planTicksSame++;
+                    }
+                }
+                if (!pd.isEmpty() && firstPlan < 0) {
+                    firstPlan = ticks;
+                    System.out.println("tick " + ticks + ":" + pd);
+                }
             }
             Keys pressed = new Keys();
             pressed.forward = want[0];
@@ -319,6 +508,22 @@ public final class AgentCheck {
             boolean threw = b(), threwPotion = b(), threwBall = b(), usedRod = b(), swung = b(), attacked = b();
             v(said);
             float saidYaw = (float) n(), saidPitch = (float) n();
+            if (heal) {
+                Walk after = walkAfter();
+                if (!view.usingItem && !after.usingItem && pressed.inv == 0 && !view.invOpen && !attacked) {
+                    Walk w = Walk.of(view);
+                    w.tick(blocks, pressed.forward, pressed.strafe, pressed.jump, pressed.sprintKey, pressed.dx, pressed.dy, mouseF1);
+                    w.usingItem = false;
+                    walkTicks++;
+                    String wd = walkDiff(w, after);
+                    if (wd.isEmpty()) {
+                        walkSame++;
+                    } else if (firstWalk < 0) {
+                        firstWalk = ticks;
+                        System.out.println("tick " + ticks + ": the client's tick made differently:" + wd);
+                    }
+                }
+            }
             book.ticked(swung, attacked, threw, threwPotion, threwBall, eye, said, saidYaw, saidPitch);
             agent.ticked(pressed, duel, feet, consuming, oppUsing && (oppItem == Inv.DRINK || oppItem == Inv.FOOD), threw, threwPotion);
             ticks++;
@@ -334,7 +539,19 @@ public final class AgentCheck {
         if (where.length() > 0) {
             System.out.println("numbers further off, and on how many ticks:" + where);
         }
-        if (keysSame != ticks || numbers != close || booksSame != ticks) {
+        if (heal) {
+            System.out.println("fullheal (gate S " + healS + ", D " + healD + ", restore " + healR + "): " + plansMade + " plans made, the same " + plansSame
+                + "; " + planTicks + " ticks with a plan under way, the same plan and keys on " + planTicksSame + "; the client's tick worked out on "
+                + walkTicks + ", the same to the last bit on " + walkSame);
+            if (format == 7) {
+                System.out.println("the decision rule (guard " + guard + ", " + Arrays.toString(rule) + ") changed the choice on " + ruleActs + " ticks");
+            }
+            if (plansTried > 0) {
+                System.out.println(String.format(java.util.Locale.ROOT, "plans worked out %d times: the first (cold) took %.1f ms, the rest %.2f ms on average and at most %.1f ms",
+                    plansTried, planFirstMs, plansTried > 1 ? planSumMs / (plansTried - 1) : 0.0, planMaxMs));
+            }
+        }
+        if (keysSame != ticks || numbers != close || booksSame != ticks || plansSame != plansMade || planTicksSame != planTicks || walkSame != walkTicks) {
             System.exit(1);
         }
     }

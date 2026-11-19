@@ -227,13 +227,211 @@ public final strictfp class Agent {
      */
     private static final float TWO_MISSING = 14f;
 
-    private int guardPotion(View v, int bar, int turns) {
+    /**
+     * A potion thrown with a turn is planned to give all eight points
+     * ({@link FullHeal}, the simulator's fullheal.rs): on the tick of the
+     * turn its pitch, and from then until the potion is due the movement
+     * keys, laid over the policy's. Only when the last hurt is at most
+     * {@link #fullHealS} ticks ago (or, with {@link #fullHealD} above 0,
+     * the other player at least that many blocks away), and only when the
+     * client has filled in {@link View#walk}. Off unless set.
+     */
+    public boolean fullHeal = false;
+    public int fullHealS = 4, fullHealD = 0;
+    /**
+     * How the view gets its pitch back after the throw (fullheal.rs,
+     * {@code restore_mode}): 1 on the click's tick to the pitch the policy
+     * chose for the turn plus its own turn of that tick, 2 on the tick
+     * after the click to the pitch before the turn, 3 on the click's tick
+     * to the policy's pitch, 4 (the default, as in the simulator) on the
+     * click's tick to the pitch before the turn: the server throws with the
+     * turn tick's view, so only that tick looks away.
+     */
+    public int fullHealRestore = 4;
+    /** The plan under way, its tick (0 the turn's), the pitch the policy chose for the turn's tick and the pitch from before it. */
+    private FullHeal.Plan healPlan;
+    private int planT;
+    private float planPitch, planPitch0;
+    /** How many times a plan has been worked out (for checks). */
+    public int healPlansTried;
+
+    /** The plan under way, null for none, and its tick (for checks). */
+    public FullHeal.Plan healPlan() {
+        return healPlan;
+    }
+
+    public int healPlanTick() {
+        return healPlan == null ? 0 : planT;
+    }
+
+    /**
+     * On the tick of the turn of a potion thrown with a turn: a plan that
+     * gives all eight points, if there is one; its pitch for the throw now.
+     */
+    private void healPlanStart(View v, Blocks blocks, boolean two, Keys inp) {
+        healPlan = null;
+        if (two || !v.walkKnown) {
+            return;
+        }
+        double dx = v.pos[0] - v.oPos[0], dz = v.pos[2] - v.oPos[2];
+        double d = Math.sqrt(dx * dx + dz * dz);
+        if (!FullHeal.gateOpen(fullHealS, fullHealD, v.ticksSinceHurt, d)) {
+            return;
+        }
+        FullHeal.PKey own = new FullHeal.PKey(inp.forward, inp.strafe, inp.sprintKey, inp.jump);
+        healPlansTried++;
+        FullHeal.Plan p = FullHeal.plan(Walk.of(v), blocks, inp.dx, own, carry);
+        if (p != null) {
+            // The pitch the policy chose for this tick and the one before
+            // the turn: the view goes back to one of them after the throw.
+            planPitch = FullHeal.pitchOf(v.pitch, inp.dy);
+            planPitch0 = v.pitch;
+            inp.dy = p.dy;
+            planT = 0;
+            healPlan = p;
+        }
+    }
+
+    /**
+     * The movement keys of the plan under way, laid over the policy's,
+     * until the potion is due or a hit has moved the player; and the pitch
+     * given back after the throw as {@link #fullHealRestore} says (by
+     * default on the click's tick, to the pitch from before the turn).
+     */
+    private void healPlanKeys(View v, Keys inp) {
+        FullHeal.Plan p = healPlan;
+        if (p == null) {
+            return;
+        }
+        int t = planT;
+        int r = fullHealRestore;
+        if (r == 1 && t == 1) {
+            inp.dy += counts(planPitch - v.pitch);
+        } else if (r == 2 && t == 2) {
+            inp.dy = counts(planPitch0 - v.pitch);
+        } else if (r == 3 && t == 1) {
+            inp.dy = counts(planPitch - v.pitch);
+        } else if (r == 4 && t == 1) {
+            inp.dy = counts(planPitch0 - v.pitch);
+        }
+        if (t >= p.len || (t > 0 && v.ticksSinceKb == 0)) {
+            healPlan = null;
+            return;
+        }
+        float yaw = (float) ((double) v.yaw + (double) inp.dx * (double) COUNT_DEG);
+        FullHeal.PKey k = FullHeal.keysNow(p, t, yaw);
+        inp.forward = k.fw;
+        inp.strafe = k.st;
+        inp.sprintKey = k.sprint;
+        inp.jump = k.jump;
+        planT++;
+    }
+
+    /**
+     * Of W, S, A, D and their pairs, the keys that take a player looking at
+     * yaw closest to the way dir (x and z, of length one), as forward and
+     * strafe (1, 0 or -1).
+     */
+    static int[] walkAlong(float yaw, double[] dir) {
+        float f = yaw * Geo.PI_F / 180.0f;
+        double sn = (double) Geo.sin(f), cs = (double) Geo.cos(f);
+        double best = -Double.MAX_VALUE;
+        int bf = 0, bs = 0;
+        for (int fw : new int[] {1, 0, -1}) {
+            for (int st : new int[] {0, 1, -1}) {
+                if (fw == 0 && st == 0) {
+                    continue;
+                }
+                double x = (double) st * cs - (double) fw * sn, z = (double) fw * cs + (double) st * sn;
+                double d = (x * dir[0] + z * dir[1]) / Math.sqrt(x * x + z * z);
+                if (d > best + 1e-9) {
+                    best = d;
+                    bf = fw;
+                    bs = st;
+                }
+            }
+        }
+        return new int[] {bf, bs};
+    }
+
+    /**
+     * The decision rule of the potions laid over the policy's (the
+     * simulator's potdecide {@code pd_bar}), each number 0 for off:
+     * 0 A_max: a potion asked for while the last hurt is between 1 A_lo and
+     * 2 A_hi own ticks ago, with more health than 3 A_hp, waits, up to A_max
+     * ticks in a row; 4 B_hp: with at most this much health, nothing of its
+     * own on the way and a potion at hand, a potion is thrown though none
+     * was asked for, as choice 5 B_bar of the hotbar (a turned one) at the
+     * pitch the policy chose; 6 C_hp: with at most this much health and
+     * nothing on the way, a turned single asked for becomes two; 7 D_hit: no
+     * potion while the last hurt is fewer than this many ticks ago. All off
+     * unless set.
+     */
+    public final float[] potionRule = new float[10];
+    /** Ticks in a row the rule has held back a potion asked for, and the ticks on which the rule changed the choice (for checks). */
+    private int ruleWait;
+    public int potionRuleActs;
+
+    private boolean ruleOn() {
+        for (float x : potionRule) {
+            if (x != 0.0f) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /** Own potions on their way: thrown and not shown yet, and in the air. */
+    private static int potionsOnWay(View v) {
         int onWay = v.potionsPending;
         for (View.Thrown t : v.thrown) {
             if (t.mine && t.kind == Inv.KIND_POTION) {
                 onWay++;
             }
         }
+        return onWay;
+    }
+
+    /** The hotbar choice after the rule ({@link #potionRule}) and then the guard ({@link #potionGuard}). */
+    private int decidePotion(View v, int bar, int turns) {
+        int asked = bar;
+        boolean pot = bar == 1 || bar >= BAR_TURN;
+        float[] r = potionRule;
+        float hp = v.health;
+        int ts = v.ticksSinceHurt;
+        if (r[0] > 0.0f && pot) {
+            boolean inside = (float) ts >= r[1] && (float) ts <= r[2] && hp > r[3];
+            if (inside && (float) ruleWait < r[0]) {
+                ruleWait++;
+                potionRuleActs++;
+                return 0;
+            }
+            ruleWait = 0;
+        } else if (r[0] > 0.0f && !((float) ts >= r[1] && (float) ts <= r[2])) {
+            ruleWait = 0;
+        }
+        if (r[7] > 0.0f && pot && (float) ts < r[7]) {
+            potionRuleActs++;
+            return 0;
+        }
+        if (r[4] > 0.0f && !pot && hp <= r[4] && v.potions != 0 && potionsOnWay(v) == 0 && bar != 2 && bar != 3 && bar != 5 && bar != 6) {
+            bar = Math.min(Math.max((int) r[5], BAR_TURN), BAR_TURN + turns - 1);
+        }
+        pot = bar == 1 || bar >= BAR_TURN;
+        if (r[6] > 0.0f && pot && bar >= BAR_TURN && bar < BAR_TURN + turns && hp <= r[6] && potionsOnWay(v) == 0) {
+            bar += turns;
+        }
+        if (bar != asked) {
+            potionRuleActs++;
+        }
+        if (potionGuard && pot) {
+            bar = guardPotion(v, bar, turns);
+        }
+        return bar;
+    }
+
+    private int guardPotion(View v, int bar, int turns) {
+        int onWay = potionsOnWay(v);
         float missing = MAX_HEALTH - v.health - POTION_HEAL * onWay;
         if (missing < POTION_HEAL && onWay > 0) {
             return 0;
@@ -347,8 +545,14 @@ public final strictfp class Agent {
             }
         }
         int turns = BAR_TURNS.length;
-        if (potionGuard && potionStage == 0 && turned == 0 && (bar == 1 || bar >= BAR_TURN)) {
-            bar = guardPotion(v, bar, turns);
+        if ((potionGuard || ruleOn()) && potionStage == 0 && turned == 0) {
+            int asked = bar;
+            bar = decidePotion(v, bar, turns);
+            if (bar >= BAR_TURN && asked < BAR_TURN && asked != 1) {
+                // A potion the rule asks for: the right button let go on the
+                // tick of the turn, so that the click is a press of its own.
+                inp.useItem = false;
+            }
         }
         int turn = bar >= BAR_TURN ? BAR_TURNS[Math.min(bar - BAR_TURN, 2 * turns - 1) % turns] : 0;
         boolean two = bar >= BAR_TURN + turns;
@@ -361,10 +565,14 @@ public final strictfp class Agent {
         potionKeys(v, bar == 1 || turn != 0, turn, pitch, inp);
         if (turn != 0 && turned == 1) {
             twice = two;
+            if (potionStage == 1 && fullHeal) {
+                healPlanStart(v, blocks, two, inp);
+            }
         }
         pearlKeys(v, action.length > 8 && action[8] != 0, inp);
         toolKeys(v, action.length > 12 ? action[12] : 0, inp);
         limitClicks(inp, rng);
+        healPlanKeys(v, inp);
         return inp;
     }
 

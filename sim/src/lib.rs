@@ -9,6 +9,7 @@ pub mod bot;
 pub mod client;
 pub mod env;
 pub mod ffi;
+pub mod fullheal;
 pub mod living;
 pub mod mth;
 pub mod net;
