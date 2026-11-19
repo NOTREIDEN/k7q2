@@ -85,7 +85,24 @@ pub struct BotParams {
     /// into its potion.
     pub pot_turn: bool,
     pub pot_run: i32,
+    /// It spaces its combos, as good players do: after a hit of its own,
+    /// while the opponent cannot be hit again (its hurt time), it keeps
+    /// out of the opponent's reach, letting go of W or backing off, and
+    /// comes in again with a fresh sprint for the last `SPACE_IN` ticks of
+    /// it, so that its next hit lands as early as the game allows and the
+    /// opponent has had it within reach as little as it could manage. A
+    /// player who sprints back at it straight away catches it backing off
+    /// and can hit it first; one who waits for the next hit is comboed.
+    pub spacer: bool,
 }
+
+/// What a spacer (`BotParams::spacer`) keeps between itself and the
+/// opponent, feet to feet: three blocks of reach from the eye reach a
+/// hitbox whose middle is this much further away, and a little for the
+/// opponent's view of it being late. And the ticks of hurt time left at
+/// which it comes in again.
+pub const SPACE_OUT: f64 = 3.8;
+pub const SPACE_IN: i32 = 4;
 
 impl BotParams {
     pub fn level(level: u8) -> BotParams {
@@ -114,6 +131,7 @@ impl BotParams {
                 carry: false,
                 pot_turn: false,
                 pot_run: 0,
+                spacer: false,
             },
             2 => BotParams {
                 level,
@@ -139,6 +157,7 @@ impl BotParams {
                 carry: false,
                 pot_turn: false,
                 pot_run: 0,
+                spacer: false,
             },
             3 => BotParams {
                 level,
@@ -164,6 +183,7 @@ impl BotParams {
                 carry: false,
                 pot_turn: false,
                 pot_run: 0,
+                spacer: false,
             },
             _ => BotParams {
                 level: 4,
@@ -189,6 +209,7 @@ impl BotParams {
                 carry: false,
                 pot_turn: false,
                 pot_run: 0,
+                spacer: false,
             },
         }
     }
@@ -754,11 +775,19 @@ fn act_flat(c: &Client, world: &World, cfg: &ClientCfg, p: &BotParams, st: &mut 
     if p.jump_reset && lp.hurt_time == 10 && lp.l.body.on_ground {
         inp.jump = true;
     }
+    // A spacer that hit last, while its hit still keeps the opponent from
+    // being hit: out of the opponent's reach until its last ticks, or at
+    // the end of its own reach if that is longer than three blocks.
+    let keep = SPACE_OUT.max(c.edge.reach + 0.25);
+    let spacing = p.spacer && rp.hurt_time > SPACE_IN && lp.hurt_time < rp.hurt_time && hdist < keep;
+    if spacing {
+        inp.forward = if hdist < keep - 0.3 { -1 } else { 0 };
+    }
     // A presser on an opponent that is hurt or healing itself: straight
     // at it, in jumps while it is out of reach.
     if p.presser && (rp.health <= 12.0 || rp.item == Item::Potion || c.thrown.iter().any(|e| e.kind == Kind::Potion && !e.mine)) {
         inp.strafe = 0;
-        if hdist > 3.2 && lp.l.body.on_ground {
+        if hdist > 3.2 && lp.l.body.on_ground && !spacing {
             inp.jump = true;
         }
     }

@@ -103,12 +103,12 @@ fn accuracy_is_split_into_what_it_gave_missed_and_overhealed() {
 }
 
 #[test]
-fn the_stats_are_written_at_the_end_in_order() {
+fn the_stats_are_written_after_the_tool_counts_in_order() {
     let (e, _) = pot_down(params(15.0), 1);
     let mut out = vec![0.0f64; pvpsim::env::STATS_DIM];
     e.episode().write(&mut out);
-    let n = out.len();
-    assert_eq!(&out[n - 8..], &[5.0, 0.0, 1.0, 0.0, 2.0, 0.0, 1.0, 0.0]);
+    // Right after tool_uses and tool_hits (four numbers ending at 111).
+    assert_eq!(&out[111..119], &[5.0, 0.0, 1.0, 0.0, 2.0, 0.0, 1.0, 0.0]);
 }
 
 #[test]
