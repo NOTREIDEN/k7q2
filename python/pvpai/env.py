@@ -44,7 +44,7 @@ PARAM = {
     "pearl_spam_prob": 204, "pearl_spam_pearls": 205,
     "pot_relief_hp": 206, "pot_relief": 207, "insane_lessons": 208, "w_sip_near": 209, "sip_near_dist": 210, "bot_trader": 211, "trade_block": 212, "trade_crit": 213, "trade_heal": 214,
     "w_comboed": 179, "comboed_free": 180, "comboed_cap": 181, "combo_gap": 182, "bot_spacer": 183,
-    "w_pot_stock": 215, "pot_stock_cap": 216, "extras_bot_only": 217, "crit_prob": 218, "opp_kb_v": 219, "w_late": 240, "late_pot_free": 241, "w_hurt_click": 242, "insane_ping_min_ms": 244, "insane_ping_max_ms": 245, "full_heal": 250, "full_heal_s": 251, "full_heal_d": 252, "full_heal_r": 253, "opp_sprint_reset": 260, "opp_keep_sprint": 261, "insane_kb_min": 262, "insane_kb_max": 263, "insane_reach_min": 264,
+    "w_pot_stock": 215, "pot_stock_cap": 216, "extras_bot_only": 217, "crit_prob": 218, "opp_kb_v": 219, "w_late": 240, "late_pot_free": 241, "w_hurt_click": 242, "insane_ping_min_ms": 244, "insane_ping_max_ms": 245, "full_heal": 250, "full_heal_s": 251, "full_heal_d": 252, "full_heal_r": 253, "opp_sprint_reset": 260, "opp_keep_sprint": 261, "insane_kb_min": 262, "insane_kb_max": 263, "insane_reach_min": 264, "w_far_pitch": 270, "far_pitch_deg": 271, "far_pitch_dist": 272, "block_fail_prob": 275, "block_fail": 276,
     "bot_select": 225, "select_wait": 226, "select_block": 227, "bot_punish": 228, "bot_pot_exact": 220,
     "pearl_punish": 230, "pearl_punish_hp": 231, "pearl_punish_far": 232, "pearl_punish_rush": 233, "pearl_punish_noise": 234,
 }

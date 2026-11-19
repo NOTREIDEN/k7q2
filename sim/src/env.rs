@@ -7,7 +7,7 @@
 //! out of phase and each must see what reached it before its own tick. Each
 //! call returns the observation of the agent that acts next, together with
 //! the reward that agent earned since its previous action.
-use crate::aabb::{dist, V3};
+use crate::aabb::{dist, V3, EYE_HEIGHT};
 use crate::agent::{aim_error, clip, local, Agent, Duel};
 pub use crate::agent::{decode_action, ACT_DIMS, ACT_HEADS, BAR_TURN, BAR_TURNS, FLICK_BINS, HURT_AT, HURT_WINDOW, OBS_DIM, PITCH_BINS, YAW_BINS};
 use crate::bot::{self, BotParams, BotState};
@@ -614,6 +614,24 @@ pub struct Params {
     /// player cannot take a full hit yet (`ServerPlayer::hurt_clicks`): its
     /// own client stopped the sprint and slowed down for nothing.
     pub w_hurt_click: f32,
+    /// The cost per tick of looking up past `far_pitch_deg` degrees while
+    /// the other player is more than `far_pitch_dist` blocks away
+    /// (horizontally) and nothing has the keys or the view: no throw,
+    /// pearl, drink, meal, inventory or turn for a potion. It grows from 0
+    /// at the limit to all of it straight up, and the limit moves up to
+    /// ten degrees above the other player's feet when it is that high
+    /// (`Env::far_pitch`). Off at 0. Food that stays full and Speed that
+    /// lasts leave long idle stretches far away, where nothing else stops
+    /// the view from creeping up.
+    pub w_far_pitch: f32,
+    pub far_pitch_deg: f64,
+    pub far_pitch_dist: f64,
+    /// The share of duels on a server that ignores some sword blocks, and
+    /// in them the chance that a hit on a raised sword is not cut by it
+    /// (`ServerCfg::block_fail`). Off at 0. minemen.club ignores about 45%
+    /// of the blocks a client holds at the right time.
+    pub block_fail_prob: f64,
+    pub block_fail: f64,
     /// The ping of the hardest bot, drawn per duel between these (a bot on
     /// the server itself by default; a cheater far from it, or with a
     /// backtrack on top, above that).
@@ -908,6 +926,11 @@ impl Default for Params {
             w_late: 0.0,
             late_pot_free: 8.0,
             w_hurt_click: 0.0,
+            w_far_pitch: 0.0,
+            far_pitch_deg: 40.0,
+            far_pitch_dist: 10.0,
+            block_fail_prob: 0.0,
+            block_fail: 0.45,
             insane_ping_min_ms: 0.0,
             insane_ping_max_ms: 60.0,
             full_heal: 0.0,
@@ -1191,6 +1214,11 @@ impl Params {
             262 => self.insane_kb[0] = v,
             263 => self.insane_kb[1] = v,
             264 => self.insane_reach_min = v,
+            270 => self.w_far_pitch = v as f32,
+            271 => self.far_pitch_deg = v,
+            272 => self.far_pitch_dist = v,
+            275 => self.block_fail_prob = v,
+            276 => self.block_fail = v,
             _ => return false,
         }
         true
@@ -2063,6 +2091,9 @@ pub fn new_duel(p: &Params, rng: &mut Rng, mode: Mode) -> (Match, [f64; 2], BotP
         scfg.potion_strict = p.pot_strict.clamp(0.0, 1.0) as f32;
     }
     scfg.throw_carry = p.throw_carry_prob > 0.0 && rng.chance(p.throw_carry_prob);
+    if p.block_fail_prob > 0.0 && rng.chance(p.block_fail_prob) {
+        scfg.block_fail = p.block_fail.clamp(0.0, 1.0) as f32;
+    }
     // The tool of the kits, drawn only when asked for.
     let mut tool = Item::Empty;
     if !scfg.throw_carry && p.tool_prob > 0.0 && rng.chance(p.tool_prob) {
@@ -3043,6 +3074,34 @@ impl Env {
         dist(eye, ebb.closest_point(eye)) <= 3.0
     }
 
+    /// How far player `id` looks up past `Params::far_pitch_deg`, as a
+    /// share of the rest of the way to straight up, while the other player
+    /// is more than `Params::far_pitch_dist` blocks away and nothing has
+    /// the keys or the view (`Params::w_far_pitch`). The limit is at least
+    /// ten degrees above the other player's feet, so that one high up is
+    /// still watched for free.
+    pub fn far_pitch(&self, id: usize) -> f32 {
+        let p = &self.params;
+        let lp = &self.m.c[id].lp;
+        let lim = p.far_pitch_deg.clamp(0.0, 89.0);
+        let pitch = lp.l.pitch as f64;
+        if pitch >= -lim {
+            return 0.0;
+        }
+        let (a, b) = (&self.m.s.p[id].l.body.pos, &self.m.s.p[1 - id].l.body.pos);
+        let dh = (a[0] - b[0]).hypot(a[2] - b[2]);
+        if dh <= p.far_pitch_dist || dh <= 0.0 {
+            return 0.0;
+        }
+        let ag = &self.ag[id];
+        if ag.busy() || ag.turned() || lp.inv_open || self.m.s.p[id].using_item {
+            return 0.0;
+        }
+        let up = (b[1] - a[1] - EYE_HEIGHT).atan2(dh).to_degrees();
+        let free = lim.max(up + 10.0).min(89.0);
+        ((-pitch - free) / (90.0 - free)).clamp(0.0, 1.0) as f32
+    }
+
     /// Statistics of the episode under way.
     pub fn episode(&self) -> &Stats {
         &self.ep
@@ -3131,6 +3190,9 @@ impl Env {
                 r -= p.w_speed_refill;
                 self.ep.speed_waste[id] += 1.0;
             }
+        }
+        if p.w_far_pitch != 0.0 {
+            r -= p.w_far_pitch * self.far_pitch(id);
         }
         if self.m.c[id].lp.inv_open && safe {
             self.ep.inv_hurt[id] += 1.0;

@@ -134,6 +134,11 @@ pub struct ServerCfg {
     /// its invulnerable ticks. The plain game drops such a hit, and they
     /// fly on through.
     pub zero_hits: bool,
+    /// The chance that a hit on a player whose sword is up on the server
+    /// is not cut by it. 0 is the game. Some servers ignore about half of
+    /// the blocks a client holds at the right time, with no rule a player
+    /// can see (`Params::block_fail`).
+    pub block_fail: f32,
 }
 
 impl ServerCfg {
@@ -166,6 +171,7 @@ impl Default for ServerCfg {
             potion_strict: 1.0,
             throw_carry: false,
             zero_hits: false,
+            block_fail: 0.0,
         }
     }
 }
@@ -2125,7 +2131,7 @@ impl Server {
     /// health that was taken in the end.
     fn damage_entity(&mut self, v: usize, mut amount: f32, src: Source, rng: &mut Rng) -> (f32, f32) {
         let direct = matches!(src, Source::Player(_));
-        if direct && self.p[v].blocking() && amount > 0.0 {
+        if direct && self.p[v].blocking() && amount > 0.0 && !(self.cfg.block_fail > 0.0 && rng.chance(self.cfg.block_fail as f64)) {
             amount = (1.0f32 + amount) * 0.5f32;
         }
         let blocked = amount;
