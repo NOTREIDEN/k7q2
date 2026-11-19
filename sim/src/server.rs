@@ -554,6 +554,10 @@ pub struct ServerPlayer {
     /// Stands for a client that takes no knockback from hits: it is sent
     /// no velocity for them and stays where it is.
     pub no_kb: bool,
+    /// The cooldown plugin leaves this player alone (`pearl_cooldown` is
+    /// for everyone else): it may throw a pearl whenever it likes, as the
+    /// game itself has it.
+    pub no_pearl_cd: bool,
 }
 
 /// `chunkCoordX/Y/Z` for a position.
@@ -631,6 +635,7 @@ impl ServerPlayer {
             pearl_wait: 0,
             immortal: false,
             no_kb: false,
+            no_pearl_cd: false,
         }
     }
 
@@ -1025,14 +1030,14 @@ impl Server {
                 }
             }
             Item::Pearl => {
-                if self.cfg.pearl_cooldown > 0 && self.p[i].pearl_wait > 0 {
+                if self.cfg.pearl_cooldown > 0 && !self.p[i].no_pearl_cd && self.p[i].pearl_wait > 0 {
                     // The plugin cancels the click and sends the inventory
                     // again, so that the client gets its pearl back.
                     out.push((i, S2C::WindowItems(self.p[i].bar(), self.p[i].rows)));
                     out.push((i, S2C::Cursor));
                     return;
                 }
-                self.p[i].pearl_wait = self.cfg.pearl_cooldown;
+                self.p[i].pearl_wait = if self.p[i].no_pearl_cd { 0 } else { self.cfg.pearl_cooldown };
                 // ItemEnderPearl.onItemRightClick
                 self.p[i].pearls -= 1;
                 self.throws[i] += 1;
