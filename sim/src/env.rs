@@ -604,6 +604,18 @@ pub struct Params {
     /// the horizontal knockback (`Edge::kb_taken`) takes that same share
     /// of the vertical one, as a Velocity cheat does.
     pub opp_kb_v: f64,
+    /// Share of the duels against a scripted bot of level 3 or more (the
+    /// hardest one too) in which it does not hit into a block
+    /// (`BotParams::select`): it holds its click for up to `select_wait`
+    /// ticks while it sees the opponent block, and blocks itself
+    /// meanwhile in `select_block` of those duels. Zero turns it off.
+    pub bot_select: f64,
+    pub select_wait: f64,
+    pub select_block: f64,
+    /// Share of the duels against a scripted bot of level 3 or more in
+    /// which it punishes an opponent that drinks, eats or has a potion in
+    /// hand (`BotParams::punish`): at it at a run, no block, critical hits.
+    pub bot_punish: f64,
     /// A potion that breaks on its thrower while it has this much health
     /// or less (before the potion's own) pays only `pot_relief` of the
     /// accuracy costs (`w_waste`, `w_miss`, `w_pot_far`): a potion thrown
@@ -832,6 +844,10 @@ impl Default for Params {
             pearl_spam_prob: 0.0,
             crit_prob: 0.0,
             opp_kb_v: 0.0,
+            bot_select: 0.0,
+            select_wait: 8.0,
+            select_block: 0.5,
+            bot_punish: 0.0,
             pearl_spam_pearls: 16.0,
             pot_relief_hp: 0.0,
             pot_relief: 1.0,
@@ -1071,6 +1087,10 @@ impl Params {
             217 => self.extras_bot_only = v,
             218 => self.crit_prob = v,
             219 => self.opp_kb_v = v,
+            225 => self.bot_select = v,
+            226 => self.select_wait = v,
+            227 => self.select_block = v,
+            228 => self.bot_punish = v,
             _ => return false,
         }
         true
@@ -2171,6 +2191,16 @@ pub fn new_duel(p: &Params, rng: &mut Rng, mode: Mode) -> (Match, [f64; 2], BotP
         bot.trade_block = p.trade_block.clamp(0.0, 1.0);
         bot.trade_crit = p.trade_crit.clamp(0.0, 1.0);
         bot.trade_heal = p.trade_heal.clamp(0.0, 19.0);
+    }
+    // Drawn only when asked for, so that duels without them come out as
+    // they did.
+    if p.bot_select > 0.0 && mode == Mode::Bot && bot.level >= 3 && !bot.circler && rng.chance(p.bot_select) {
+        bot.select = true;
+        bot.select_wait = p.select_wait.clamp(0.0, 40.0).round() as i32;
+        bot.select_block = rng.chance(p.select_block);
+    }
+    if p.bot_punish > 0.0 && mode == Mode::Bot && bot.level >= 3 && !bot.circler {
+        bot.punish = rng.chance(p.bot_punish);
     }
     bot.carry = m.s.cfg.throw_carry;
     // Drawn only when asked for, so that duels without it come out as they

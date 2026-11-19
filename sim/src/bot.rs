@@ -118,6 +118,20 @@ pub struct BotParams {
     /// drawn per duel) instead of where its kind does, if more than 0: the
     /// best players do not wait to be one critical hit from death.
     pub trade_heal: f64,
+    /// It does not hit into a block (`Params::bot_select`): when it may
+    /// hurt the opponent again but sees it blocking, it holds its click
+    /// for up to `select_wait` ticks, until it sees the block go down (to
+    /// hit, the opponent has to let go of it), and hits then, for the
+    /// whole damage; with `select_block`, it blocks itself while it
+    /// waits, so that the opponent's own hit takes half.
+    pub select: bool,
+    pub select_wait: i32,
+    pub select_block: bool,
+    /// It punishes (`Params::bot_punish`): while the opponent drinks, eats
+    /// or has a potion in hand it cannot hit back and is slow, so the bot
+    /// goes straight at it at a run, in jumps from out of reach, never
+    /// blocks, and jumps in reach to land each hit falling (critical).
+    pub punish: bool,
 }
 
 /// What a spacer (`BotParams::spacer`) keeps between itself and the
@@ -179,6 +193,10 @@ impl BotParams {
                 trade_block: 0.0,
                 trade_crit: 0.0,
                 trade_heal: 0.0,
+                select: false,
+                select_wait: 0,
+                select_block: false,
+                punish: false,
             },
             2 => BotParams {
                 level,
@@ -210,6 +228,10 @@ impl BotParams {
                 trade_block: 0.0,
                 trade_crit: 0.0,
                 trade_heal: 0.0,
+                select: false,
+                select_wait: 0,
+                select_block: false,
+                punish: false,
             },
             3 => BotParams {
                 level,
@@ -241,6 +263,10 @@ impl BotParams {
                 trade_block: 0.0,
                 trade_crit: 0.0,
                 trade_heal: 0.0,
+                select: false,
+                select_wait: 0,
+                select_block: false,
+                punish: false,
             },
             _ => BotParams {
                 level: 4,
@@ -272,6 +298,10 @@ impl BotParams {
                 trade_block: 0.0,
                 trade_crit: 0.0,
                 trade_heal: 0.0,
+                select: false,
+                select_wait: 0,
+                select_block: false,
+                punish: false,
             },
         }
     }
@@ -359,6 +389,8 @@ pub struct BotState {
     /// last hit: whether it blocks and whether it jumps for a critical hit.
     trade_block: bool,
     trade_crit: bool,
+    /// A selector's (`BotParams::select`) ticks of holding its click.
+    sel_wait: i32,
 }
 
 fn gauss(rng: &mut Rng) -> f64 {
@@ -956,6 +988,21 @@ fn act_flat(c: &Client, world: &World, cfg: &ClientCfg, p: &BotParams, st: &mut 
             inp.jump = true;
         }
     }
+    // A punisher on an opponent that cannot hit back (drinking, eating, a
+    // potion in hand): straight at it at a run, in jumps while out of
+    // reach, without a block; in reach, a jump timed so that its next hit
+    // lands falling.
+    let helpless = (rp.using && matches!(rp.item, Item::Drink | Item::Food)) || rp.item == Item::Potion;
+    if p.punish && helpless && st.pearl_stage == 0 && st.potion_stage == 0 && st.use_stage == 0 && lp.held == SLOT_SWORD {
+        inp.strafe = 0;
+        inp.forward = if hdist > 0.8 { 1 } else { 0 };
+        inp.sprint_key = true;
+        inp.use_item = false;
+        st.block_left = 0;
+        st.wtap_left = 0;
+        let crit_at = (TRADE_JUMP_AT - 2..=TRADE_JUMP_AT).contains(&rp.hurt_time);
+        inp.jump = lp.l.body.on_ground && (hdist > 3.2 || crit_at);
+    }
 
     // A runner that is hurt runs from the opponent until it is healed or
     // out of potions, which it throws ahead of itself as it goes (below).
@@ -989,6 +1036,22 @@ fn act_flat(c: &Client, world: &World, cfg: &ClientCfg, p: &BotParams, st: &mut 
     let pk = c.pick_ray(world, new_pitch, ray_yaw);
     if !st.fleeing && pk.entity && rng.chance(p.click_prob) {
         inp.attack = true;
+    }
+    // A selector does not hit into a block: with the opponent's hurt time
+    // over and its sword up, it holds the click (and blocks, if it does)
+    // until it sees the sword go down, `select_wait` ticks at most.
+    if p.select {
+        let shield = rp.using && rp.item == Item::Sword;
+        let free = st.pearl_stage == 0 && st.potion_stage == 0 && st.use_stage == 0 && lp.held == SLOT_SWORD && !st.fleeing;
+        if free && shield && rp.hurt_time <= 1 && st.sel_wait < p.select_wait && hdist < TRADE_NEAR {
+            st.sel_wait += 1;
+            inp.attack = false;
+            if p.select_block && hdist < TRADE_BLOCK_NEAR {
+                inp.use_item = true;
+            }
+        } else if !shield || rp.hurt_time > 1 {
+            st.sel_wait = 0;
+        }
     }
 
     // Pearls. The server throws along the view it last heard of and from
