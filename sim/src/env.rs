@@ -397,6 +397,11 @@ pub struct Params {
     /// hotbar or the inventory, the rest in proportion to how many, up to
     /// six.
     pub w_drop: f32,
+    /// Share of the duels fought in a smaller arena, its half side drawn
+    /// in whole blocks from `arena_half_min` to `arena_half`: walls and
+    /// corners close by, as in the arenas of many servers.
+    pub small_arena_prob: f64,
+    pub arena_half_min: f64,
     /// Taken, in hits, from the thrower of a pearl when it throws it, and
     /// given back if the other player dies within `pearl_kill_s` seconds:
     /// a pearl is for a kill, not for its own sake. It never pays more
@@ -626,6 +631,8 @@ impl Default for Params {
             gank_max: 1.0,
             w_death: 0.0,
             w_drop: 0.0,
+            small_arena_prob: 0.0,
+            arena_half_min: 8.0,
             w_pearl_cost: 0.0,
             pearl_kill_s: 10.0,
             drop_prob: 0.0,
@@ -801,6 +808,8 @@ impl Params {
             138 => self.gank_prob = v,
             139 => self.w_death = v as f32,
             176 => self.w_drop = v as f32,
+            177 => self.small_arena_prob = v,
+            178 => self.arena_half_min = v,
             140 => self.gank_max = v,
             141 => self.w_pearl_cost = v as f32,
             142 => self.pearl_kill_s = v,
@@ -1336,8 +1345,14 @@ pub fn new_match(p: &Params, rng: &mut Rng, mode: Mode) -> (Match, [f64; 2], Bot
 /// A duel with newly drawn conditions, and the lesson it starts as (0:
 /// none; see `Params::lessons`).
 pub fn new_duel(p: &Params, rng: &mut Rng, mode: Mode) -> (Match, [f64; 2], BotParams, u8) {
-    let mut world = World::arena(p.floor_y, p.arena_half, p.walls);
-    let lim = (p.arena_half - 2.0).max(1.0);
+    // Drawn only when asked for, so that duels come out as they did.
+    let half = if p.small_arena_prob > 0.0 && rng.chance(p.small_arena_prob) {
+        rng.range(p.arena_half_min.min(p.arena_half), p.arena_half).round()
+    } else {
+        p.arena_half
+    };
+    let mut world = World::arena(p.floor_y, half, p.walls);
+    let lim = (world.half - 2.0).max(1.0);
     // Drawn only when lessons are on, so that duels without them come out
     // as they always did.
     let offered = if mode == Mode::Bot { 511 } else { 495 };
@@ -1379,7 +1394,7 @@ pub fn new_duel(p: &Params, rng: &mut Rng, mode: Mode) -> (Match, [f64; 2], BotP
     if lesson == 7 {
         // In a corner, as near the two walls as a hit would push it, with
         // the other player on the side the arena is on.
-        let h = p.arena_half;
+        let h = world.half;
         let side = |rng: &mut Rng| if rng.chance(0.5) { 1.0 } else { -1.0 };
         let (sx, sz) = (side(rng), side(rng));
         a = [sx * (h - rng.range(0.4, 2.0)), p.floor_y, sz * (h - rng.range(0.4, 2.0))];
@@ -2238,7 +2253,7 @@ impl Env {
     fn duel(&self) -> Duel {
         let cfg = &self.m.s.cfg;
         Duel {
-            arena_half: self.params.arena_half,
+            arena_half: self.m.world.half,
             floor_y: self.params.floor_y,
             center: [0.0, 0.0],
             real_health: !cfg.infinite_health,
@@ -2730,7 +2745,7 @@ impl Env {
         let g = 2 * VIEW_PLAYER;
         o[g] = self.ticks_left as f32;
         o[g + 1] = self.ep_len as f32;
-        o[g + 2] = self.params.arena_half as f32;
+        o[g + 2] = self.m.world.half as f32;
         o[g + 3] = self.params.floor_y as f32;
         o[g + 4] = self.ping_ms[0] as f32;
         o[g + 5] = self.ping_ms[1] as f32;
