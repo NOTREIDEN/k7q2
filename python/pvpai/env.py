@@ -37,7 +37,7 @@ PARAM = {
     "lesson_prob": 105, "lessons": 106, "lesson_dist_min": 107, "lesson_dist_max": 108,
     "drink_window_s": 109, "w_miss": 110, "w_pot_time": 111, "bot_runner": 112,
     "extreme_share": 113, "w_shake": 114, "pot_strict_prob": 115, "pot_strict": 116,
-    "w_gift": 117, "w_hungry": 118, "w_slow": 119, "drinks_stowed": 120, "bot_presser": 121, "w_inv_near": 122, "inv_near_dist": 123, "league_steal": 124, "throw_carry_prob": 125, "teach": 126, "w_speed_refill": 127, "insane_prob": 128, "w_pearl_next": 129, "terrain_prob": 130, "terrain_amount": 131, "retry_prob": 132, "terrain_gap_prob": 133, "w_hp_pot": 134, "hp_pot_scale": 135, "opp_strength_prob": 136, "opp_strength_max": 137, "gank_prob": 138, "w_death": 139, "gank_max": 140, "w_pearl_cost": 141, "pearl_kill_s": 142, "drop_prob": 143, "drop_min": 144, "drop_max": 145, "drill_prob": 146, "drill_self": 147, "drill_gankers": 148, "drill_strength_max": 149, "drill_seconds": 150, "combo_cap": 151, "web_prob": 152, "web_amount": 153, "web_trap_prob": 154, "food_full": 155, "w_full": 156, "w_pearl_low": 157, "pearl_low_hp": 158, "insane_reach_max": 159, "w_sip_hit": 160, "fall_start_prob": 161, "fall_start_min": 162, "fall_start_max": 163, "tiny_kb_prob": 164, "tiny_kb_h_min": 165, "tiny_kb_h_max": 166, "tiny_kb_v_min": 167, "tiny_kb_v_max": 168,
+    "w_gift": 117, "w_hungry": 118, "w_slow": 119, "drinks_stowed": 120, "bot_presser": 121, "w_inv_near": 122, "inv_near_dist": 123, "league_steal": 124, "throw_carry_prob": 125, "teach": 126, "w_speed_refill": 127, "insane_prob": 128, "w_pearl_next": 129, "terrain_prob": 130, "terrain_amount": 131, "retry_prob": 132, "terrain_gap_prob": 133, "w_hp_pot": 134, "hp_pot_scale": 135, "opp_strength_prob": 136, "opp_strength_max": 137, "gank_prob": 138, "w_death": 139, "gank_max": 140, "w_pearl_cost": 141, "pearl_kill_s": 142, "drop_prob": 143, "drop_min": 144, "drop_max": 145, "drill_prob": 146, "drill_self": 147, "drill_gankers": 148, "drill_strength_max": 149, "drill_seconds": 150, "combo_cap": 151, "web_prob": 152, "web_amount": 153, "web_trap_prob": 154, "food_full": 155, "w_full": 156, "w_pearl_low": 157, "pearl_low_hp": 158, "insane_reach_max": 159, "w_sip_hit": 160, "fall_start_prob": 161, "fall_start_min": 162, "fall_start_max": 163, "tiny_kb_prob": 164, "tiny_kb_h_min": 165, "tiny_kb_h_max": 166, "tiny_kb_v_min": 167, "tiny_kb_v_max": 168, "w_drop": 176,
 }
 
 STAT_NAMES = [
@@ -56,6 +56,7 @@ STAT_NAMES = [
     "pot_after0", "pot_after1", "off0", "off1",
     "refills0", "refills1", "inv_opens0", "inv_opens1", "inv_ticks0", "inv_ticks1", "inv_hit0", "inv_hit1",
     "shake0", "shake1", "speed_waste0", "speed_waste1", "inv_hurt0", "inv_hurt1", "pearl_sense0", "pearl_sense1", "void0", "void1", "terrain_t0", "terrain_t1", "retries", "drills", "drill_deaths", "pearl_low0", "pearl_low1", "not_full0", "not_full1",
+    "drops0", "drops1",
 ]
 
 # Per-player fields of VecEnv.view(), then the fields that follow both players.

@@ -35,7 +35,7 @@ pub const FOOD_TO_SPRINT: i32 = 6;
 pub const SHAKE_DEG: f32 = 6.0;
 pub const SHAKE_TICKS: i32 = 2;
 pub const PRIV_DIM: usize = 71;
-pub const STATS_DIM: usize = 105;
+pub const STATS_DIM: usize = 107;
 /// Floats per player and in total written by `Env::write_view`.
 pub const VIEW_PLAYER: usize = 45;
 pub const VIEW_DIM: usize = 2 * VIEW_PLAYER + 24;
@@ -392,6 +392,11 @@ pub struct Params {
     /// What dying costs on top of losing the duel (`w_win`): not dying is
     /// worth more than killing.
     pub w_death: f32,
+    /// What dying with healing potions left costs on top of that (a drop,
+    /// dying without having potted): half of it for any potion left in the
+    /// hotbar or the inventory, the rest in proportion to how many, up to
+    /// six.
+    pub w_drop: f32,
     /// Taken, in hits, from the thrower of a pearl when it throws it, and
     /// given back if the other player dies within `pearl_kill_s` seconds:
     /// a pearl is for a kill, not for its own sake. It never pays more
@@ -607,6 +612,7 @@ impl Default for Params {
             gank_prob: 0.0,
             gank_max: 1.0,
             w_death: 0.0,
+            w_drop: 0.0,
             w_pearl_cost: 0.0,
             pearl_kill_s: 10.0,
             drop_prob: 0.0,
@@ -776,6 +782,7 @@ impl Params {
             137 => self.opp_strength_max = v,
             138 => self.gank_prob = v,
             139 => self.w_death = v as f32,
+            176 => self.w_drop = v as f32,
             140 => self.gank_max = v,
             141 => self.w_pearl_cost = v as f32,
             142 => self.pearl_kill_s = v,
@@ -924,6 +931,8 @@ pub struct Stats {
     pub pearl_low: [f64; 2],
     /// Ticks with less than full food (`food_full`) and steak at hand.
     pub not_full: [f64; 2],
+    /// Deaths with healing potions left (`Params::w_drop`).
+    pub drops: [f64; 2],
 }
 
 impl Stats {
@@ -988,6 +997,8 @@ impl Stats {
         self.pearl_low[1] += o.pearl_low[1];
         self.not_full[0] += o.not_full[0];
         self.not_full[1] += o.not_full[1];
+        self.drops[0] += o.drops[0];
+        self.drops[1] += o.drops[1];
     }
     pub fn write(&self, out: &mut [f64]) {
         let v = [
@@ -1096,6 +1107,8 @@ impl Stats {
             self.pearl_low[1],
             self.not_full[0],
             self.not_full[1],
+            self.drops[0],
+            self.drops[1],
         ];
         for (o, x) in out.iter_mut().zip(v.iter()) {
             *o = *x;
@@ -2049,6 +2062,12 @@ impl Env {
                 for a in 0..2 {
                     if dead[a] {
                         self.rew_acc[a] -= self.params.w_win + self.params.w_death;
+                        let sp = &self.m.s.p[a];
+                        let left = sp.potions.count_ones() + sp.rows.count(Item::Potion);
+                        if left > 0 && self.params.w_drop != 0.0 {
+                            self.rew_acc[a] -= self.params.w_drop * (0.5 + 0.5 * left.min(6) as f32 / 6.0);
+                            self.ep.drops[a] += 1.0;
+                        }
                         self.ep.deaths[a] += 1.0;
                         if a == 0 && self.gank.drill {
                             self.ep.drill_deaths += 1.0;
