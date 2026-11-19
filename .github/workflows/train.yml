@@ -160,6 +160,10 @@ jobs:
             EXTRA="$EXTRA --param start_hurt=0.4 --param start_health_min=6 --param start_health_max=14"
             EXTRA="$EXTRA --param w_pearl_next=1 --param lesson_prob=0.35 --param lessons=448"
             echo "Pressure machine"
+          elif [ "$FROM_END" -lt $(( 4 * C )) ]; then
+            # Mostly against itself and its past selves.
+            EXTRA="$EXTRA --n-selfplay 192 --n-bot 64 --n-league 64"
+            echo "Self-play machine"
           fi
           # Two processes use the four cores better than one. They average
           # their weights every few seconds through a folder in memory. The
