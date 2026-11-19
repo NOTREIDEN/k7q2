@@ -667,6 +667,10 @@ pub struct Edge {
     pub reach: f64,
     /// Share of the horizontal knockback the client takes (the game: 1.0).
     pub kb_taken: f64,
+    /// Share of the vertical knockback it takes (the game: 1.0). A
+    /// Velocity cheat usually cuts both: the player stays on the ground,
+    /// where it keeps its grip and chases at once.
+    pub kb_v_taken: f64,
     /// The client may still hit the other player where it showed them up
     /// to this many ticks ago (the game: 0). This is what holding back the
     /// other player's movement packets gives.
@@ -675,7 +679,7 @@ pub struct Edge {
 
 impl Default for Edge {
     fn default() -> Self {
-        Edge { reach: 3.0, kb_taken: 1.0, backtrack: 0 }
+        Edge { reach: 3.0, kb_taken: 1.0, kb_v_taken: 1.0, backtrack: 0 }
     }
 }
 
@@ -979,7 +983,7 @@ impl Client {
             S2C::Velocity { own, v } => {
                 if own {
                     let k = self.edge.kb_taken;
-                    let m = [v[0] as f64 / 8000.0 * k, v[1] as f64 / 8000.0, v[2] as f64 / 8000.0 * k];
+                    let m = [v[0] as f64 / 8000.0 * k, v[1] as f64 / 8000.0 * self.edge.kb_v_taken, v[2] as f64 / 8000.0 * k];
                     self.lp.l.body.motion = m;
                     self.lp.last_kb = m;
                     self.lp.ticks_since_kb = 0;

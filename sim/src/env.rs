@@ -597,6 +597,13 @@ pub struct Params {
     /// this many pearls.
     pub pearl_spam_prob: f64,
     pub pearl_spam_pearls: f64,
+    /// Packet Criticals (`ServerPlayer::always_crit`): every hit of the bot
+    /// is a critical one, standing or not.
+    pub crit_prob: f64,
+    /// Share of the duels in which an opponent that takes less than all
+    /// the horizontal knockback (`Edge::kb_taken`) takes that same share
+    /// of the vertical one, as a Velocity cheat does.
+    pub opp_kb_v: f64,
     /// A potion that breaks on its thrower while it has this much health
     /// or less (before the potion's own) pays only `pot_relief` of the
     /// accuracy costs (`w_waste`, `w_miss`, `w_pot_far`): a potion thrown
@@ -823,6 +830,8 @@ impl Default for Params {
             timer_gap_s: 2.0,
             timer_blink: 0.25,
             pearl_spam_prob: 0.0,
+            crit_prob: 0.0,
+            opp_kb_v: 0.0,
             pearl_spam_pearls: 16.0,
             pot_relief_hp: 0.0,
             pot_relief: 1.0,
@@ -1060,6 +1069,8 @@ impl Params {
             215 => self.w_pot_stock = v as f32,
             216 => self.pot_stock_cap = v as f32,
             217 => self.extras_bot_only = v,
+            218 => self.crit_prob = v,
+            219 => self.opp_kb_v = v,
             _ => return false,
         }
         true
@@ -2084,12 +2095,13 @@ pub fn new_duel(p: &Params, rng: &mut Rng, mode: Mode) -> (Match, [f64; 2], BotP
         }
     }
     if insane {
-        m.c[1].edge = Edge { reach: rng.range(3.0, p.insane_reach_max.max(3.0)), kb_taken: rng.range(0.0, 0.4), backtrack: 0 };
+        m.c[1].edge = Edge { reach: rng.range(3.0, p.insane_reach_max.max(3.0)), kb_taken: rng.range(0.0, 0.4), kb_v_taken: 1.0, backtrack: 0 };
     } else if rng.chance(p.opp_edge_prob) {
         let ms = rng.range(p.opp_backtrack_ms[0], p.opp_backtrack_ms[1].max(p.opp_backtrack_ms[0]));
         m.c[1].edge = Edge {
             reach: rng.range(p.opp_reach[0], p.opp_reach[1].max(p.opp_reach[0])),
             kb_taken: rng.range(p.opp_kb_taken[0], p.opp_kb_taken[1].max(p.opp_kb_taken[0])),
+            kb_v_taken: 1.0,
             backtrack: ((ms / 50.0).round().max(0.0) as usize).min(MAX_BACKTRACK) as u8,
         };
         if rng.chance(p.opp_autoblock) {
@@ -2204,6 +2216,12 @@ pub fn new_duel(p: &Params, rng: &mut Rng, mode: Mode) -> (Match, [f64; 2], BotP
         let n = p.pearl_spam_pearls.clamp(1.0, 64.0) as u8;
         m.s.p[1].pearls = n;
         m.c[1].lp.pearls = n;
+    }
+    if cheat && p.crit_prob > 0.0 && rng.chance(p.crit_prob) {
+        m.s.p[1].always_crit = true;
+    }
+    if p.opp_kb_v > 0.0 && m.c[1].edge.kb_taken < 1.0 && rng.chance(p.opp_kb_v) {
+        m.c[1].edge.kb_v_taken = m.c[1].edge.kb_taken;
     }
     (m, ping, bot, lesson)
 }
