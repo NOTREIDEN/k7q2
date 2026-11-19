@@ -25,6 +25,12 @@ public final class Settings {
     public double arenaX, arenaZ, arenaHalf;
     /** Whether the agent may block with its sword. */
     public boolean block = true;
+    /**
+     * Whether a potion thrown with a turn is planned to give all eight
+     * points (pvpai.core.FullHeal): the pitch of the throw and the
+     * movement keys until it is due.
+     */
+    public boolean fullHeal = false;
 
     /** The file a player finds the first time, in the player's language. */
     public static final String FIRST = ""
@@ -45,7 +51,10 @@ public final class Settings {
         + "arena=auto\n"
         + "\n"
         + "# Bloquear con la espada (clic derecho). Con no, pelea sin bloquear nunca.\n"
-        + "bloqueo=si\n";
+        + "bloqueo=si\n"
+        + "\n"
+        + "# Pociones tiradas con giro: elegir la inclinacion y moverse para que curen las 8 vidas.\n"
+        + "pocion_completa=no\n";
 
     /** Read from what a file holds; what cannot be read keeps its default. */
     public static Settings parse(Properties p) {
@@ -71,6 +80,11 @@ public final class Settings {
         if (block != null) {
             block = block.trim().toLowerCase(java.util.Locale.ROOT);
             s.block = !(block.equals("no") || block.equals("0") || block.equals("false") || block.equals("off"));
+        }
+        String full = p.getProperty("pocion_completa");
+        if (full != null) {
+            full = full.trim().toLowerCase(java.util.Locale.ROOT);
+            s.fullHeal = full.equals("si") || full.equals("1") || full.equals("true") || full.equals("on");
         }
         v = numbers(p.getProperty("arena"), " ");
         if (v != null && v.length == 3 && v[2] >= 1.0) {

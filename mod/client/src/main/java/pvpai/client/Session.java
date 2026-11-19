@@ -134,6 +134,7 @@ public final class Session implements Wire.Tap {
             }
         });
         bot.block(s.block);
+        bot.fullHeal(s.fullHeal);
         recorder = Recorder.open(mc, other, d, ping, otherPing, cps, s.block);
         bot.record(recorder);
         bot.release();

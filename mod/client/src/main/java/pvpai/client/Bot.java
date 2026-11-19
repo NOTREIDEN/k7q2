@@ -155,6 +155,21 @@ public final class Bot implements Wire.Tap {
         block = allowed;
     }
 
+    /**
+     * Whether the agent plans its potions thrown with a turn to give all
+     * eight points (pvpai.core.Agent#fullHeal). Turned on, a few plans are
+     * worked out at once and thrown away, so that the first of the duel
+     * does not hold up its tick while its code is compiled.
+     */
+    public void fullHeal(boolean on) {
+        if (agent != null) {
+            agent.fullHeal = on;
+            if (on) {
+                pvpai.core.FullHeal.warmUp(blocks, Reader.pos(mc.thePlayer), 8);
+            }
+        }
+    }
+
     /** Whether both players are still there. */
     public boolean alive() {
         return mc.thePlayer != null && mc.theWorld != null && !other.isDead && mc.theWorld.getEntityByID(other.getEntityId()) == other;

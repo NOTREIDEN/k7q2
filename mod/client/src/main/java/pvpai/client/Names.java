@@ -23,6 +23,15 @@ final class Names {
         throw new IllegalStateException("no field " + names[0] + " in " + owner.getName());
     }
 
+    /** The same, or null when the game has none of these names: what needs it is then left off. */
+    static Field fieldOrNull(Class<?> owner, String... names) {
+        try {
+            return field(owner, names);
+        } catch (IllegalStateException e) {
+            return null;
+        }
+    }
+
     static int getInt(Field f, Object o) {
         try {
             return f.getInt(o);

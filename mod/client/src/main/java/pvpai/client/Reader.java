@@ -10,6 +10,8 @@ import net.minecraft.client.gui.inventory.GuiInventory;
 import net.minecraft.entity.Entity;
 import net.minecraft.entity.EntityLivingBase;
 import net.minecraft.entity.SharedMonsterAttributes;
+import net.minecraft.entity.ai.attributes.AttributeModifier;
+import net.minecraft.entity.ai.attributes.IAttributeInstance;
 import net.minecraft.entity.item.EntityEnderPearl;
 import net.minecraft.entity.projectile.EntityEgg;
 import net.minecraft.entity.projectile.EntityFishHook;
@@ -49,6 +51,14 @@ final class Reader {
     private static final Field SAID_YAW = Names.field(EntityPlayerSP.class, "lastReportedYaw", "field_175164_bL");
     private static final Field SAID_PITCH = Names.field(EntityPlayerSP.class, "lastReportedPitch", "field_175165_bM");
     private static final Field CLICK_DELAY = Names.field(Minecraft.class, "rightClickDelayTimer", "field_71467_ac");
+    // What the client's own movement goes by beyond the view (View.walk),
+    // for an agent that works it out ahead. Without any of them that is left off.
+    private static final Field IN_WEB = Names.fieldOrNull(Entity.class, "isInWeb", "field_70134_J");
+    private static final Field SPRINT_TOGGLE = Names.fieldOrNull(EntityPlayerSP.class, "sprintToggleTimer", "field_71156_d");
+    private static final Field POSITION_TICKS = Names.fieldOrNull(EntityPlayerSP.class, "positionUpdateTicks", "field_175168_bP");
+    /** The modifiers of the movement speed of a sprint and of a potion of Speed. */
+    private static final java.util.UUID SPRINT_UUID = java.util.UUID.fromString("662A6B8D-DA3E-4C1C-8813-96EA6097278D");
+    private static final java.util.UUID SPEED_UUID = java.util.UUID.fromString("91AEAA56-376B-4498-935B-2F7F68070635");
 
     private Reader() {
     }
@@ -274,6 +284,7 @@ final class Reader {
         PotionEffect speed = p.getActivePotionEffect(Potion.moveSpeed);
         v.speedTicks = speed == null ? -1 : speed.getDuration();
         v.health = p.getHealth();
+        v.walkKnown = walk(p, v.walk);
         v.useSlot = v.usingItem ? v.held : 0;
         v.useCount = v.usingItem ? p.getItemInUseCount() : 0;
         v.invOpen = mc.currentScreen instanceof GuiInventory;
@@ -336,6 +347,40 @@ final class Reader {
             v.thrown.add(x);
         }
         return v;
+    }
+
+    /**
+     * What the player's movement goes by beyond the view, into w: its box,
+     * the cobweb, the parts of its speed, jumpMovementFactor, the sprint's
+     * timers, the last moveForward and what the server was last told.
+     * Whether it could all be read.
+     */
+    static boolean walk(EntityPlayerSP p, pvpai.core.Walk w) {
+        if (IN_WEB == null || SPRINT_TOGGLE == null || POSITION_TICKS == null || p.movementInput == null) {
+            return false;
+        }
+        AxisAlignedBB bb = p.getEntityBoundingBox();
+        w.min[0] = bb.minX;
+        w.min[1] = bb.minY;
+        w.min[2] = bb.minZ;
+        w.max[0] = bb.maxX;
+        w.max[1] = bb.maxY;
+        w.max[2] = bb.maxZ;
+        w.inWeb = Names.getBoolean(IN_WEB, p);
+        IAttributeInstance speed = p.getEntityAttribute(SharedMonsterAttributes.movementSpeed);
+        w.attrBase = speed.getBaseValue();
+        w.attrSprint = speed.getModifier(SPRINT_UUID) != null;
+        AttributeModifier potion = speed.getModifier(SPEED_UUID);
+        w.speedModifier = potion != null && potion.getOperation() == 2 ? potion.getAmount() : 0.0;
+        w.jumpFactor = p.jumpMovementFactor;
+        w.moveForward = p.movementInput.moveForward;
+        w.sprintingTicksLeft = p.sprintingTicksLeft;
+        w.sprintToggleTimer = Names.getInt(SPRINT_TOGGLE, p);
+        System.arraycopy(said(p), 0, w.said, 0, 3);
+        w.saidYaw = saidYaw(p);
+        w.saidPitch = saidPitch(p);
+        w.positionUpdateTicks = Names.getInt(POSITION_TICKS, p);
+        return true;
     }
 
     /** The blocks of the world the client is in. */
