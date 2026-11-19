@@ -190,7 +190,7 @@ jobs:
             EXTRA="$EXTRA --param insane_prob=0.85 --param lesson_prob=0.15 --param start_dist_max=6 --param tiny_kb_prob=0.15 --param kb_random=0.3"
             EXTRA="$EXTRA --param opp_sprint_reset=0.9 --param opp_keep_sprint=0.9 --param insane_reach_min=3.3 --param insane_reach_max=4.0 --param opp_kb_v=0.9"
             EXTRA="$EXTRA --param bt_prob=0.6 --param bt_ms_min=300 --param bt_ms_max=700 --param timer_prob=0.6 --param crit_prob=0.5"
-            EXTRA="$EXTRA --param bot_spacer=0.5 --param bot_select=0.4 --param bot_punish=0.5 --param pearl_spam_prob=0.15"
+            EXTRA="$EXTRA --param bot_spacer=0.5 --param bot_select=0.4 --param bot_punish=0.5 --param pearl_spam_prob=0.15 --param insane_kb_min=0 --param insane_kb_max=0.4 --param sword_wear=-1"
             echo "Blatant machine"
           fi
           # Two processes use the four cores better than one. They average
