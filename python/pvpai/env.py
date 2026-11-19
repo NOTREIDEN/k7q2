@@ -58,6 +58,7 @@ STAT_NAMES = [
     "shake0", "shake1", "speed_waste0", "speed_waste1", "inv_hurt0", "inv_hurt1", "pearl_sense0", "pearl_sense1", "void0", "void1", "terrain_t0", "terrain_t1", "retries", "drills", "drill_deaths", "pearl_low0", "pearl_low1", "not_full0", "not_full1",
     "drops0", "drops1",
     "tool_uses0", "tool_uses1", "tool_hits0", "tool_hits1",
+    "pot_given0", "pot_given1", "pot_far0", "pot_far1", "pot_over0", "pot_over1", "pot_early0", "pot_early1",
 ]
 
 # Per-player fields of VecEnv.view(), then the fields that follow both players.

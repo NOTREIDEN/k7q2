@@ -35,7 +35,7 @@ pub const FOOD_TO_SPRINT: i32 = 6;
 pub const SHAKE_DEG: f32 = 6.0;
 pub const SHAKE_TICKS: i32 = 2;
 pub const PRIV_DIM: usize = 71;
-pub const STATS_DIM: usize = 111;
+pub const STATS_DIM: usize = 119;
 /// Floats per player and in total written by `Env::write_view`.
 pub const VIEW_PLAYER: usize = 45;
 pub const VIEW_DIM: usize = 2 * VIEW_PLAYER + 24;
@@ -972,6 +972,18 @@ pub struct Stats {
     /// other player and counted.
     pub tool_uses: [f64; 2],
     pub tool_hits: [f64; 2],
+    /// Potion accuracy, from the potions that broke: the health each gave
+    /// its thrower as the game would have (`Splash::would`, so the same in
+    /// a strict duel), the points it did not offer the thrower (it broke
+    /// away from its feet: `POTION_HEAL` less `Splash::offered`), and the
+    /// points it offered beyond the health missing (thrown too early).
+    /// Together they are `POTION_HEAL` per potion. And the potions thrown
+    /// with fewer than `POTION_HEAL` points missing, as the thrower's own
+    /// client had its health.
+    pub pot_given: [f64; 2],
+    pub pot_far: [f64; 2],
+    pub pot_over: [f64; 2],
+    pub pot_early: [f64; 2],
 }
 
 impl Stats {
@@ -1041,6 +1053,12 @@ impl Stats {
         for a in 0..2 {
             self.tool_uses[a] += o.tool_uses[a];
             self.tool_hits[a] += o.tool_hits[a];
+        }
+        for a in 0..2 {
+            self.pot_given[a] += o.pot_given[a];
+            self.pot_far[a] += o.pot_far[a];
+            self.pot_over[a] += o.pot_over[a];
+            self.pot_early[a] += o.pot_early[a];
         }
     }
     pub fn write(&self, out: &mut [f64]) {
@@ -1156,6 +1174,14 @@ impl Stats {
             self.tool_uses[1],
             self.tool_hits[0],
             self.tool_hits[1],
+            self.pot_given[0],
+            self.pot_given[1],
+            self.pot_far[0],
+            self.pot_far[1],
+            self.pot_over[0],
+            self.pot_over[1],
+            self.pot_early[0],
+            self.pot_early[1],
         ];
         for (o, x) in out.iter_mut().zip(v.iter()) {
             *o = *x;
@@ -2140,6 +2166,9 @@ impl Env {
             if s.offered[t] >= POTION_HEAL {
                 self.ep.pot_perfect[t] += 1.0;
             }
+            self.ep.pot_given[t] += s.would[t] as f64;
+            self.ep.pot_far[t] += (POTION_HEAL - s.offered[t]).max(0.0) as f64;
+            self.ep.pot_over[t] += (s.offered[t] - s.would[t]).max(0.0) as f64;
         }
         self.m.s.splashes.clear();
     }
@@ -2441,6 +2470,9 @@ impl Env {
                 self.ep.pot_double[id] += 1.0;
             }
             self.ep.pot_health[id] += self.m.c[id].lp.health as f64;
+            if MAX_HEALTH - self.m.c[id].lp.health < POTION_HEAL {
+                self.ep.pot_early[id] += 1.0;
+            }
             // The ticks spent looking away to aim it, unless they were
             // already counted after the potion before.
             if self.pot_back[id] {

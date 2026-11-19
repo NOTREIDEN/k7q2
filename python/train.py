@@ -399,6 +399,17 @@ def main():
                         tool_uses_per_min=st.get("tool_uses0", 0.0) / mins0,
                         tool_hits_per_min=st.get("tool_hits0", 0.0) / mins0,
                         opp_tool_hits_per_min=st.get("tool_hits1", 0.0) / mins0,
+                        # Potion accuracy: of the eight points each potion that broke
+                        # could give its thrower, the share it gave (as the game would,
+                        # strict duels or not), the share lost because it broke away
+                        # from the thrower's feet, the share lost to health that was
+                        # not missing; and the share of the potions thrown with fewer
+                        # than eight points missing.
+                        potion_acc=st.get("pot_given0", 0.0) / max(8.0 * st["splashes0"], 1.0),
+                        potion_far=st.get("pot_far0", 0.0) / max(8.0 * st["splashes0"], 1.0),
+                        potion_over=st.get("pot_over0", 0.0) / max(8.0 * st["splashes0"], 1.0),
+                        potion_early=st.get("pot_early0", 0.0) / max(st["potions0"], 1.0),
+                        opp_potion_acc=st.get("pot_given1", 0.0) / max(8.0 * st["splashes1"], 1.0),
                     )
             window.clear()
             if league is not None:
@@ -429,6 +440,9 @@ def main():
                   f"full {b.get('potion_perfect', 0):.2f} x2 {b.get('potion_double', 0):.2f} at {b.get('potion_at_health', 0):.1f} "
                   f"away {b.get('potion_away_ticks', 0):.1f} back {b.get('potion_back_ticks', 0):.1f} off {b.get('off_frac', 0):.2f} "
                   f"hit {b.get('potion_hits_taken', 0):.2f} "
+                  f"acc {b.get('potion_acc', 0):.2f}/{b.get('opp_potion_acc', 0):.2f} "
+                  f"far {b.get('potion_far', 0):.2f} over {b.get('potion_over', 0):.2f} "
+                  f"early {b.get('potion_early', 0):.2f} "
                   f"drink {b.get('drinks_per_duel', 0):.2f}/{b.get('opp_drinks_per_duel', 0):.2f} "
                   f"eat {b.get('meals_per_duel', 0):.2f}/{b.get('opp_meals_per_duel', 0):.2f} "
                   f"done {b.get('sip_done', 0):.2f} sip-hit {b.get('sip_hits_taken', 0):.2f} "
