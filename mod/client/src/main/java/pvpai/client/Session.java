@@ -34,6 +34,14 @@ public final class Session implements Wire.Tap {
     private static final double PING = 100.0, OTHER_PING = 60.0;
     /** Whether its own ping is still the guess. */
     private boolean pingGuessed;
+    /**
+     * Ticks the opponent may be out of the world before the agent stops: a
+     * long pearl takes it out of the server's view for a while, and the
+     * server sends it again when it comes back.
+     */
+    private static final int LOST_TICKS = 200;
+    /** Ticks the opponent has been out of the world. */
+    private int lostTicks;
 
     /** A mouse that does not turn the view: while the agent aims, the player's hand must not. */
     private static final class Still extends MouseHelper {
@@ -105,6 +113,7 @@ public final class Session implements Wire.Tap {
         }
         targets = new Targets();
         switches = 0;
+        lostTicks = 0;
         EntityOtherPlayerMP other = targets.choose(mc, null);
         if (other == null) {
             return "PvP AI: no hay ningun rival a la vista.";
@@ -238,7 +247,8 @@ public final class Session implements Wire.Tap {
         if (me.isDead || me.getHealth() <= 0.0F) {
             return "PvP AI apagado: el jugador murio.";
         }
-        if (!bot.alive() || bot.other().getHealth() <= 0.0F) {
+        if (bot.other().getHealth() <= 0.0F
+                || !bot.alive() && (lostTicks > LOST_TICKS || Targets.unlisted(mc, bot.other()))) {
             return "PvP AI apagado: el rival ya no esta.";
         }
         if (mc.currentScreen != null && !(mc.currentScreen instanceof GuiInventory)) {
@@ -254,6 +264,14 @@ public final class Session implements Wire.Tap {
     public String tickStart() {
         started = false;
         openingInventory = false;
+        // The same player sent again as a new entity (after a long pearl) is
+        // taken back before any other is picked.
+        if (bot != null && mc.thePlayer == me && mc.theWorld == world && !bot.alive()) {
+            EntityOtherPlayerMP back = Targets.same(mc, bot.other());
+            if (back != null) {
+                bot.reacquire(back);
+            }
+        }
         if (bot != null && mc.thePlayer == me && mc.theWorld == world && mc.getNetHandler() != null && !mc.isGamePaused()) {
             targets.tick(mc);
             EntityOtherPlayerMP next = targets.choose(mc, bot.other());
@@ -262,6 +280,7 @@ public final class Session implements Wire.Tap {
                 switches++;
             }
         }
+        lostTicks = bot != null && !bot.alive() ? lostTicks + 1 : 0;
         if (pingGuessed && bot != null && mc.thePlayer == me) {
             double ping = Scout.ping(mc, me);
             if (ping >= 0.0) {

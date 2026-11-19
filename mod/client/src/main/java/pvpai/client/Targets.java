@@ -5,6 +5,7 @@ import java.util.Map;
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.entity.EntityOtherPlayerMP;
 import net.minecraft.client.entity.EntityPlayerSP;
+import net.minecraft.client.network.NetHandlerPlayClient;
 import net.minecraft.scoreboard.Team;
 import net.minecraft.util.MathHelper;
 
@@ -34,6 +35,34 @@ final class Targets {
     /** The tick of the last hit each player is taken to have given it, by entity number. */
     private final Map<Integer, Integer> hitMe = new HashMap<Integer, Integer>();
     private int tick, held = 1000;
+
+    /**
+     * The player of {@code o} as the entity the world holds now, if the
+     * server sent it again: a player that goes out of the server's view (a
+     * long pearl) is dropped and comes back as a new entity. Null while it
+     * is away.
+     */
+    static EntityOtherPlayerMP same(Minecraft mc, EntityOtherPlayerMP o) {
+        if (o == null || mc.theWorld == null) {
+            return null;
+        }
+        for (Object e : mc.theWorld.playerEntities) {
+            if (e instanceof EntityOtherPlayerMP && e != o) {
+                EntityOtherPlayerMP p = (EntityOtherPlayerMP) e;
+                if (o.getUniqueID().equals(p.getUniqueID()) && !p.isDead && p.getHealth() > 0.0F
+                        && mc.theWorld.getEntityByID(p.getEntityId()) == p) {
+                    return p;
+                }
+            }
+        }
+        return null;
+    }
+
+    /** Whether the player list, which names players, no longer names this one: it left the server. */
+    static boolean unlisted(Minecraft mc, EntityOtherPlayerMP o) {
+        NetHandlerPlayClient net = mc.getNetHandler();
+        return net != null && !net.getPlayerInfoMap().isEmpty() && net.getPlayerInfo(o.getUniqueID()) == null;
+    }
 
     /** Whether this player is one to fight: there, alive, playing, near and not a teammate it cannot hurt. */
     static boolean valid(Minecraft mc, EntityOtherPlayerMP o) {

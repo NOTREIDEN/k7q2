@@ -116,6 +116,18 @@ public final class Bot implements Wire.Tap {
         }
     }
 
+    /**
+     * The opponent came back as a new entity of the same player (the
+     * server dropped it while it was out of view): only the entity changes,
+     * what was counted of the player and the agent's memory stay.
+     */
+    void reacquire(EntityOtherPlayerMP o) {
+        other = o;
+        if (recorder != null) {
+            recorder.back(o);
+        }
+    }
+
     /** Have the duel written down by this recorder from now on. */
     void record(Recorder r) {
         recorder = r;

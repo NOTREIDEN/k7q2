@@ -420,6 +420,19 @@ final class Recorder {
     }
 
     /** Another player is the opponent from now on. */
+    /** The same opponent, sent again by the server as a new entity. */
+    void back(EntityOtherPlayerMP o) {
+        if (broken || closed) {
+            return;
+        }
+        try {
+            other = o;
+            write("B " + tick);
+        } catch (Throwable t) {
+            fail(t);
+        }
+    }
+
     void target(EntityOtherPlayerMP o) {
         if (broken || closed) {
             return;
