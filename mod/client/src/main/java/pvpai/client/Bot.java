@@ -338,6 +338,16 @@ public final class Bot implements Wire.Tap {
                 action[7] = 0;
             }
             k = agent.keys(view, blocks, duel, action, rng);
+            // Far from the opponent with nothing under way, the view does not
+            // rise past 30 degrees up. On a server where food stays full and
+            // Speed lasts, the agent has long idle stretches far away that
+            // training seldom had, and in them its pitch creeps up every
+            // tick. A pearl is aimed at most 45 degrees up, and a throw under
+            // way keeps the agent busy.
+            if (!agent.busy() && k.dy < 0 && me.rotationPitch < -30.0F
+                    && Math.hypot(other.posX - me.posX, other.posZ - me.posZ) > 10.0) {
+                k.dy = 0;
+            }
         }
         pressed = k.copy();
         return k;
