@@ -597,6 +597,18 @@ pub struct Params {
     /// this many pearls.
     pub pearl_spam_prob: f64,
     pub pearl_spam_pearls: f64,
+    /// A potion that breaks on its thrower while it has this much health
+    /// or less (before the potion's own) pays only `pot_relief` of the
+    /// accuracy costs (`w_waste`, `w_miss`, `w_pot_far`): a potion thrown
+    /// in a hurry to stay alive is better than none, and its heal still
+    /// counts all it gave. At that much health no potion can heal too
+    /// much, so what it spares is what the throw missed by. Zero: off.
+    pub pot_relief_hp: f32,
+    pub pot_relief: f32,
+    /// Share of the corner lessons (64) and of the lessons with the back
+    /// turned (128) fought against the hardest bot (as `insane_prob` for
+    /// duels without a lesson). Drawn only when above zero.
+    pub insane_lessons: f64,
 }
 
 impl Default for Params {
@@ -777,6 +789,9 @@ impl Default for Params {
             timer_blink: 0.25,
             pearl_spam_prob: 0.0,
             pearl_spam_pearls: 16.0,
+            pot_relief_hp: 0.0,
+            pot_relief: 1.0,
+            insane_lessons: 0.0,
         }
     }
 }
@@ -989,6 +1004,9 @@ impl Params {
             203 => self.timer_blink = v,
             204 => self.pearl_spam_prob = v,
             205 => self.pearl_spam_pearls = v,
+            206 => self.pot_relief_hp = v as f32,
+            207 => self.pot_relief = v as f32,
+            208 => self.insane_lessons = v,
             _ => return false,
         }
         true
@@ -1633,7 +1651,12 @@ pub fn new_duel(p: &Params, rng: &mut Rng, mode: Mode) -> (Match, [f64; 2], BotP
     };
     // A duel against the hardest bot there is (`Params::insane_prob`):
     // drawn only when asked for.
-    let insane = mode == Mode::Bot && lesson == 0 && p.insane_prob > 0.0 && rng.chance(p.insane_prob);
+    let insane = mode == Mode::Bot
+        && if lesson == 0 {
+            p.insane_prob > 0.0 && rng.chance(p.insane_prob)
+        } else {
+            p.insane_lessons > 0.0 && matches!(lesson, 7 | 8) && rng.chance(p.insane_lessons)
+        };
     // A bot that pots with a turn (`Params::pot_turn_prob`), and one that
     // starts hurt enough to pot at once, close by: drawn only when asked for.
     let pot_turn = mode == Mode::Bot && lesson == 0 && p.pot_turn_prob > 0.0 && rng.chance(p.pot_turn_prob);
@@ -2491,11 +2514,18 @@ impl Env {
                 self.rew_acc[1 - j] -= v;
             }
             let t = s.thrower;
-            self.rew_acc[t] -= p.w_waste * (POTION_HEAL - s.would[t]).max(0.0) / hh;
+            // The thrower's health before this potion, when it was low
+            // enough for any potion to be worth more than none.
+            let relief = if p.pot_relief_hp > 0.0 && self.m.s.p[t].health - s.healed[t] <= p.pot_relief_hp {
+                p.pot_relief
+            } else {
+                1.0
+            };
+            self.rew_acc[t] -= relief * p.w_waste * (POTION_HEAL - s.would[t]).max(0.0) / hh;
             self.rew_acc[t] -= p.w_gift * s.healed[1 - t] / hh;
-            self.rew_acc[t] -= p.w_miss * (POTION_HEAL - s.offered[t]).clamp(0.0, MISS_POINTS) / hh;
+            self.rew_acc[t] -= relief * p.w_miss * (POTION_HEAL - s.offered[t]).clamp(0.0, MISS_POINTS) / hh;
             if p.w_pot_far != 0.0 {
-                self.rew_acc[t] -= p.w_pot_far * (POTION_HEAL - s.offered[t]).clamp(0.0, POTION_HEAL) / hh;
+                self.rew_acc[t] -= relief * p.w_pot_far * (POTION_HEAL - s.offered[t]).clamp(0.0, POTION_HEAL) / hh;
             }
             self.ep.splashes[t] += 1.0;
             self.ep.heal_self[t] += s.healed[t] as f64;

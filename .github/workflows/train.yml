@@ -144,21 +144,22 @@ jobs:
           # anybody, close together, and as many again against opponents
           # with every advantage (the insane bot, reach, no knockback,
           # Strength), starting hurt, where pearls and potions have to be
-          # timed. The rest play the mix of everything.
+          # timed. The rest play the mix of everything. All of them are paid
+          # the same way, so that the critic they average stays one critic.
           C=${COMBO:-0}
           FROM_END=$(( MACHINES - 1 - MACHINE ))
           if [ "$FROM_END" -lt "$C" ]; then
-            EXTRA="$EXTRA --param w_combo=0.5 --param combo_cap=12 --param insane_prob=0.7"
+            EXTRA="$EXTRA --param insane_prob=0.7"
             EXTRA="$EXTRA --param start_dist_max=6 --param drill_prob=0 --param lesson_prob=0.2"
             echo "Combo machine"
           elif [ "$FROM_END" -lt $(( 2 * C )) ]; then
-            EXTRA="$EXTRA --param tiny_kb_prob=0.85 --param start_dist_max=5 --param w_close=0"
+            EXTRA="$EXTRA --param tiny_kb_prob=0.85 --param start_dist_max=5"
             EXTRA="$EXTRA --param insane_prob=0.6 --param lesson_prob=0.2"
             echo "Low knockback machine"
           elif [ "$FROM_END" -lt $(( 3 * C )) ]; then
             EXTRA="$EXTRA --param insane_prob=0.8 --param opp_strength_prob=0.4 --param opp_edge_prob=0.9"
             EXTRA="$EXTRA --param start_hurt=0.4 --param start_health_min=6 --param start_health_max=14"
-            EXTRA="$EXTRA --param w_pearl_next=1 --param lesson_prob=0.35 --param lessons=448"
+            EXTRA="$EXTRA --param lesson_prob=0.35 --param lessons=448"
             echo "Pressure machine"
           elif [ "$FROM_END" -lt $(( 4 * C )) ]; then
             # Mostly against itself and its past selves.

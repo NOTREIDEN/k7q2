@@ -33,6 +33,7 @@ def main():
     ap.add_argument("--lr", type=float, default=3e-4)
     ap.add_argument("--ent-coef", type=float, default=0.0015)
     ap.add_argument("--gamma", type=float, default=0.995)
+    ap.add_argument("--lam", type=float, default=0.95, help="GAE lambda")
     ap.add_argument("--seed", type=int, default=1)
     ap.add_argument("--threads", type=int, default=0)
     ap.add_argument("--bot-min", type=int, default=0)
@@ -163,7 +164,7 @@ def main():
         if sy is not None:
             sy.marks = list(marks)
 
-    cfg = dict(gamma=args.gamma, lam=0.95, clip=0.2, epochs=args.epochs, minibatches=args.minibatches, vf_coef=0.5,
+    cfg = dict(gamma=args.gamma, lam=args.lam, clip=0.2, epochs=args.epochs, minibatches=args.minibatches, vf_coef=0.5,
                ent_coef=args.ent_coef, max_grad_norm=0.5)
     heads = len(any_env.act_dims)
     mk = lambda name, n: Stream(name, n, any_env.obs_dim, any_env.priv_dim, heads, args.horizon, args.hidden)
