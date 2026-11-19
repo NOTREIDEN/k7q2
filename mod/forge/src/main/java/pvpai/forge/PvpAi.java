@@ -6,6 +6,7 @@ import java.io.FileInputStream;
 import java.io.IOException;
 import java.io.InputStream;
 import java.util.Locale;
+import java.util.Random;
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.gui.inventory.GuiInventory;
 import net.minecraft.client.settings.KeyBinding;
@@ -50,9 +51,37 @@ public final class PvpAi {
     @Mod.EventHandler
     public void init(FMLInitializationEvent e) {
         ClientRegistry.registerKeyBinding(key);
+        warmUp();
         // One bus or two, depending on the Forge build; a second time on the same one does nothing.
         MinecraftForge.EVENT_BUS.register(this);
         FMLCommonHandler.instance().bus().register(this);
+    }
+
+    /**
+     * Runs a copy of the policy a few hundred times on a thread of its own
+     * while the game loads, so that the code it runs is compiled before the
+     * first duel: cold, its first ticks take 20 to 30 ms instead of half of one.
+     */
+    private void warmUp() {
+        Thread t = new Thread(new Runnable() {
+            @Override
+            public void run() {
+                try {
+                    Policy p = policy();
+                    float[] obs = new float[p.obsDim];
+                    Random rng = new Random(1);
+                    for (int i = 0; i < 400; i++) {
+                        obs[i % obs.length] = (i % 7) * 0.1f;
+                        p.act(obs, rng);
+                    }
+                } catch (Throwable ignored) {
+                    // Only the first ticks are slower without it.
+                }
+            }
+        }, "pvpai-warmup");
+        t.setDaemon(true);
+        t.setPriority(Thread.MIN_PRIORITY);
+        t.start();
     }
 
     /** The policy: the player's own file if there is one, else the one in the jar. */

@@ -38,9 +38,10 @@ final class InventoryRefill {
             return Step.PLAY;
         }
         if (screen != current) {
+            // A screen opened on the tick before: its first click goes on
+            // this tick, as in training.
             reset();
             screen = current;
-            return Step.WAIT;
         }
         if (rejected) {
             return Step.REJECTED;
