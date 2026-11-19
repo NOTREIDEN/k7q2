@@ -132,6 +132,17 @@ jobs:
           path: share/in
           run-id: ${{ inputs.previous }}
           github-token: ${{ github.token }}
+      - name: Start from the other fleet's network
+        # With no run to continue, a network named by "island" (for example
+        # this repository's branch weights-ship) is the start instead of
+        # seed/stage1.pt.
+        if: inputs.previous == '' && inputs.island != ''
+        env:
+          ISLAND: ${{ inputs.island }}
+        run: |
+          git fetch -q --depth 1 "https://github.com/${ISLAND%%:*}" "${ISLAND#*:}"
+          git cat-file blob FETCH_HEAD:latest.pt > seed/stage1.pt
+          ls -l seed/stage1.pt
       - name: Start the trainers
         env:
           MINUTES: ${{ inputs.minutes }}
