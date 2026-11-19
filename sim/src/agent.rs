@@ -1618,7 +1618,7 @@ fn pace(motion: V3, on_ground: bool) -> [f64; 2] {
 /// each player. `feet(j, t)` is where player `j` stands on the server on
 /// the potion's tick `t` from now, `thrower` the index of the one who threw
 /// it, whom it passes through for its first ticks.
-fn potion_outcome(world: &World, mut pos: V3, mut m: V3, mut age: i32, thrower: usize, feet: impl Fn(usize, i32) -> V3) -> (V3, i32, [f32; 2]) {
+pub(crate) fn potion_outcome(world: &World, mut pos: V3, mut m: V3, mut age: i32, thrower: usize, feet: impl Fn(usize, i32) -> V3) -> (V3, i32, [f32; 2]) {
     let g = Kind::Potion.gravity() as f64;
     for t in 0..60 {
         age += 1;

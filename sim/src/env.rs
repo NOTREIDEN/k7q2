@@ -651,6 +651,12 @@ pub struct Params {
     /// both players are learners or the learner's past, and a handicap
     /// neither can see makes those duels uneven instead of a fair test.
     pub extras_bot_only: f64,
+    /// Share of the duels against a scripted bot that heals itself (the
+    /// hardest one too) in which it pots as a perfect bot does
+    /// (`BotParams::pot_exact`): all eight points onto itself, only with
+    /// room for them, and at a moment the opponent cannot get at it or at
+    /// the potion. Zero (and drawn only when above it): as before.
+    pub bot_pot_exact: f64,
 }
 
 impl Default for Params {
@@ -832,6 +838,7 @@ impl Default for Params {
             pearl_spam_prob: 0.0,
             crit_prob: 0.0,
             opp_kb_v: 0.0,
+            bot_pot_exact: 0.0,
             pearl_spam_pearls: 16.0,
             pot_relief_hp: 0.0,
             pot_relief: 1.0,
@@ -1071,6 +1078,7 @@ impl Params {
             217 => self.extras_bot_only = v,
             218 => self.crit_prob = v,
             219 => self.opp_kb_v = v,
+            220 => self.bot_pot_exact = v,
             _ => return false,
         }
         true
@@ -2173,6 +2181,11 @@ pub fn new_duel(p: &Params, rng: &mut Rng, mode: Mode) -> (Match, [f64; 2], BotP
         bot.trade_heal = p.trade_heal.clamp(0.0, 19.0);
     }
     bot.carry = m.s.cfg.throw_carry;
+    // Drawn only when asked for, so that duels without it come out as they
+    // did.
+    if p.bot_pot_exact > 0.0 && mode == Mode::Bot && bot.potion > 0.0 {
+        bot.pot_exact = rng.chance(p.bot_pot_exact);
+    }
     // Drawn only when asked for, so that duels without it come out as they
     // always did.
     if pot_turn && bot.level >= 3 && !bot.runner {
