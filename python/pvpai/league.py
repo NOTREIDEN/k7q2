@@ -11,7 +11,14 @@ also says whether it is still getting better, which the scripted bots
 stopped saying when it started winning nearly every duel against them.
 
 The pool is a folder of checkpoints named by the samples (in millions) the
-network had seen, `007784.pt`. `ladder` is the rule for what stays in it."""
+network had seen, `007784.pt`. `ladder` is the rule for what stays in it.
+
+Pinned versions (`pin_*.pt`, see `PIN`) stay in the pool whatever the
+ladder says, and with `pin_share` at least that share of the groups plays
+one of them: an earlier version that was better at something the agent has
+since lost (close-range trades on plain knockback) keeps punishing the loss
+every iteration instead of only when the loss-weighted draw happens to pick
+it. Off (0) by default."""
 import copy
 import os
 
@@ -19,6 +26,9 @@ import numpy as np
 import torch
 
 from pvpai.model import load_policy
+
+# Names of pinned versions start with this.
+PIN = "pin_"
 
 
 def ladder(have, new, keep=10, gap=300):
@@ -59,8 +69,11 @@ class League:
     # The name of the stand-in while the folder is empty.
     NOW = "now"
 
-    def __init__(self, folder, dims, groups, n, seed=0):
+    def __init__(self, folder, dims, groups, n, seed=0, pin_share=0.0):
         self.folder, self.dims, self.n = folder, dims, n
+        # At least this share of the groups plays a pinned version, while
+        # there is one (rounded up to whole groups).
+        self.pin_share = pin_share
         self.members = {}
         self.playing = [None] * groups
         self.state = [None] * groups
@@ -101,8 +114,15 @@ class League:
         for m in ms:
             m.won *= 0.9
             m.lost *= 0.9
+        pins = [i for i, m in enumerate(ms) if m.name.startswith(PIN)]
+        k = int(np.ceil(self.pin_share * len(self.playing) - 1e-9)) if pins and self.pin_share > 0 else 0
         for g in range(len(self.playing)):
-            m = ms[self.rng.choice(len(ms), p=w / w.sum())]
+            if g < k:
+                # The first k groups: one of the pinned versions, by the same rule.
+                wp = w[pins]
+                m = ms[pins[self.rng.choice(len(pins), p=wp / wp.sum())]]
+            else:
+                m = ms[self.rng.choice(len(ms), p=w / w.sum())]
             if self.playing[g] is not m:
                 self.playing[g] = m
                 self.state[g] = m.policy.initial_state(self.n)

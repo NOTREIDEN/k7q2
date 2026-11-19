@@ -55,6 +55,8 @@ def main():
     ap.add_argument("--league-groups", type=int, default=4, help="versions played at the same time")
     ap.add_argument("--league-param", action="append", default=[], help="name=value for the duels against earlier versions only")
     ap.add_argument("--league-swap", type=int, default=40, help="iterations until the versions played are drawn again")
+    ap.add_argument("--league-pin-share", type=float, default=0.0,
+                    help="least share of the league's groups that play a pinned version (pin_*.pt in --league-dir)")
     ap.add_argument("--worker-id", type=int, default=0, help="process number inside one machine")
     ap.add_argument("--workers", type=int, default=1, help="processes on this machine that share weights")
     ap.add_argument("--sync-dir", default=None, help="folder the processes of this machine share weights through")
@@ -189,7 +191,8 @@ def main():
         streams["bot"] = mk("bot", args.n_bot)
     league = None
     if groups:
-        league = League(args.league_dir, (any_env.obs_dim, any_env.priv_dim, any_env.act_dims), groups, per_group, args.seed)
+        league = League(args.league_dir, (any_env.obs_dim, any_env.priv_dim, any_env.act_dims), groups, per_group, args.seed,
+                        pin_share=args.league_pin_share)
         league.refresh(policy)
         league.assign()
         for gi in range(groups):

@@ -22,6 +22,15 @@ if git fetch -q --depth 1 origin exploit 2>/dev/null; then
   names="$names
 exploit.pt"
 fi
+# Pinned versions kept in the repository (seed/pin_*.pt, see
+# python/pvpai/league.py) play in the league whatever the ladder says.
+for f in seed/pin_*.pt; do
+  [ -e "$f" ] || continue
+  n=$(basename "$f")
+  cmp -s "$f" "share/pool/$n" || { cp "$f" "share/pool.tmp/$n" && mv -f "share/pool.tmp/$n" "share/pool/$n"; }
+  names="$names
+$n"
+done
 for f in share/pool/*.pt; do
   [ -e "$f" ] || continue
   echo "$names" | grep -qxF "$(basename "$f")" || rm -f "$f"
