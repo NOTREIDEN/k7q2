@@ -118,6 +118,36 @@ pub struct BotParams {
     /// drawn per duel) instead of where its kind does, if more than 0: the
     /// best players do not wait to be one critical hit from death.
     pub trade_heal: f64,
+    /// A punisher (`Params::pearl_punish`): see `PearlPunish`.
+    pub pearl_punish: PearlPunish,
+}
+
+/// The pearls of the best bots (`BotParams::pearl_punish`), which make an
+/// opponent pay for every slow or careless moment: it throws when the
+/// opponent starts to drink or eat (slowed to a creep and unable to hit
+/// for over a second and a half), takes a potion in hand or has one in the
+/// air, or runs off hurt to heal; and to get back at a far opponent, and
+/// out of a combo. Each pearl is aimed at where it will put the bot within
+/// reach of where the opponent will be by then, beside it or behind it by
+/// the way it looks if there is a way past it, worked out from the flight
+/// of the pearl, its start beside the eyes and the bot's own movement if
+/// the server adds it (`pearl_aim`). Never at other moments: a landing
+/// costs five points. It also runs straight at an opponent that drinks,
+/// eats or runs off hurt within `rush` blocks.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct PearlPunish {
+    pub on: bool,
+    /// It pearls back to a far opponent (more than `far` blocks away) only
+    /// with more health than `hp`.
+    pub hp: f32,
+    pub far: f64,
+    pub rush: f64,
+    /// Standard deviation of the landing spot, in blocks (0: exact).
+    pub noise: f64,
+}
+
+impl PearlPunish {
+    pub const OFF: PearlPunish = PearlPunish { on: false, hp: 12.0, far: 9.0, rush: 14.0, noise: 0.0 };
 }
 
 /// What a spacer (`BotParams::spacer`) keeps between itself and the
@@ -179,6 +209,7 @@ impl BotParams {
                 trade_block: 0.0,
                 trade_crit: 0.0,
                 trade_heal: 0.0,
+                pearl_punish: PearlPunish::OFF,
             },
             2 => BotParams {
                 level,
@@ -210,6 +241,7 @@ impl BotParams {
                 trade_block: 0.0,
                 trade_crit: 0.0,
                 trade_heal: 0.0,
+                pearl_punish: PearlPunish::OFF,
             },
             3 => BotParams {
                 level,
@@ -241,6 +273,7 @@ impl BotParams {
                 trade_block: 0.0,
                 trade_crit: 0.0,
                 trade_heal: 0.0,
+                pearl_punish: PearlPunish::OFF,
             },
             _ => BotParams {
                 level: 4,
@@ -272,6 +305,7 @@ impl BotParams {
                 trade_block: 0.0,
                 trade_crit: 0.0,
                 trade_heal: 0.0,
+                pearl_punish: PearlPunish::OFF,
             },
         }
     }
@@ -299,6 +333,10 @@ pub struct BotState {
     /// spammer's; 0: nothing thrown yet).
     pub pearl_to: V3,
     pub pearl_kind: u8,
+    /// A punisher's (`PearlPunish`) throw under way follows the opponent: the
+    /// spot is where it will be by then plus this.
+    pearl_track: bool,
+    pearl_off: [f64; 2],
     /// Ticks until the next pearl may be thrown.
     pearl_wait: i32,
     /// Hits taken since it last landed one.
@@ -662,6 +700,187 @@ fn pearl_target(c: &Client, world: &World, p: &BotParams, st: &BotState, hdist: 
     None
 }
 
+/// The yaw and pitch (degrees) that land a pearl thrown on the next tick
+/// from the eyes at `from` on `q`, and the ticks of its flight: the pearl
+/// starts 0.16 blocks to the right of the eyes, a server that adds the
+/// thrower's movement to it (`carry`, per tick across the ground) moves
+/// the landing by that times the flight's drag-shortened length, and the
+/// pitch is the most direct one for what is left (`pearl_pitch`).
+pub fn pearl_aim(from: V3, q: V3, carry: [f64; 2]) -> (f64, f64, i32) {
+    let drop = from[1] - q[1];
+    let mut yaw = angles_to(from, q).0;
+    let mut best = (f64::MAX, 0.0, 0.0, 0);
+    // Every pitch a mouse count apart, from 35 degrees up to steeply down:
+    // where the thrower lands is where the pearl was at the start of the
+    // tick it hit in, so the reach jumps from one pitch to the next and
+    // only a full scan finds the nearest. The quickest of the near ones.
+    for _ in 0..2 {
+        let f = yaw.to_radians();
+        let start = [from[0] - f.cos() * 0.16, from[2] - f.sin() * 0.16];
+        best = (f64::MAX, 0.0, 0.0, 0);
+        let mut pitch = -35.0;
+        while pitch <= 85.0 {
+            let (x, t) = pearl_reach(pitch, drop);
+            let h = 1.5 * pitch.to_radians().cos();
+            // Each part of the motion keeps 0.99 of itself a tick, the
+            // carried movement too.
+            let s = if h > 1e-9 { x / h } else { 0.0 };
+            let r = [q[0] - start[0] - carry[0] * s, q[2] - start[1] - carry[1] * s];
+            let err = (r[0].hypot(r[1]) - x).abs() + 0.004 * t as f64;
+            if err < best.0 {
+                best = (err, (-r[0]).atan2(r[1]).to_degrees(), pitch, t);
+            }
+            pitch += 0.15;
+        }
+        yaw = best.1;
+    }
+    (best.1, best.2, best.3)
+}
+
+/// Where the opponent will be across the ground `n` ticks from now, for a
+/// punisher (`PearlPunish`): as `foresee`, except that one that drinks or eats
+/// creeps along at a fifth of a walk at most.
+fn foresee_n(c: &Client, st: &BotState, n: f64) -> [f64; 2] {
+    let them = c.rp.pos;
+    let v = st.seen_vel;
+    let goal = if c.rp.using && matches!(c.rp.item, Item::Drink | Item::Food) {
+        let s = v[0].hypot(v[1]);
+        let k = if s > 0.06 { 0.06 / s } else { 1.0 };
+        [v[0] * k, v[1] * k]
+    } else {
+        let run = crate::living::Attr { sprint: true, ..c.lp.l.attr }.value() * 2.1;
+        let yaw = (c.rp.yaw as f64).to_radians();
+        let face = [-yaw.sin(), yaw.cos()];
+        [v[0] + (face[0] * run - v[0]) * 0.7, v[1] + (face[1] * run - v[1]) * 0.7]
+    };
+    let keep = 0.55f64;
+    let fade = keep * (1.0 - keep.powf(n)) / (1.0 - keep);
+    [them[0] + goal[0] * n + (v[0] - goal[0]) * fade, them[2] + goal[1] * n + (v[1] - goal[1]) * fade]
+}
+
+/// Where a potion in the air breaks on a flat floor at `floor_y`.
+fn potion_break(pos: V3, motion: V3, floor_y: f64) -> [f64; 2] {
+    let (mut q, mut m) = (pos, motion);
+    for _ in 0..100 {
+        if q[1] + m[1] <= floor_y {
+            break;
+        }
+        for k in 0..3 {
+            q[k] += m[k];
+            m[k] *= 0.99;
+        }
+        m[1] -= 0.05;
+    }
+    [q[0], q[2]]
+}
+
+/// The eyes a pearl the bot throws next tick leaves from (where this tick
+/// takes it), and the movement a server that carries it adds.
+fn pearl_from(c: &Client, world: &World, p: &BotParams) -> (V3, [f64; 2]) {
+    let b = &c.lp.l.body;
+    let from = [b.pos[0] + b.motion[0], (b.pos[1] + b.motion[1]).max(world.floor_y) + EYE_HEIGHT, b.pos[2] + b.motion[2]];
+    let carry = if p.carry { [b.motion[0], b.motion[2]] } else { [0.0, 0.0] };
+    (from, carry)
+}
+
+/// A punisher's (`PearlPunish`) pearl, if this is a moment for one: the spot,
+/// the kind (as `BotState::pearl_kind`), and, for a spot that follows the
+/// opponent, where it is from where the opponent will be.
+fn pearl_punish_target(c: &Client, world: &World, p: &BotParams, st: &BotState, hdist: f64, rng: &mut Rng) -> Option<(V3, u8, Option<[f64; 2]>)> {
+    let (me, them, rp) = (c.lp.l.body.pos, c.rp.pos, &c.rp);
+    let hp = c.lp.health;
+    let lim = world.half - 1.0;
+    let dir = if hdist > 1e-6 { [(them[0] - me[0]) / hdist, (them[2] - me[2]) / hdist] } else { [0.0, 1.0] };
+    let yaw = (rp.yaw as f64).to_radians();
+    let face = [-yaw.sin(), yaw.cos()];
+    let v = st.seen_vel;
+    let sipping = rp.using && matches!(rp.item, Item::Drink | Item::Food);
+    let air = c.thrown.iter().find(|e| e.kind == Kind::Potion && !e.mine);
+    let potting = rp.item == Item::Potion || air.is_some();
+    // Its back to the bot, hurt, and getting away: off to heal itself.
+    let away = v[0] * dir[0] + v[1] * dir[1];
+    let running = face[0] * dir[0] + face[1] * dir[1] > 0.5 && rp.health <= 12.0 && away > 0.12;
+    let comboed = st.taken_run >= 3 && hp > 8.0 && rng.chance(0.5 * p.pearl_escape);
+    // A landing costs five points: none below seven but out of a combo.
+    let kind = if comboed {
+        2
+    } else if hp <= 7.0 {
+        return None;
+    } else if potting && hdist > 4.0 {
+        4
+    } else if sipping && hdist > 5.5 {
+        4
+    } else if running && hdist > 5.0 {
+        4
+    } else if rp.health <= 10.0 && hdist > 4.0 && hp > rp.health {
+        // Hurt enough to heal itself any moment: there before it does.
+        4
+    } else if hdist > p.pearl_punish.far && hp > p.pearl_punish.hp && rp.ticks_since_hurt > 10 {
+        1
+    } else {
+        return None;
+    };
+    let (from, carry) = pearl_from(c, world, p);
+    // The flight to about there, the tick before the throw and the lead.
+    let flight = |q: [f64; 2]| pearl_aim(from, [q[0], world.floor_y, q[1]], carry).2 as f64 + 1.0 + p.pearl_lead;
+    let mut then = foresee_n(c, st, flight([them[0], them[2]]));
+    then = foresee_n(c, st, flight(then));
+    if let (true, Some(e)) = (kind == 4 && !sipping, air) {
+        // Where its potion breaks, a block from it on the bot's side.
+        let b = potion_break(e.pos, e.motion, world.floor_y);
+        let (dx, dz) = (me[0] - b[0], me[2] - b[1]);
+        let d = dx.hypot(dz).max(1e-6);
+        let q = [(b[0] + dx / d).clamp(-lim, lim), them[1], (b[1] + dz / d).clamp(-lim, lim)];
+        return Some((q, kind, None));
+    }
+    let noise = |rng: &mut Rng| if p.pearl_punish.noise > 0.0 { [gauss(rng) * p.pearl_punish.noise, gauss(rng) * p.pearl_punish.noise] } else { [0.0, 0.0] };
+    let off = if running && kind == 4 && !sipping && !potting {
+        // In its way, a block and a half ahead of it.
+        let s = v[0].hypot(v[1]).max(1e-6);
+        [v[0] / s * 1.5, v[1] / s * 1.5]
+    } else {
+        // In reach of it, as far round from where it looks as the way
+        // there leaves room for: beside it or behind it.
+        let to_me = [me[0] - then[0], me[2] - then[1]];
+        let d = to_me[0].hypot(to_me[1]).max(1e-6);
+        let to_me = [to_me[0] / d, to_me[1] / d];
+        let r = 1.7;
+        let mut best = ([to_me[0] * r, to_me[1] * r], f64::MIN);
+        let first = if rng.chance(0.5) { 1.0 } else { -1.0 };
+        for deg in [30.0, 60.0, 90.0, 120.0] {
+            for sign in [first, -first] {
+                let (sn, cs) = (sign * deg as f64).to_radians().sin_cos();
+                let u = [to_me[0] * cs - to_me[1] * sn, to_me[0] * sn + to_me[1] * cs];
+                let q = [then[0] + u[0] * r, then[1] + u[1] * r];
+                if q[0].abs() > lim || q[1].abs() > lim || (q[0] - me[0]).hypot(q[1] - me[2]) < 2.5 {
+                    continue;
+                }
+                // The way there passes clear of it, now and then.
+                let near = |at: [f64; 2]| {
+                    let (ax, az) = (q[0] - from[0], q[1] - from[2]);
+                    let t = (((at[0] - from[0]) * ax + (at[1] - from[2]) * az) / (ax * ax + az * az).max(1e-9)).clamp(0.0, 1.0);
+                    (from[0] + ax * t - at[0]).hypot(from[2] + az * t - at[1])
+                };
+                if near(then) < 0.9 || near([them[0], them[2]]) < 0.9 {
+                    continue;
+                }
+                let score = -(face[0] * u[0] + face[1] * u[1]);
+                if score > best.1 + 1e-9 {
+                    best = ([u[0] * r, u[1] * r], score);
+                }
+            }
+        }
+        best.0
+    };
+    let e = noise(rng);
+    let off = [off[0] + e[0], off[1] + e[1]];
+    let q = [(then[0] + off[0]).clamp(-lim, lim), them[1], (then[1] + off[1]).clamp(-lim, lim)];
+    if (q[0] - me[0]).hypot(q[2] - me[2]) < 2.5 {
+        return None;
+    }
+    Some((q, kind, Some(off)))
+}
+
 /// The yaw to run along away from the opponent (`dx`, `dz` and `hdist`
 /// are where it is): straight away, or as near to that as the walls leave
 /// room for five blocks on, the way nearest the current view first.
@@ -950,7 +1169,15 @@ fn act_flat(c: &Client, world: &World, cfg: &ClientCfg, p: &BotParams, st: &mut 
     }
     // A presser on an opponent that is hurt or healing itself: straight
     // at it, in jumps while it is out of reach.
-    if p.presser && (rp.health <= 12.0 || rp.item == Item::Potion || c.thrown.iter().any(|e| e.kind == Kind::Potion && !e.mine)) {
+    // A punisher (`PearlPunish`) does so too on one that drinks or eats, or
+    // runs off hurt.
+    let pearl_rush = p.pearl_punish.on && hdist < p.pearl_punish.rush && {
+        let sipping = rp.using && matches!(rp.item, Item::Drink | Item::Food);
+        let yaw = (rp.yaw as f64).to_radians();
+        let off = hdist > 1e-6 && (-yaw.sin() * dx + yaw.cos() * dz) / hdist > 0.5 && rp.health <= 12.0;
+        sipping || off
+    };
+    if pearl_rush || (p.presser && (rp.health <= 12.0 || rp.item == Item::Potion || c.thrown.iter().any(|e| e.kind == Kind::Potion && !e.mine))) {
         inp.strafe = 0;
         if hdist > 3.2 && lp.l.body.on_ground && !spacing {
             inp.jump = true;
@@ -1025,7 +1252,17 @@ fn act_flat(c: &Client, world: &World, cfg: &ClientCfg, p: &BotParams, st: &mut 
                 && !st.fleeing;
             if ready {
                 // A spammer out of a combo throws as the others do.
-                let to = if p.spam && st.taken_run < 3 { spam_target(c, world, p, st, hdist, rng) } else { pearl_target(c, world, p, st, hdist, rng) };
+                let to = if p.pearl_punish.on && !p.spam {
+                    pearl_punish_target(c, world, p, st, hdist, rng).map(|(q, kind, off)| {
+                        st.pearl_track = off.is_some();
+                        st.pearl_off = off.unwrap_or([0.0, 0.0]);
+                        (q, kind)
+                    })
+                } else if p.spam && st.taken_run < 3 {
+                    spam_target(c, world, p, st, hdist, rng)
+                } else {
+                    pearl_target(c, world, p, st, hdist, rng)
+                };
                 if let Some((q, kind)) = to {
                     st.pearl_to = q;
                     st.pearl_kind = kind;
@@ -1037,9 +1274,22 @@ fn act_flat(c: &Client, world: &World, cfg: &ClientCfg, p: &BotParams, st: &mut 
         1 => {
             let b = &lp.l.body;
             let from = [b.pos[0] + b.motion[0], (b.pos[1] + b.motion[1]).max(world.floor_y) + EYE_HEIGHT, b.pos[2] + b.motion[2]];
-            let q = st.pearl_to;
-            let want_yaw = angles_to(from, q).0;
-            let want_pitch = pearl_pitch((q[0] - from[0]).hypot(q[2] - from[2]), from[1] - world.floor_y);
+            let mut q = st.pearl_to;
+            let (want_yaw, want_pitch) = if p.pearl_punish.on && !p.spam {
+                // Exactly onto the spot, which follows the opponent.
+                let (_, carry) = pearl_from(c, world, p);
+                if st.pearl_track {
+                    let lim = world.half - 1.0;
+                    let n = pearl_aim(from, q, carry).2 as f64 + p.pearl_lead;
+                    let then = foresee_n(c, st, n);
+                    q = [(then[0] + st.pearl_off[0]).clamp(-lim, lim), q[1], (then[1] + st.pearl_off[1]).clamp(-lim, lim)];
+                    st.pearl_to = q;
+                }
+                let (y, pt, _) = pearl_aim(from, [q[0], world.floor_y, q[2]], carry);
+                (y, pt)
+            } else {
+                (angles_to(from, q).0, pearl_pitch((q[0] - from[0]).hypot(q[2] - from[2]), from[1] - world.floor_y))
+            };
             let lim = p.max_turn.max(45.0);
             let dyaw = mth::wrap_deg(want_yaw - lp.l.yaw as f64);
             let dpitch = want_pitch - lp.l.pitch as f64;

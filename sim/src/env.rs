@@ -651,6 +651,21 @@ pub struct Params {
     /// both players are learners or the learner's past, and a handicap
     /// neither can see makes those duels uneven instead of a fair test.
     pub extras_bot_only: f64,
+    /// Share of the duels against the hardest bot (`insane_prob`) in which
+    /// it throws its pearls as the best bots do (`bot::PearlPunish`): at
+    /// the opponent's slow moments (a drink, a meal, a potion, a run to
+    /// heal, health low enough to heal any moment), back to it from further
+    /// than `pearl_punish_far` blocks while it has more than
+    /// `pearl_punish_hp` health, and out of a combo, each one aimed to put
+    /// it in reach beside or behind where the opponent will be; and it runs
+    /// straight at one that drinks, eats or runs off hurt within
+    /// `pearl_punish_rush` blocks. `pearl_punish_noise`: the spread of its
+    /// landings, in blocks (0: exact). Drawn only when above zero.
+    pub pearl_punish: f64,
+    pub pearl_punish_hp: f64,
+    pub pearl_punish_far: f64,
+    pub pearl_punish_rush: f64,
+    pub pearl_punish_noise: f64,
 }
 
 impl Default for Params {
@@ -845,6 +860,11 @@ impl Default for Params {
             w_pot_stock: 0.0,
             pot_stock_cap: 12.0,
             extras_bot_only: 0.0,
+            pearl_punish: 0.0,
+            pearl_punish_hp: bot::PearlPunish::OFF.hp as f64,
+            pearl_punish_far: bot::PearlPunish::OFF.far,
+            pearl_punish_rush: bot::PearlPunish::OFF.rush,
+            pearl_punish_noise: bot::PearlPunish::OFF.noise,
         }
     }
 }
@@ -1071,6 +1091,11 @@ impl Params {
             217 => self.extras_bot_only = v,
             218 => self.crit_prob = v,
             219 => self.opp_kb_v = v,
+            230 => self.pearl_punish = v,
+            231 => self.pearl_punish_hp = v,
+            232 => self.pearl_punish_far = v,
+            233 => self.pearl_punish_rush = v,
+            234 => self.pearl_punish_noise = v,
             _ => return false,
         }
         true
@@ -2222,6 +2247,17 @@ pub fn new_duel(p: &Params, rng: &mut Rng, mode: Mode) -> (Match, [f64; 2], BotP
     }
     if p.opp_kb_v > 0.0 && m.c[1].edge.kb_taken < 1.0 && rng.chance(p.opp_kb_v) {
         m.c[1].edge.kb_v_taken = m.c[1].edge.kb_taken;
+    }
+    // Drawn only when asked for, so that duels without it come out as they
+    // did.
+    if insane && p.pearl_punish > 0.0 && rng.chance(p.pearl_punish) {
+        bot.pearl_punish = bot::PearlPunish {
+            on: true,
+            hp: p.pearl_punish_hp as f32,
+            far: p.pearl_punish_far,
+            rush: p.pearl_punish_rush,
+            noise: p.pearl_punish_noise.max(0.0),
+        };
     }
     (m, ping, bot, lesson)
 }
