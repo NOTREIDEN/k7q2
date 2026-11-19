@@ -342,6 +342,16 @@ def main():
                         opp_pearls_per_min=st["pearls1"] / mins0,
                         pearl_first_hit=st["pearl_won0"] / max(st["pearl_won0"] + st["pearl_lost0"], 1.0),
                         opp_pearl_answered=st["pearl_lost1"] / max(st["pearl_won1"] + st["pearl_lost1"], 1.0),
+                        # Where its pearls landed next to the other player (the share in
+                        # front of it, by the line to the throw, and into its sword), the
+                        # share thrown on the other's potion, and the other's potions a
+                        # pearl took per minute, with the health they took.
+                        pearl_front=st.get("pearl_front0", 0.0) / max(st.get("pearl_front0", 0.0) + st.get("pearl_side0", 0.0) + st.get("pearl_back0", 0.0), 1.0),
+                        pearl_faced=st.get("pearl_faced0", 0.0) / max(st.get("pearl_front0", 0.0) + st.get("pearl_side0", 0.0) + st.get("pearl_back0", 0.0), 1.0),
+                        pearl_faced_lost=st.get("pearl_faced_lost0", 0.0) / max(st.get("pearl_faced0", 0.0), 1.0),
+                        pearl_on_pot=st.get("pearl_on_pot0", 0.0) / max(st["pearls0"], 1.0),
+                        pearl_pots_per_min=st.get("pearl_pots0", 0.0) / mins0,
+                        pearl_deny=st.get("pearl_deny0", 0.0) / max(st.get("pearl_pots0", 0.0), 1.0),
                         # With real health: the share of the duels that ended with a death
                         # which player 0 won, deaths of either side per minute, potions per
                         # minute, and per potion the health it gave its thrower (eight at

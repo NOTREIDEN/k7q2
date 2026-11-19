@@ -35,7 +35,7 @@ pub const FOOD_TO_SPRINT: i32 = 6;
 pub const SHAKE_DEG: f32 = 6.0;
 pub const SHAKE_TICKS: i32 = 2;
 pub const PRIV_DIM: usize = 71;
-pub const STATS_DIM: usize = 111;
+pub const STATS_DIM: usize = 127;
 /// Floats per player and in total written by `Env::write_view`.
 pub const VIEW_PLAYER: usize = 45;
 pub const VIEW_DIM: usize = 2 * VIEW_PLAYER + 24;
@@ -508,6 +508,32 @@ pub struct Params {
     /// potions of it are in the inventory instead, as most players carry
     /// them: to drink one it has to be brought down first.
     pub drinks_stowed: f64,
+    /// Share of the duels against scripted bots of level 3 and up (runners
+    /// aside) in which the bot pots as players do with the opponent on
+    /// them: at a health drawn from 6 to 11, or once it has taken three
+    /// hits in a row with 14 or less, it takes the potion in hand, turns
+    /// its back and sprints away for up to `pot_turn_run_s` seconds (drawn
+    /// per potion from a quarter of that on) before it throws, then comes
+    /// back into it (`BotParams::pot_turn`). The moment to get at it: a
+    /// pearl next to it lands by its potion.
+    pub pot_turn_prob: f64,
+    pub pot_turn_run_s: f64,
+    /// Of those duels, the share in which the bot starts hurt enough to
+    /// pot at once (4 to 6 health), 3 to 7 blocks away.
+    pub pot_turn_hurt: f64,
+    /// Given back to the thrower of a pearl, out of what it cost
+    /// (`w_pearl_cost`), when it took the other player's potion: a potion
+    /// of that player that broke in the two seconds after the landing,
+    /// within four blocks of the thrower, and gave the thrower health or
+    /// its own thrower less than all of it. This share of the cost for all
+    /// eight points of a potion taken, in proportion for fewer; never more
+    /// than the pearl cost, and only what a kill has not given back yet.
+    pub w_pearl_pot: f32,
+    /// Taken from the thrower of a pearl that landed in front of the other
+    /// player (within `NEAR_LAND` blocks and 60 degrees of the way it
+    /// faces: into its sword) when the next hit within two seconds is the
+    /// other player's. Nothing can be earned with it.
+    pub w_pearl_front: f32,
 }
 
 impl Default for Params {
@@ -667,6 +693,11 @@ impl Default for Params {
             throw_carry_prob: 0.0,
             teach: 0.0,
             drinks_stowed: 0.0,
+            pot_turn_prob: 0.0,
+            pot_turn_run_s: 1.0,
+            pot_turn_hurt: 0.0,
+            w_pearl_pot: 0.0,
+            w_pearl_front: 0.0,
         }
     }
 }
@@ -855,6 +886,11 @@ impl Params {
             118 => self.w_hungry = v as f32,
             119 => self.w_slow = v as f32,
             120 => self.drinks_stowed = v,
+            189 => self.pot_turn_prob = v,
+            190 => self.pot_turn_run_s = v,
+            191 => self.pot_turn_hurt = v,
+            192 => self.w_pearl_pot = v as f32,
+            193 => self.w_pearl_front = v as f32,
             _ => return false,
         }
         true
@@ -972,6 +1008,28 @@ pub struct Stats {
     /// other player and counted.
     pub tool_uses: [f64; 2],
     pub tool_hits: [f64; 2],
+    /// Pearls that landed within `NEAR_LAND` blocks of the other player,
+    /// by where: in front of it (within 60 degrees of the line from it to
+    /// where the thrower threw from: straight at it), to a side (60 to
+    /// 120) or behind it (further round). The rest of `landings` went
+    /// further away.
+    pub pearl_front: [f64; 2],
+    pub pearl_side: [f64; 2],
+    pub pearl_back: [f64; 2],
+    /// Of those, the ones that landed within 60 degrees of the way the
+    /// other player faced (into its sword), and of these the ones after
+    /// which the next hit within two seconds was its (`w_pearl_front`).
+    pub pearl_faced: [f64; 2],
+    pub pearl_faced_lost: [f64; 2],
+    /// Pearls thrown while the other player potted: a healing potion in
+    /// its hand or in the air.
+    pub pearl_on_pot: [f64; 2],
+    /// Potions of the other player that broke in the two seconds after a
+    /// pearl of this one landed, within four blocks of this one, and the
+    /// health they took from it: given to this one, or not offered to
+    /// their thrower (`w_pearl_pot`).
+    pub pearl_pots: [f64; 2],
+    pub pearl_deny: [f64; 2],
 }
 
 impl Stats {
@@ -1041,6 +1099,14 @@ impl Stats {
         for a in 0..2 {
             self.tool_uses[a] += o.tool_uses[a];
             self.tool_hits[a] += o.tool_hits[a];
+            self.pearl_front[a] += o.pearl_front[a];
+            self.pearl_side[a] += o.pearl_side[a];
+            self.pearl_back[a] += o.pearl_back[a];
+            self.pearl_faced[a] += o.pearl_faced[a];
+            self.pearl_faced_lost[a] += o.pearl_faced_lost[a];
+            self.pearl_on_pot[a] += o.pearl_on_pot[a];
+            self.pearl_pots[a] += o.pearl_pots[a];
+            self.pearl_deny[a] += o.pearl_deny[a];
         }
     }
     pub fn write(&self, out: &mut [f64]) {
@@ -1156,6 +1222,22 @@ impl Stats {
             self.tool_uses[1],
             self.tool_hits[0],
             self.tool_hits[1],
+            self.pearl_front[0],
+            self.pearl_front[1],
+            self.pearl_side[0],
+            self.pearl_side[1],
+            self.pearl_back[0],
+            self.pearl_back[1],
+            self.pearl_faced[0],
+            self.pearl_faced[1],
+            self.pearl_faced_lost[0],
+            self.pearl_faced_lost[1],
+            self.pearl_on_pot[0],
+            self.pearl_on_pot[1],
+            self.pearl_pots[0],
+            self.pearl_pots[1],
+            self.pearl_deny[0],
+            self.pearl_deny[1],
         ];
         for (o, x) in out.iter_mut().zip(v.iter()) {
             *o = *x;
@@ -1178,6 +1260,7 @@ struct Moment {
     ping_ms: [f64; 2],
     landed: Option<(usize, i32)>,
     pearl_kill: [i32; 2],
+    pw: PearlWatch,
     since_block: [i32; 2],
     pot_since: [i32; 2],
     pot_back: [bool; 2],
@@ -1188,6 +1271,25 @@ struct Moment {
     turn_last: [[f32; 2]; 2],
     turn_age: [[i32; 2]; 2],
     lesson: u8,
+}
+
+/// How close to the other player a pearl lands to count as landing at it
+/// (`Stats::pearl_front`, `Params::w_pearl_front`), and how close to a
+/// potion of the other player its thrower has to be for the pearl to have
+/// taken it (`Params::w_pearl_pot`), in blocks across the ground.
+pub const NEAR_LAND: f64 = 6.0;
+pub const TAKE_DIST: f64 = 4.0;
+
+/// What is watched of each player's last pearl: where it was thrown from,
+/// whether the landing `Env::landed` watches went into the other player's
+/// sword, the ticks left in which a potion of the other player counts as
+/// taken by it, and how much of what it cost has been given back.
+#[derive(Clone, Copy, Debug, Default)]
+struct PearlWatch {
+    from: [V3; 2],
+    faced: bool,
+    take: [i32; 2],
+    back: [f32; 2],
 }
 
 /// The most players that gank the first player at once.
@@ -1234,6 +1336,7 @@ pub struct Env {
     /// Server ticks left in which a death of the other player gives each
     /// player back what its last pearl cost (`w_pearl_cost`).
     pearl_kill: [i32; 2],
+    pw: PearlWatch,
     /// Own ticks since each player last had its sword up; 0 while it is.
     since_block: [i32; 2],
     /// Ticks since each player's last potion throw, whether its crosshair
@@ -1369,7 +1472,12 @@ pub fn new_duel(p: &Params, rng: &mut Rng, mode: Mode) -> (Match, [f64; 2], BotP
     // A duel against the hardest bot there is (`Params::insane_prob`):
     // drawn only when asked for.
     let insane = mode == Mode::Bot && lesson == 0 && p.insane_prob > 0.0 && rng.chance(p.insane_prob);
+    // A bot that pots with a turn (`Params::pot_turn_prob`), and one that
+    // starts hurt enough to pot at once, close by: drawn only when asked for.
+    let pot_turn = mode == Mode::Bot && lesson == 0 && p.pot_turn_prob > 0.0 && rng.chance(p.pot_turn_prob);
+    let turn_hurt = pot_turn && p.pot_turn_hurt > 0.0 && rng.chance(p.pot_turn_hurt);
     let (d_lo, d_hi) = match lesson {
+        0 if turn_hurt => (3.0, 7.0),
         0 => (p.start_dist_min, p.start_dist_max),
         5 | 6 => (2.5, 5.0),
         8 => (3.5, 7.0),
@@ -1797,6 +1905,21 @@ pub fn new_duel(p: &Params, rng: &mut Rng, mode: Mode) -> (Match, [f64; 2], BotP
     }
     bot.circler = lesson == 5;
     bot.carry = m.s.cfg.throw_carry;
+    // Drawn only when asked for, so that duels without it come out as they
+    // always did.
+    if pot_turn && bot.level >= 3 && !bot.runner {
+        bot.pot_turn = true;
+        bot.pot_run = (p.pot_turn_run_s * 20.0).round().max(1.0) as i32;
+        if turn_hurt && real && m.s.p[1].potions != 0 {
+            // Hurt enough to pot at once, a few blocks from the first
+            // player.
+            let h = (rng.range(4.0, 6.0) * 2.0).round() as f32 / 2.0;
+            m.s.p[1].health = h;
+            m.s.p[1].last_health = h;
+            m.c[1].lp.health = h;
+            m.c[0].rp.health = h;
+        }
+    }
     (m, ping, bot, lesson)
 }
 
@@ -1828,6 +1951,7 @@ impl Env {
             ping_ms: ping,
             landed: None,
             pearl_kill: [0; 2],
+            pw: PearlWatch::default(),
             since_block: [1000; 2],
             pot_since: [1000; 2],
             was_open: [false; 2],
@@ -1864,6 +1988,7 @@ impl Env {
             ping_ms: self.ping_ms,
             landed: self.landed,
             pearl_kill: self.pearl_kill,
+            pw: self.pw,
             since_block: self.since_block,
             pot_since: self.pot_since,
             pot_back: self.pot_back,
@@ -1888,6 +2013,7 @@ impl Env {
         self.ping_ms = k.ping_ms;
         self.landed = k.landed;
         self.pearl_kill = k.pearl_kill;
+        self.pw = k.pw;
         self.since_block = k.since_block;
         self.pot_since = k.pot_since;
         self.pot_back = k.pot_back;
@@ -2063,6 +2189,7 @@ impl Env {
         self.bot_state = BotState::default();
         self.landed = None;
         self.pearl_kill = [0; 2];
+        self.pw = PearlWatch::default();
         self.since_block = [1000; 2];
         self.pot_since = [1000; 2];
         self.was_open = [false; 2];
@@ -2110,6 +2237,36 @@ impl Env {
             self.rew_acc[l.thrower] -= p.w_taken * p.w_damage * cost;
             self.ep.landings[l.thrower] += 1.0;
             self.landed = Some((l.thrower, 40));
+            // Where it landed, seen from the other player.
+            let t = l.thrower;
+            let o = &self.m.s.p[1 - t];
+            let at = [l.pos[0] - o.l.body.pos[0], l.pos[2] - o.l.body.pos[2]];
+            let d = at[0].hypot(at[1]);
+            let angle = |v: [f64; 2]| -> f64 {
+                let n = v[0].hypot(v[1]);
+                if n < 1e-9 || d < 1e-9 {
+                    return 0.0;
+                }
+                ((at[0] * v[0] + at[1] * v[1]) / (n * d)).clamp(-1.0, 1.0).acos().to_degrees()
+            };
+            let from = self.pw.from[t];
+            let line = angle([from[0] - o.l.body.pos[0], from[2] - o.l.body.pos[2]]);
+            let yaw = (o.l.yaw as f64).to_radians();
+            let faced = d <= NEAR_LAND && angle([-yaw.sin(), yaw.cos()]) < 60.0;
+            if d <= NEAR_LAND {
+                if line < 60.0 {
+                    self.ep.pearl_front[t] += 1.0;
+                } else if line <= 120.0 {
+                    self.ep.pearl_side[t] += 1.0;
+                } else {
+                    self.ep.pearl_back[t] += 1.0;
+                }
+                if faced {
+                    self.ep.pearl_faced[t] += 1.0;
+                }
+            }
+            self.pw.faced = faced;
+            self.pw.take[t] = 40;
         }
         self.m.s.landings.clear();
     }
@@ -2139,6 +2296,20 @@ impl Env {
             self.ep.pot_offer[t] += s.offered[t] as f64;
             if s.offered[t] >= POTION_HEAL {
                 self.ep.pot_perfect[t] += 1.0;
+            }
+            // Taken by a pearl of the other player that landed just before,
+            // next to where it broke: the health it gave that player, and
+            // what it did not offer its thrower.
+            let a = 1 - t;
+            let q = self.m.s.p[a].l.body.pos;
+            if self.pw.take[a] > 0 && (q[0] - s.pos[0]).hypot(q[2] - s.pos[2]) <= TAKE_DIST {
+                let took = (s.healed[a] + (POTION_HEAL - s.offered[t]).max(0.0)).min(POTION_HEAL);
+                self.ep.pearl_pots[a] += 1.0;
+                self.ep.pearl_deny[a] += took as f64;
+                let owed = (p.w_pearl_cost - self.pw.back[a]).max(0.0);
+                let give = (p.w_pearl_pot * p.w_pearl_cost * took / POTION_HEAL).clamp(0.0, owed);
+                self.rew_acc[a] += give;
+                self.pw.back[a] += give;
             }
         }
         self.m.s.splashes.clear();
@@ -2182,7 +2353,8 @@ impl Env {
                     } else {
                         self.rew_acc[a] += self.params.w_win;
                         if self.pearl_kill[a] > 0 {
-                            self.rew_acc[a] += self.params.w_pearl_cost;
+                            // What a taken potion has not given back yet.
+                            self.rew_acc[a] += self.params.w_pearl_cost - self.pw.back[a];
                             self.pearl_kill[a] = 0;
                         }
                     }
@@ -2201,6 +2373,10 @@ impl Env {
             } else {
                 self.ep.pearl_lost[thrower] += 1.0;
                 self.rew_acc[thrower] -= w;
+                if self.pw.faced {
+                    self.ep.pearl_faced_lost[thrower] += 1.0;
+                    self.rew_acc[thrower] -= self.params.w_pearl_front;
+                }
             }
         }
         let (wh, wt) = (self.params.w_hit, self.params.w_taken);
@@ -2510,12 +2686,17 @@ impl Env {
                 self.ep.pearl_low[id] += 1.0;
             }
             self.pearl_kill[id] = (self.params.pearl_kill_s * 20.0).round().max(1.0) as i32;
+            self.pw.from[id] = self.m.s.p[id].l.body.pos;
+            self.pw.back[id] = 0.0;
             let o = &self.m.s.p[1 - id];
             let potting = o.in_hand().0 == Item::Potion || self.m.s.thrown.iter().any(|t| t.thrower == 1 - id && t.kind == Kind::Potion && !t.dead);
             let (a, b) = (&self.m.s.p[id].l.body.pos, &o.l.body.pos);
             let apart = (a[0] - b[0]).hypot(a[2] - b[2]) > 3.0;
             if potting || self.combo[1 - id] >= 2 || (self.combo[id] >= 2 && apart) {
                 self.ep.pearl_sense[id] += 1.0;
+            }
+            if potting {
+                self.ep.pearl_on_pot[id] += 1.0;
             }
         }
         let duel = self.duel();
@@ -2608,6 +2789,7 @@ impl Env {
             }
             for a in 0..2 {
                 self.pearl_kill[a] = (self.pearl_kill[a] - 1).max(0);
+                self.pw.take[a] = (self.pw.take[a] - 1).max(0);
             }
             self.ticks_left -= 1;
             self.change_damage();
