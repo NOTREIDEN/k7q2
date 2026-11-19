@@ -95,3 +95,12 @@ fn off_by_default() {
     assert_eq!((p.w_late, p.late_pot_free, p.w_hurt_click), (0.1, 5.0, 0.02));
 }
 
+
+#[test]
+fn the_hardest_bot_ping_is_a_param() {
+    let p = Params::default();
+    assert_eq!((p.insane_ping_min_ms, p.insane_ping_max_ms), (0.0, 60.0));
+    let mut p = Params::default();
+    assert!(p.set(244, 100.0) && p.set(245, 250.0));
+    assert_eq!((p.insane_ping_min_ms, p.insane_ping_max_ms), (100.0, 250.0));
+}

@@ -614,6 +614,11 @@ pub struct Params {
     /// player cannot take a full hit yet (`ServerPlayer::hurt_clicks`): its
     /// own client stopped the sprint and slowed down for nothing.
     pub w_hurt_click: f32,
+    /// The ping of the hardest bot, drawn per duel between these (a bot on
+    /// the server itself by default; a cheater far from it, or with a
+    /// backtrack on top, above that).
+    pub insane_ping_min_ms: f64,
+    pub insane_ping_max_ms: f64,
     /// Share of the duels against a scripted bot of level 3 or more (the
     /// hardest one too) in which it does not hit into a block
     /// (`BotParams::select`): it holds its click for up to `select_wait`
@@ -878,6 +883,8 @@ impl Default for Params {
             w_late: 0.0,
             late_pot_free: 8.0,
             w_hurt_click: 0.0,
+            insane_ping_min_ms: 0.0,
+            insane_ping_max_ms: 60.0,
             bot_select: 0.0,
             select_wait: 8.0,
             select_block: 0.5,
@@ -1130,6 +1137,8 @@ impl Params {
             240 => self.w_late = v as f32,
             241 => self.late_pot_free = v as f32,
             242 => self.w_hurt_click = v as f32,
+            244 => self.insane_ping_min_ms = v,
+            245 => self.insane_ping_max_ms = v,
             225 => self.bot_select = v,
             226 => self.select_wait = v,
             227 => self.select_block = v,
@@ -1887,8 +1896,8 @@ pub fn new_duel(p: &Params, rng: &mut Rng, mode: Mode) -> (Match, [f64; 2], BotP
         let (lo, hi) = if i == 0 && p.agent_ping_min_ms >= 0.0 {
             (p.agent_ping_min_ms, p.agent_ping_max_ms)
         } else if insane {
-            // A bot on the server itself, or a player close to it.
-            (0.0, 60.0)
+            // A bot on the server itself, or a player close to it, by default.
+            (p.insane_ping_min_ms, p.insane_ping_max_ms)
         } else {
             (p.ping_min_ms, p.ping_max_ms)
         };
