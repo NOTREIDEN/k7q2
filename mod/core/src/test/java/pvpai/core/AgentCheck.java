@@ -269,7 +269,7 @@ public final class AgentCheck {
             throw new IOException("not a file of duels");
         }
         int format = i();
-        if (format < 5 || format > 7) {
+        if (format < 5 || format > 8) {
             throw new IOException("a file of another format");
         }
         int obsDim = i(), heads = i();
@@ -281,12 +281,45 @@ public final class AgentCheck {
         // Format 7: the potion guard and the decision rule of the agent as well.
         boolean guard = false;
         float[] rule = new float[10];
-        if (format == 7) {
+        if (format >= 7) {
             guard = b();
             for (int k = 0; k < 10; k++) {
                 rule[k] = (float) n();
             }
         }
+        // Format 8: the guard against dying with potions at hand as well.
+        boolean safety = false;
+        int safetyFlight = 5;
+        float safetyExtra = 0.0f, safetyMargin = 0.5f, safetyCrit = 1.5f;
+        double safetyDist = 6.0;
+        int safetyPitch = 0, safetyTurn = 0;
+        boolean release = false;
+        boolean guess = false, guessAuto = false;
+        float guessBlock = 0.75f, guessScale = 1.1f;
+        boolean safetyHidden = false, oppShown = false, oppShownAuto = false;
+        float oppShownHealth = 1.0f;
+        int guessRegen = 160;
+        if (format == 8) {
+            safety = b();
+            safetyFlight = i();
+            safetyExtra = (float) n();
+            safetyMargin = (float) n();
+            safetyCrit = (float) n();
+            safetyDist = n();
+            safetyPitch = i();
+            safetyTurn = i();
+            release = b();
+            guess = b();
+            guessBlock = (float) n();
+            guessRegen = i();
+            guessAuto = b();
+            guessScale = (float) n();
+            safetyHidden = b();
+            oppShown = b();
+            oppShownHealth = (float) n();
+            oppShownAuto = b();
+        }
+        int safetyActs = 0;
         int plansMade = 0, planTicks = 0, planTicksSame = 0, plansSame = 0, walkTicks = 0, walkSame = 0;
         int firstPlan = -1, firstWalk = -1;
         int plansTried = 0, ruleActs = 0;
@@ -354,6 +387,25 @@ public final class AgentCheck {
                 agent.fullHealS = healS;
                 agent.fullHealD = healD;
                 agent.fullHealRestore = healR;
+                agent.potSafety = safety;
+                agent.potSafetyFlight = safetyFlight;
+                agent.potSafetyExtra = safetyExtra;
+                agent.potSafetyMargin = safetyMargin;
+                agent.potSafetyCrit = safetyCrit;
+                agent.potSafetyDist = safetyDist;
+                agent.potSafetyPitch = safetyPitch;
+                agent.potSafetyTurn = safetyTurn;
+                agent.turnRelease = release;
+                agent.hpGuess = guess && duel.realHealth;
+                agent.hpGuessAuto = guessAuto;
+                agent.hpGuessBlock = guessBlock;
+                agent.hpGuessRegen = guessRegen;
+                agent.hpGuessScale = guessScale;
+                agent.potSafetyHidden = safetyHidden;
+                agent.oppShown = oppShown;
+                agent.oppShownHealth = oppShownHealth;
+                agent.oppShownAuto = oppShownAuto;
+                agent.hpGuessHit = duel.hitHealth;
                 book = new Book(feet);
                 duels++;
             }
@@ -442,10 +494,11 @@ public final class AgentCheck {
             for (int k = 0; k < heads; k++) {
                 action[k] = i();
             }
-            int tried = agent.healPlansTried, acts = agent.potionRuleActs;
+            int tried = agent.healPlansTried, acts = agent.potionRuleActs, sacts = agent.potSafetyActs;
             long t0 = System.nanoTime();
             int[] got = agent.keys(view, blocks, duel, action, rng).list();
             ruleActs += agent.potionRuleActs - acts;
+            safetyActs += agent.potSafetyActs - sacts;
             if (agent.healPlansTried != tried) {
                 double ms = (System.nanoTime() - t0) / 1e6;
                 if (plansTried == 0) {
@@ -543,7 +596,11 @@ public final class AgentCheck {
             System.out.println("fullheal (gate S " + healS + ", D " + healD + ", restore " + healR + "): " + plansMade + " plans made, the same " + plansSame
                 + "; " + planTicks + " ticks with a plan under way, the same plan and keys on " + planTicksSame + "; the client's tick worked out on "
                 + walkTicks + ", the same to the last bit on " + walkSame);
-            if (format == 7) {
+            if (format == 8) {
+                System.out.println("safety (flight " + safetyFlight + ", extra " + safetyExtra + ", margin " + safetyMargin + ", crit " + safetyCrit
+                    + ", dist " + safetyDist + ", pitch " + safetyPitch + ", turn " + safetyTurn + ", turn release " + release + "): the guard changed the choice on " + safetyActs + " ticks");
+            }
+            if (format >= 7) {
                 System.out.println("the decision rule (guard " + guard + ", " + Arrays.toString(rule) + ") changed the choice on " + ruleActs + " ticks");
             }
             if (plansTried > 0) {

@@ -414,9 +414,34 @@ fn main() {
     for (k, x) in [(67, 1.0), (85, 1.0), (86, 0.0), (87, 5.0), (73, 7.0), (74, 7.0), (88, 1.0), (89, 2.0), (97, 1.0), (98, 2.0), (99, 6.0), (62, 1.0), (105, 0.0)] {
         assert!(full.set(k, x));
     }
+    // FH_SAFETY: the first player's guard against dying with potions at
+    // hand (`Agent::safety`) on, as "flight,extra,margin,crit,dist,pitch,turn[,hidden]"; the
+    // file is then of format 8: format 7 with no potion guard and no
+    // decision rule, and the guard's numbers after them.
+    // FH_RELEASE=1 (format 8 only): the first player lets go of the right
+    // button on the tick of a turned throw's turn (`Agent::turn_release`).
+    let turn_release = env_i32("FH_RELEASE", 0) != 0;
+    // FH_GUESS (format 8): the first player's policy is shown a guess of the
+    // opponent's health (`Agent::guess`), as "block,regen,auto,scale" (auto 0 or
+    // 1); the hit is the duel's. Only in duels where hits cost health.
+    // FH_SHOWN (format 8): the first player's policy is shown a value in place
+    // of the opponent's health (`Agent::opp_shown`), as "health,auto".
+    let shown = std::env::var("FH_SHOWN").ok().map(|v| {
+        let x: Vec<f64> = v.split(',').map(|t| t.trim().parse().expect("a number")).collect();
+        pvpsim::agent::OppShown { health: x[0] as f32, auto: x[1] != 0.0 }
+    });
+    let guess = std::env::var("FH_GUESS").ok().map(|v| {
+        let x: Vec<f64> = v.split(',').map(|t| t.trim().parse().expect("a number")).collect();
+        pvpsim::agent::GuessCfg { hit: 0.0, scale: x[3] as f32, block: x[0] as f32, regen: x[1] as i32, auto: x[2] != 0.0 }
+    });
+    let safety = std::env::var("FH_SAFETY").ok().map(|v| {
+        let x: Vec<f64> = v.split(',').map(|t| t.trim().parse().expect("a number")).collect();
+        pvpsim::agent::SafetyCfg { flight: x[0] as i32, extra: x[1] as f32, margin: x[2] as f32, crit: x[3] as f32, dist: x[4], pitch: x[5] as i32, turn: x[6] as i32, hidden: x.get(7).is_some_and(|&h| h != 0.0) }
+    });
     let mut o = Out(Vec::new());
     o.n(5050.0);
-    o.n(6.0);
+    let f8 = safety.is_some() || turn_release || guess.is_some() || shown.is_some();
+    o.n(if f8 { 8.0 } else { 6.0 });
     o.n(OBS_DIM as u32);
     o.n(ACT_HEADS as u32);
     // The gate as fullheal::gate_open reads it.
@@ -428,6 +453,36 @@ fn main() {
     o.n(heal.s);
     o.n(heal.d);
     o.n(heal.restore);
+    if f8 {
+        let sc = safety.unwrap_or_default();
+        o.b(false);
+        for _ in 0..10 {
+            o.n(0.0);
+        }
+        o.b(safety.is_some());
+        o.n(sc.flight);
+        o.n(sc.extra);
+        o.n(sc.margin);
+        o.n(sc.crit);
+        o.n(sc.dist);
+        o.n(sc.pitch);
+        o.n(sc.turn);
+        o.b(turn_release);
+        let g = guess.unwrap_or_default();
+        o.b(guess.is_some());
+        o.n(g.block);
+        o.n(g.regen);
+        o.b(g.auto);
+        o.n(g.scale);
+        o.b(sc.hidden);
+        o.b(shown.is_some());
+        o.n(shown.map_or(0.0, |s| s.health));
+        o.b(shown.is_some_and(|s| s.auto));
+    }
+    let mut safety_acts = 0u32;
+    // Ticks of the first player with the guess shown, and the sum of how far
+    // it is from the health the server has.
+    let (mut guess_ticks, mut guess_off) = (0u32, 0f64);
     let mut rng = Rng::new(seed);
     let mut choose = [Chooser::new(seed.wrapping_mul(7) + 5), Chooser::new(seed.wrapping_mul(7) + 6)];
     // FH_TURNS: the share of the first player's ticks on which a potion
@@ -460,6 +515,8 @@ fn main() {
         for g in ag.iter_mut() {
             g.full_heal = Some(heal);
         }
+        ag[0].safety = safety;
+        ag[0].turn_release = turn_release;
         let cfg = &m.s.cfg;
         let d = Duel {
             arena_half: p.arena_half,
@@ -470,9 +527,12 @@ fn main() {
             pearl_cooldown: cfg.pearl_cooldown,
             drink_window_s: p.drink_window_s,
         };
+        ag[0].guess = guess.filter(|_| d.real_health).map(|g| pvpsim::agent::GuessCfg { hit: d.hit_health, ..g });
+        ag[0].opp_shown = shown;
         let mut bot_state = BotState::default();
         let mut left = rng.range(300.0, 900.0) as i32;
         let mut fresh = true;
+        let mut told_hidden = false;
         let mut told = Out(Vec::new());
         let mut count = 0u32;
         loop {
@@ -489,6 +549,7 @@ fn main() {
             if id == 0 {
                 left -= 1;
                 if left < 0 || written >= ticks || !m.s.p[0].alive() || !m.s.p[1].alive() {
+                    safety_acts += ag[0].safety_acts;
                     break;
                 }
             }
@@ -503,6 +564,14 @@ fn main() {
                 continue;
             }
             ag[id].before_tick(&m.c[id], &m.world);
+            if id == 0 && ag[0].hidden() && m.s.health_shown[0].is_none() && !told_hidden && std::env::var("FH_DEBUG").is_ok() {
+                told_hidden = true;
+                eprintln!("hidden seen with health shown: duel {duels} mode {mode:?} shown {} server {} ticks_since_hurt {}", m.c[0].rp.health, m.s.p[1].health, m.c[0].rp.ticks_since_hurt);
+            }
+            if id == 0 && ag[0].guess.is_some() && ag[0].opp_health(&m.c[0]) != m.c[0].rp.health {
+                guess_ticks += 1;
+                guess_off += (ag[0].opp_health(&m.c[0]) - m.s.p[1].health).abs() as f64;
+            }
             let mut obs = [0f32; OBS_DIM];
             ag[id].write_obs(&m.c[id], &m.world, &m.ccfg, &d, &mut obs);
             let mut action = choose[id].next();
@@ -583,6 +652,12 @@ fn main() {
     println!("carry of throws: not seen yet on {}, seen not to be on {}, seen to be on {}", seen[1], seen[0], seen[2]);
     println!("a tool on {} ticks, used {} times, {} hits with it", tools[0], tools[1], tools[2]);
     println!("fullheal: {plans} plans made, {plan_ticks} ticks with a plan under way");
+    if safety.is_some() {
+        println!("safety: the guard changed the choice on {safety_acts} ticks");
+    }
+    if guess.is_some() {
+        println!("guess: shown apart from the server's value on {guess_ticks} ticks, {:.3} off the real health on average", guess_off / guess_ticks.max(1) as f64);
+    }
     let cnt = |i: usize| pvpsim::fullheal::COUNTS[i].load(std::sync::atomic::Ordering::Relaxed);
     println!("fullheal counters (both players): {} turned throws, {} left to the policy by the gate, {} with no plan, {} plans dropped by a hit", cnt(0), cnt(46), cnt(4), cnt(5));
 }

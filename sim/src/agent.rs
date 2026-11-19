@@ -313,9 +313,107 @@ pub struct Agent {
     plan_t: usize,
     plan_pitch: f32,
     plan_pitch0: f32,
+    /// A last guard against dying with potions at hand (`safety_bar`),
+    /// when set; off by default (`Params::pot_safety`). And the ticks on
+    /// which it changed the policy's choice.
+    pub safety: Option<SafetyCfg>,
+    pub safety_acts: u32,
+    /// A potion thrown with a turn lets go of the right button on the
+    /// tick of the turn, so that the click on the next tick is a press of
+    /// its own: with the button held through the turn (a block) the click
+    /// throws nothing. Off by default (`Params::turn_release`).
+    pub turn_release: bool,
+    /// What it takes the opponent's health to be on a server that does not
+    /// send it (`GuessCfg`), when set; off by default
+    /// (`Params::opp_hp_guess`). The guess, the newest potion of each side
+    /// already counted, the health shown on its first tick, the opponent's
+    /// hurts seen since, whether the health shown ever changed, and whether
+    /// the policy is shown the guess.
+    pub guess: Option<GuessCfg>,
+    /// What the policy is shown of the opponent's health in place of what
+    /// the server sends (`OppShown`), when set; off by default. Before the
+    /// guess.
+    pub opp_shown: Option<OppShown>,
+    guess_hp: f32,
+    guess_ids: [u32; 2],
+    guess_first: f32,
+    guess_changed: bool,
+    guess_shown: bool,
+    hidden: bool,
 }
 
 const NO_SLOT: u8 = u8::MAX;
+
+/// See `Agent::opp_shown`. A network trained with the opponent's health
+/// hidden in every duel (`Params::opp_hp_hide_prob` 1) is shown the same
+/// value (`Params::opp_hp_shown`) on every server: `health` with `auto`
+/// off. With `auto` on, only once the server is seen to hide the health
+/// (`Agent::hidden`). A `health` below zero shows this player's own.
+#[derive(Clone, Copy, Debug)]
+pub struct OppShown {
+    pub health: f32,
+    pub auto: bool,
+}
+
+/// The lowest the guess of the opponent's health goes (`Agent::guess`).
+pub const GUESS_MIN: f32 = 0.5;
+
+/// See `Agent::guess`. The guess starts full and takes `scale` times `hit`
+/// (the cost of a plain hit in this duel, `Duel::hit_health`) off each
+/// time the opponent is seen hurt by a hit of its own (`scale` above one for the critical hits
+/// and the stronger hits inside the hurt time, which are not seen), `block`
+/// times that when it holds its sword up;
+/// each potion that breaks adds what this client foresees it gives the
+/// opponent, and one health comes back every `regen` ticks (natural
+/// regeneration on a full stomach). With `auto` the policy is shown the
+/// guess only once the server is seen to hide the health
+/// (`Agent::hidden`); without it, always.
+#[derive(Clone, Copy, Debug)]
+pub struct GuessCfg {
+    pub hit: f32,
+    pub scale: f32,
+    pub block: f32,
+    pub regen: i32,
+    pub auto: bool,
+}
+
+impl Default for GuessCfg {
+    fn default() -> Self {
+        GuessCfg { hit: 1.0, scale: 1.1, block: 0.75, regen: 160, auto: false }
+    }
+}
+
+/// See `Agent::safety_bar`.
+#[derive(Clone, Copy, Debug)]
+pub struct SafetyCfg {
+    /// Ticks from the click of a potion to its heal on the server.
+    pub flight: i32,
+    /// Hits counted on top of those the opponent can still land before
+    /// that heal, and health on top of what they cost.
+    pub extra: f32,
+    pub margin: f32,
+    /// The worst a hit can cost, as a share of the plain hit's cost of the
+    /// duel (a critical hit: one and a half).
+    pub crit: f32,
+    /// No rule with the opponent shown farther than this (blocks across
+    /// the ground).
+    pub dist: f64,
+    /// The pitch choice (`throw_pitch`) of the potion it throws, or the
+    /// policy's of the tick when below zero.
+    pub pitch: i32,
+    /// The turn of that potion: 0 none (the view keeps its yaw and takes
+    /// the pitch, the click follows on the next tick as for a turned
+    /// throw), 1 to 3 those of `BAR_TURNS`.
+    pub turn: i32,
+    /// Only on a server seen to hide the opponent's health (`Agent::hidden`).
+    pub hidden: bool,
+}
+
+impl Default for SafetyCfg {
+    fn default() -> Self {
+        SafetyCfg { flight: 5, extra: 0.0, margin: 0.5, crit: 1.5, dist: 6.0, pitch: 0, turn: 0, hidden: false }
+    }
+}
 
 /// Training only. The way a potion thrown with a turn used to be played
 /// for the policy, worked out from the player's own client: the pitch
@@ -407,7 +505,77 @@ impl Agent {
             plan_t: 0,
             plan_pitch: 0.0,
             plan_pitch0: 0.0,
+            safety: None,
+            safety_acts: 0,
+            turn_release: false,
+            guess: None,
+            opp_shown: None,
+            guess_hp: MAX_HEALTH,
+            guess_ids: [u32::MAX; 2],
+            guess_first: -1.0,
+            guess_changed: false,
+            guess_shown: false,
+            hidden: false,
         }
+    }
+
+    /// The opponent's health the policy is shown: what the server sends,
+    /// a value set in its place (`Agent::opp_shown`) or the guess
+    /// (`Agent::guess`).
+    pub fn opp_health(&self, c: &Client) -> f32 {
+        if let Some(f) = self.opp_shown {
+            if !f.auto || self.hidden {
+                return if f.health < 0.0 { c.lp.health } else { f.health };
+            }
+        }
+        if self.guess_shown {
+            self.guess_hp
+        } else {
+            c.rp.health
+        }
+    }
+
+    /// Whether the server is seen to hide the opponent's health: it was
+    /// shown at most one on the first tick of the duel (minemen.club sends
+    /// one on every tick; a duel starts at full health) and never changed
+    /// since. Kept only with `guess`, `opp_shown` or a guard that asks for
+    /// it (`SafetyCfg::hidden`).
+    pub fn hidden(&self) -> bool {
+        self.hidden
+    }
+
+    /// `Agent::guess` and `Agent::hidden` for this tick, after the potions'
+    /// fates are known.
+    fn guess_tick(&mut self, c: &Client) {
+        if self.guess.is_none() && self.opp_shown.is_none() && !self.safety.is_some_and(|s| s.hidden) {
+            return;
+        }
+        let rp = &c.rp;
+        if self.guess_first < 0.0 {
+            self.guess_first = rp.health;
+        }
+        self.guess_changed |= rp.health != self.guess_first;
+        self.hidden = !self.guess_changed && self.guess_first <= 1.0;
+        // A hurt that follows a hit of its own: a rod, a snowball or an egg
+        // hurts for nothing.
+        let hit_seen = rp.ticks_since_hurt == 0 && c.lp.ticks_since_attack <= HIT_WINDOW;
+        let Some(g) = self.guess else { return };
+        if self.guess_hp < MAX_HEALTH && g.regen > 0 {
+            self.guess_hp = (self.guess_hp + 1.0 / g.regen as f32).min(MAX_HEALTH);
+        }
+        if hit_seen {
+            let hit = if rp.using && rp.item == Item::Sword { g.hit * g.scale * g.block } else { g.hit * g.scale };
+            self.guess_hp = (self.guess_hp - hit).max(GUESS_MIN);
+        }
+        for k in 0..2 {
+            if let Some((id, _, heal)) = self.fate[k] {
+                if id != self.guess_ids[k] {
+                    self.guess_ids[k] = id;
+                    self.guess_hp = (self.guess_hp + heal[1]).min(MAX_HEALTH);
+                }
+            }
+        }
+        self.guess_shown = !g.auto || self.hidden;
     }
 
     /// Have it take the server to add its movement to its throws, or not,
@@ -452,13 +620,41 @@ impl Agent {
                 self.double = false;
             }
         }
+        let mut pitch_choice = if action.len() > 11 { action[11] } else { 0 };
+        // A potion of the guard's thrown with no turn (`SafetyCfg::turn`).
+        let mut down = false;
+        if let Some(s) = self.safety {
+            if self.potion_stage == 0 && self.turned == 0 {
+                let asked = bar;
+                bar = self.safety_bar(c, duel, bar);
+                if bar != asked {
+                    self.safety_acts += 1;
+                    if bar >= BAR_TURN {
+                        // The right button let go on the tick of the turn, so
+                        // that the click is a press of its own.
+                        inp.use_item = false;
+                        if s.pitch >= 0 {
+                            pitch_choice = s.pitch;
+                        }
+                        down = s.turn <= 0;
+                        bar = BAR_TURN + (s.turn - 1).clamp(0, 2);
+                    }
+                }
+            }
+        }
         let turns = BAR_TURNS.len() as i32;
-        let turn = if bar >= BAR_TURN { BAR_TURNS[((bar - BAR_TURN).min(2 * turns - 1) % turns) as usize] } else { 0 };
+        let turn = if down {
+            0
+        } else if bar >= BAR_TURN {
+            BAR_TURNS[((bar - BAR_TURN).min(2 * turns - 1) % turns) as usize]
+        } else {
+            0
+        };
         let double = bar >= BAR_TURN + turns;
         if !self.refill_keys(c, bar, &mut inp) {
             self.consume_keys(c, duel, bar, &mut inp);
-            let pitch = throw_pitch(if action.len() > 11 { action[11] } else { 0 });
-            self.potion_keys(c, bar == 1 || turn != 0, turn, pitch, &mut inp);
+            let pitch = throw_pitch(pitch_choice);
+            self.potion_keys(c, bar == 1 || turn != 0 || down, turn, down, pitch, &mut inp);
             if turn != 0 && self.turned == 1 {
                 self.double = double;
                 if self.potion_stage == 1 && self.full_heal.is_some() {
@@ -474,6 +670,57 @@ impl Agent {
             self.teach(c, world, mouse, if self.turned == 1 { turn } else { 0 });
         }
         inp
+    }
+
+    /// A last guard against dying with potions at hand (`SafetyCfg`): the
+    /// hotbar choice `bar` of the policy, or a potion thrown with a turn
+    /// (`BAR_TURN`, at the policy's pitch) when its health is within what
+    /// the opponent can take before a potion thrown now would heal. That
+    /// potion's heal comes `lag` ticks (the click to the server and the
+    /// server's answers back, which is how late this client sees its own
+    /// health) plus the turn's tick plus its flight after this tick; the
+    /// last hurt this client saw lets the next hit come 10 ticks after it
+    /// on the server, and one every 10 ticks after that; or, if more,
+    /// what waiting for the next hit to pot then would let in: that hit
+    /// and those after it before the later potion's heal. Each hit is
+    /// counted at the worst a hit costs (`crit` plain hits, or the last fall
+    /// of its health if that took more), with `extra` hits and `margin`
+    /// health more. Only with a potion at hand and nothing else of the
+    /// hotbar under way, none of its own on the way, the opponent shown
+    /// within `dist`, and a policy that asks for no potion itself; a drink
+    /// or a meal under way is stopped first (choice 4), and the potion
+    /// follows on a later tick.
+    fn safety_bar(&self, c: &Client, duel: &Duel, bar: i32) -> i32 {
+        let Some(s) = self.safety else { return bar };
+        let lp = &c.lp;
+        if (s.hidden && !self.hidden) || !duel.real_health || bar == 1 || bar >= BAR_TURN || lp.potions == 0 || self.refill != 0 || self.pearl_stage != 0 {
+            return bar;
+        }
+        if lp.potions_pending > 0 || c.thrown.iter().any(|e| e.mine && e.kind == Kind::Potion) {
+            return bar;
+        }
+        let (a, b) = (lp.l.body.pos, c.rp.pos);
+        let (dx, dz) = (a[0] - b[0], a[2] - b[2]);
+        if dx * dx + dz * dz > s.dist * s.dist {
+            return bar;
+        }
+        let w = self.lag + 1 + s.flight;
+        let first = (10 - lp.ticks_since_hurt.max(0)).max(0);
+        let now = if first <= w { (w - first) / 10 + 1 } else { 0 };
+        // Waiting for the next hit to pot then: that hit, and those that
+        // can come after it before a potion thrown then would heal.
+        let hits = now.max(1 + w / 10);
+        let hit = (duel.hit_health * s.crit).max(self.hp_drop);
+        if lp.health > (hits as f32 + s.extra) * hit + s.margin {
+            return bar;
+        }
+        if self.consume != 0 {
+            return 4;
+        }
+        if !self.potion_ready(c) {
+            return bar;
+        }
+        BAR_TURN
     }
 
     /// The plan under way and its tick, for the dump that checks the mod's
@@ -876,17 +1123,20 @@ impl Agent {
     /// with a turn of `turn` mouse counts (see `ACT_DIMS`), the first tick
     /// turns the view and sets its pitch to `pitch`, and the click is made
     /// on the second.
-    fn potion_keys(&mut self, c: &Client, want: bool, turn: i32, pitch: f32, inp: &mut Input) {
+    fn potion_keys(&mut self, c: &Client, want: bool, turn: i32, down: bool, pitch: f32, inp: &mut Input) {
         self.asked_potion = want;
         match self.potion_stage {
             0 => {
                 if want && self.potion_ready(c) {
                     inp.slot_key = c.lp.potions.trailing_zeros() as u8 + 1;
                     inp.attack = false;
-                    if turn != 0 {
+                    if turn != 0 || down {
                         // The turn goes to the server with this tick; the click follows it.
                         inp.dx += turn;
                         inp.dy = counts(pitch - c.lp.l.pitch);
+                        if self.turn_release {
+                            inp.use_item = false;
+                        }
                         self.potion_stage = 1;
                         self.turned = 1;
                     } else if self.prev_inp.use_item {
@@ -1148,6 +1398,7 @@ impl Agent {
                 self.opp_pearl_age = 0;
             }
         }
+        self.guess_tick(c);
     }
 
     /// What the policy is shown: what the agent can know from its own
@@ -1340,8 +1591,9 @@ impl Agent {
         let hh = duel.hit_health;
         o[96] = real as u8 as f32;
         o[97] = lp.health / MAX_HEALTH;
-        o[98] = rp.health / MAX_HEALTH;
-        o[99] = (lp.health - rp.health) / MAX_HEALTH;
+        let rh = self.opp_health(c);
+        o[98] = rh / MAX_HEALTH;
+        o[99] = (lp.health - rh) / MAX_HEALTH;
         o[100] = if real { hh / 4.0 } else { 0.0 };
         o[101] = ((MAX_HEALTH - lp.health) / POTION_HEAL).min(2.5);
         // How hard it is being hit: what the last fall of its health took

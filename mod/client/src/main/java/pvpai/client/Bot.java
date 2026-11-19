@@ -110,6 +110,9 @@ public final class Bot implements Wire.Tap {
             agent.newOpponent();
         }
         duel.hitHealth = Scout.hitHealth(mc.thePlayer, o, layout);
+        if (agent != null) {
+            agent.hpGuessHit = duel.hitHealth;
+        }
         glide = GLIDE_TICKS;
         if (recorder != null) {
             recorder.target(o);
@@ -179,6 +182,41 @@ public final class Bot implements Wire.Tap {
             if (on) {
                 pvpai.core.FullHeal.warmUp(blocks, Reader.pos(mc.thePlayer), 8);
             }
+        }
+    }
+
+    /**
+     * Whether the agent throws a potion at once when the health left is
+     * within what the other player can take before it would heal
+     * (pvpai.core.Agent#potSafety), only on a server that hides the
+     * opponent's health or on any (pvpai.core.Agent#potSafetyHidden), and
+     * whether a potion thrown with a turn
+     * lets go of the block on the tick of the turn (pvpai.core.Agent#turnRelease).
+     */
+    public void potSafety(boolean on, boolean hiddenOnly, boolean release) {
+        if (agent != null) {
+            agent.potSafety = on;
+            agent.potSafetyHidden = hiddenOnly;
+            agent.turnRelease = release;
+        }
+    }
+
+    /**
+     * The opponent's health the agent goes by (Settings#hpGuess,
+     * Settings#oppShown): a guess of it (pvpai.core.Agent#hpGuess; 0 off,
+     * 1 always, 2 once the server is seen to hide it; only in duels where
+     * hits cost health) or a value in its place (pvpai.core.Agent#oppShown;
+     * 0 off, 1 once the server is seen to hide it, 2 always; below zero its
+     * own health).
+     */
+    public void rivalHealth(int guess, int shown, float value) {
+        if (agent != null) {
+            agent.hpGuess = guess > 0 && duel.realHealth;
+            agent.hpGuessAuto = guess == 2;
+            agent.hpGuessHit = duel.hitHealth;
+            agent.oppShown = shown > 0;
+            agent.oppShownAuto = shown == 1;
+            agent.oppShownHealth = value;
         }
     }
 

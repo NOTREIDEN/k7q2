@@ -888,6 +888,9 @@ pub struct Server {
     /// direction: Strength or a player it does not see, as sudden as it
     /// gets. Dealt at the start of the next tick.
     pub sudden: Option<(usize, f32, [f64; 2])>,
+    /// A server that hides health: what player `i` is sent as the health
+    /// of the other (`Params::opp_hp_hide_prob`), None for the real one.
+    pub health_shown: [Option<f32>; 2],
 }
 
 /// Packets produced by the server: (destination client, packet).
@@ -919,6 +922,7 @@ impl Server {
             sudden: None,
             pearl_guard: false,
             ench_rand: None,
+            health_shown: [None; 2],
         }
     }
 
@@ -2349,7 +2353,11 @@ impl Server {
                 p.meta_dirty = false;
                 p.health_dirty = false;
                 p.fx_dirty = false;
-                out.push((other, S2C::Meta { own: false, flags, health, fx }));
+                let shown = match self.health_shown[other] {
+                    Some(h) => health.map(|_| h),
+                    None => health,
+                };
+                out.push((other, S2C::Meta { own: false, flags, health: shown, fx }));
                 out.push((i, S2C::Meta { own: true, flags, health, fx }));
             }
             if p.attr_dirty {

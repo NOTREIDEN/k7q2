@@ -31,6 +31,35 @@ public final class Settings {
      * movement keys until it is due.
      */
     public boolean fullHeal = false;
+    /**
+     * A last guard against dying with potions at hand (pvpai.core.Agent#potSafety):
+     * a potion thrown at once when the health left is within what the
+     * other player can take before a potion thrown now would heal.
+     */
+    public boolean potSafety = false;
+    /** The guard only on a server seen to hide the opponent's health (pvpai.core.Agent#potSafetyHidden): pocion_segura=oculta. */
+    public boolean potSafetyHidden = false;
+    /**
+     * A potion thrown with a turn lets go of the block on the tick of the
+     * turn (pvpai.core.Agent#turnRelease), so that its click is not lost.
+     */
+    public boolean turnRelease = false;
+    /**
+     * The opponent's health the agent goes by (vida_rival): what the server
+     * sends (real); a guess of it (pvpai.core.Agent#hpGuess) always
+     * (estimada) or once the server is seen to hide it (auto: minemen.club
+     * sends 1 every tick); or a set value in its place
+     * (pvpai.core.Agent#oppShown) on every server (oculta, for a network
+     * trained with the health hidden in every duel) or once the server is
+     * seen to hide it (oculta_auto). hpGuess: 0 off, 1 always, 2 auto;
+     * oppShown: 0 off, 1 auto, 2 always; oppShownHealth (vida_rival_valor):
+     * the value, below zero (propia) its own health. Default oculta_auto
+     * with 10: what kept the networks trained seeing the health (w1310)
+     * from dropping on minemen.club in the simulator.
+     */
+    public int hpGuess = 0;
+    public int oppShown = 1;
+    public float oppShownHealth = 10.0f;
 
     /** The file a player finds the first time, in the player's language. */
     public static final String FIRST = ""
@@ -54,7 +83,23 @@ public final class Settings {
         + "bloqueo=si\n"
         + "\n"
         + "# Pociones tiradas con giro: elegir la inclinacion y moverse para que curen las 8 vidas.\n"
-        + "pocion_completa=no\n";
+        + "pocion_completa=no\n"
+        + "\n"
+        + "# Ultimo recurso contra morir con pociones: tirar una enseguida cuando la vida que queda\n"
+        + "# se la puede quitar el rival antes de que cure una tirada ahora (cuenta el ping).\n"
+        + "# Con oculta, solo en servidores que esconden la vida del rival (minemen).\n"
+        + "pocion_segura=no\n"
+        + "\n"
+        + "# Soltar el bloqueo en el giro de una pocion tirada con giro, para que el clic no se pierda.\n"
+        + "soltar_bloqueo=no\n"
+        + "\n"
+        + "# La vida del rival que mira el bot. oculta_auto: si el servidor la esconde (minemen manda siempre 1),\n"
+        + "# el bot mira vida_rival_valor en su lugar; si la manda, la de verdad. real: siempre la que manda el\n"
+        + "# servidor (apaga lo anterior). auto: la estima (golpes que le da y pociones que le curan) si el servidor\n"
+        + "# la esconde; estimada: la estima siempre. oculta: siempre vida_rival_valor, en todo servidor (para una\n"
+        + "# red entrenada sin ver la vida del rival). vida_rival_valor: un numero, o propia (la vida del bot).\n"
+        + "vida_rival=oculta_auto\n"
+        + "vida_rival_valor=10\n";
 
     /** Read from what a file holds; what cannot be read keeps its default. */
     public static Settings parse(Properties p) {
@@ -86,6 +131,46 @@ public final class Settings {
             full = full.trim().toLowerCase(java.util.Locale.ROOT);
             s.fullHeal = full.equals("si") || full.equals("1") || full.equals("true") || full.equals("on");
         }
+        String safe = p.getProperty("pocion_segura");
+        if (safe != null && safe.trim().toLowerCase(java.util.Locale.ROOT).equals("oculta")) {
+            s.potSafety = true;
+            s.potSafetyHidden = true;
+        } else {
+            s.potSafety = yes(safe, s.potSafety);
+        }
+        s.turnRelease = yes(p.getProperty("soltar_bloqueo"), s.turnRelease);
+        String rival = p.getProperty("vida_rival");
+        if (rival != null) {
+            rival = rival.trim().toLowerCase(java.util.Locale.ROOT);
+            if (rival.equals("real") || rival.equals("no")) {
+                s.hpGuess = 0;
+                s.oppShown = 0;
+            } else if (rival.equals("estimada")) {
+                s.hpGuess = 1;
+                s.oppShown = 0;
+            } else if (rival.equals("auto")) {
+                s.hpGuess = 2;
+                s.oppShown = 0;
+            } else if (rival.equals("oculta")) {
+                s.hpGuess = 0;
+                s.oppShown = 2;
+            } else if (rival.equals("oculta_auto")) {
+                s.hpGuess = 0;
+                s.oppShown = 1;
+            }
+        }
+        String value = p.getProperty("vida_rival_valor");
+        if (value != null) {
+            value = value.trim().toLowerCase(java.util.Locale.ROOT);
+            if (value.equals("propia")) {
+                s.oppShownHealth = -1.0f;
+            } else {
+                v = numbers(value, " ");
+                if (v != null && v.length == 1 && v[0] >= 0.0 && v[0] <= 20.0) {
+                    s.oppShownHealth = (float) v[0];
+                }
+            }
+        }
         v = numbers(p.getProperty("arena"), " ");
         if (v != null && v.length == 3 && v[2] >= 1.0) {
             s.arenaSet = true;
@@ -94,6 +179,15 @@ public final class Settings {
             s.arenaHalf = v[2];
         }
         return s;
+    }
+
+    /** A yes or no setting, or the default if it is not there. */
+    private static boolean yes(String value, boolean otherwise) {
+        if (value == null) {
+            return otherwise;
+        }
+        value = value.trim().toLowerCase(java.util.Locale.ROOT);
+        return value.equals("si") || value.equals("1") || value.equals("true") || value.equals("on");
     }
 
     /** The numbers of a value, or null if it is not all numbers. */

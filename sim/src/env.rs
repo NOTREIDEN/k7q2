@@ -742,6 +742,61 @@ pub struct Params {
     /// shortest reach it is drawn with (up to `insane_reach_max`).
     pub insane_kb: [f64; 2],
     pub insane_reach_min: f64,
+    /// Share of the duels on a server that hides health, as minemen.club
+    /// does: every player is sent `opp_hp_shown` as the health of the
+    /// other, from the start of the duel on, whatever it really is (its
+    /// own health it is sent as it is). Only what an agent is shown: in
+    /// duels against a bot the bot still sees the agent's real health.
+    /// Drawn only when above zero.
+    pub opp_hp_hide_prob: f64,
+    pub opp_hp_shown: f64,
+    /// Above zero, a duel that hides health hides it from the first player
+    /// only, in self-play too (the duels against earlier versions, whose
+    /// networks were trained seeing it).
+    pub opp_hp_hide_first: f64,
+    /// A last guard against dying with potions at hand (`Agent::safety`,
+    /// `agent::SafetyCfg`): 1 for the first player, 2 for both, 0 off. Its
+    /// numbers: the ticks of a potion's flight, the hits and the health
+    /// counted on top, the worst hit as a share of a plain one, and the
+    /// distance beyond which it does nothing.
+    pub pot_safety: f64,
+    pub pot_safety_flight: f64,
+    pub pot_safety_extra: f64,
+    pub pot_safety_margin: f64,
+    pub pot_safety_crit: f64,
+    pub pot_safety_dist: f64,
+    /// The pitch choice of the guard's potion (`agent::throw_pitch`), or
+    /// the policy's when below zero.
+    pub pot_safety_pitch: f64,
+    /// A potion thrown with a turn lets go of the right button on the
+    /// tick of the turn (`Agent::turn_release`), for both players: above
+    /// zero on, 0 off.
+    pub turn_release: f64,
+    /// The turn of the guard's potion (`agent::SafetyCfg::turn`).
+    pub pot_safety_turn: f64,
+    /// Above zero the guard acts only on a server seen to hide the
+    /// opponent's health (`agent::SafetyCfg::hidden`).
+    pub pot_safety_hidden: f64,
+    /// The policy is shown a guess of the opponent's health
+    /// (`Agent::guess`, `agent::GuessCfg`) instead of what the server
+    /// sends: 1 in the duels that hide it (`opp_hp_hide_prob`), for the
+    /// players it is hidden from; 2 in every duel, for both players, shown
+    /// once the client finds the health hidden (`GuessCfg::auto`, as the
+    /// mod does); 3 the same for the first player only; 0 off. The share of a hit that a sword block lets
+    /// through, the ticks per health of natural regeneration, and what a
+    /// hurt is taken to cost in plain hits. Only in duels where hits cost
+    /// health.
+    pub opp_hp_guess: f64,
+    pub opp_hp_guess_block: f64,
+    pub opp_hp_guess_regen: f64,
+    pub opp_hp_guess_scale: f64,
+    /// For the first player, a value the policy is shown in place of the
+    /// opponent's health (`Agent::opp_shown`): 1 once its client finds the
+    /// health hidden, 2 always, 0 off; and the value (below zero: its own
+    /// health). For checks of what a mod should show a network on a server
+    /// that hides it; training hides it with `opp_hp_hide_prob`.
+    pub opp_hp_feed: f64,
+    pub opp_hp_feed_health: f64,
 }
 
 impl Default for Params {
@@ -964,6 +1019,25 @@ impl Default for Params {
             opp_keep_sprint: 0.0,
             insane_kb: [0.0, 0.4],
             insane_reach_min: 3.0,
+            opp_hp_hide_prob: 0.0,
+            opp_hp_shown: 1.0,
+            opp_hp_hide_first: 0.0,
+            pot_safety: 0.0,
+            pot_safety_flight: 5.0,
+            pot_safety_extra: 0.0,
+            pot_safety_margin: 0.5,
+            pot_safety_crit: 1.5,
+            pot_safety_dist: 6.0,
+            pot_safety_pitch: 0.0,
+            turn_release: 0.0,
+            pot_safety_turn: 0.0,
+            pot_safety_hidden: 0.0,
+            opp_hp_guess: 0.0,
+            opp_hp_guess_block: 0.75,
+            opp_hp_guess_regen: 160.0,
+            opp_hp_guess_scale: 1.1,
+            opp_hp_feed: 0.0,
+            opp_hp_feed_health: 1.0,
         }
     }
 }
@@ -1219,6 +1293,25 @@ impl Params {
             272 => self.far_pitch_dist = v,
             275 => self.block_fail_prob = v,
             276 => self.block_fail = v,
+            340 => self.opp_hp_hide_prob = v,
+            341 => self.opp_hp_shown = v,
+            342 => self.pot_safety = v,
+            343 => self.pot_safety_flight = v,
+            344 => self.pot_safety_extra = v,
+            345 => self.pot_safety_margin = v,
+            346 => self.pot_safety_crit = v,
+            347 => self.pot_safety_dist = v,
+            348 => self.pot_safety_pitch = v,
+            349 => self.turn_release = v,
+            350 => self.pot_safety_turn = v,
+            351 => self.opp_hp_guess = v,
+            352 => self.opp_hp_guess_block = v,
+            353 => self.opp_hp_guess_regen = v,
+            354 => self.opp_hp_guess_scale = v,
+            355 => self.pot_safety_hidden = v,
+            356 => self.opp_hp_feed = v,
+            357 => self.opp_hp_feed_health = v,
+            358 => self.opp_hp_hide_first = v,
             _ => return false,
         }
         true
@@ -1826,10 +1919,10 @@ impl Gank {
 /// of its own in the air or is under 12 health, the view turned onto it
 /// (at most 60 degrees a tick), W with sprint, no strafe, no right button,
 /// and jumps while it is out of reach. Clicks stay the policy's.
-fn steal_keys(c: &Client, deg_per_count: f64, inp: &mut Input) -> bool {
+fn steal_keys(c: &Client, rp_health: f32, deg_per_count: f64, inp: &mut Input) -> bool {
     let (lp, rp) = (&c.lp, &c.rp);
     let potting = rp.item == Item::Potion || c.thrown.iter().any(|e| e.kind == Kind::Potion && !e.mine);
-    if lp.inv_open || !(potting || rp.health <= 12.0) {
+    if lp.inv_open || !(potting || rp_health <= 12.0) {
         return false;
     }
     let (yaw_to, pitch_to) = bot::angles_to(lp.eye(), [rp.pos[0], rp.pos[1] + 1.2, rp.pos[2]]);
@@ -2427,6 +2520,17 @@ pub fn new_duel(p: &Params, rng: &mut Rng, mode: Mode) -> (Match, [f64; 2], BotP
     if cheat && p.opp_keep_sprint > 0.0 && rng.chance(p.opp_keep_sprint) {
         m.c[1].edge.keep_sprint = true;
     }
+    // Drawn only when asked for, so that duels without it come out as they
+    // did.
+    if p.opp_hp_hide_prob > 0.0 && rng.chance(p.opp_hp_hide_prob) {
+        let shown = p.opp_hp_shown.clamp(0.0, MAX_HEALTH as f64) as f32;
+        for i in 0..2 {
+            if i == 0 || (mode == Mode::SelfPlay && p.opp_hp_hide_first <= 0.0) {
+                m.s.health_shown[i] = Some(shown);
+                m.c[i].rp.health = shown;
+            }
+        }
+    }
     (m, ping, bot, lesson)
 }
 
@@ -2729,6 +2833,42 @@ impl Env {
         });
         for ag in self.ag.iter_mut() {
             ag.full_heal = heal;
+            ag.turn_release = p.turn_release > 0.0;
+        }
+        if p.pot_safety > 0.0 {
+            let cfg = crate::agent::SafetyCfg {
+                flight: p.pot_safety_flight.round() as i32,
+                extra: p.pot_safety_extra as f32,
+                margin: p.pot_safety_margin as f32,
+                crit: p.pot_safety_crit as f32,
+                dist: p.pot_safety_dist,
+                pitch: p.pot_safety_pitch.round() as i32,
+                turn: p.pot_safety_turn.round() as i32,
+                hidden: p.pot_safety_hidden > 0.0,
+            };
+            for a in 0..(if p.pot_safety >= 2.0 { 2 } else { 1 }) {
+                self.ag[a].safety = Some(cfg);
+            }
+        }
+        // Only where hits cost health: with none, the health shown never
+        // changes and would pass for hidden.
+        if p.opp_hp_guess > 0.0 && self.duel().real_health {
+            let auto = p.opp_hp_guess >= 2.0;
+            let cfg = crate::agent::GuessCfg {
+                hit: self.duel().hit_health,
+                scale: p.opp_hp_guess_scale as f32,
+                block: p.opp_hp_guess_block as f32,
+                regen: p.opp_hp_guess_regen.round() as i32,
+                auto,
+            };
+            for a in 0..(if p.opp_hp_guess >= 3.0 { 1 } else { 2 }) {
+                if auto || self.m.s.health_shown[a].is_some() {
+                    self.ag[a].guess = Some(cfg);
+                }
+            }
+        }
+        if p.opp_hp_feed > 0.0 {
+            self.ag[0].opp_shown = Some(crate::agent::OppShown { health: p.opp_hp_feed_health as f32, auto: p.opp_hp_feed < 2.0 });
         }
         self.pending = self.m.advance();
         debug_assert_eq!(self.pending, 0);
@@ -2975,6 +3115,17 @@ impl Env {
             }
         }
         self.m.s.hits.clear();
+    }
+
+    /// The first player's health as `steal_keys` goes by: as the second
+    /// player's client has it, or the server's when the duel hides it
+    /// (`Params::opp_hp_hide_prob`), so that the rush keeps its rule.
+    fn steal_health(&self) -> f32 {
+        if self.m.s.health_shown[1].is_some() {
+            self.m.s.p[0].health
+        } else {
+            self.m.c[1].rp.health
+        }
     }
 
     /// What the agents are told about this duel.
@@ -3406,7 +3557,7 @@ impl Env {
         let duel = self.duel();
         self.ag[id].teacher.on = self.params.teach > 0.0;
         let mut inp = self.ag[id].keys(&self.m.c[id], &self.m.world, &duel, action, &mut self.rng);
-        self.overridden = id == 1 && self.steal && !self.ag[1].busy() && inp.inv == 0 && steal_keys(&self.m.c[1], self.m.ccfg.mouse_f1 as f64 * 0.15, &mut inp);
+        self.overridden = id == 1 && self.steal && !self.ag[1].busy() && inp.inv == 0 && steal_keys(&self.m.c[1], self.steal_health(), self.m.ccfg.mouse_f1 as f64 * 0.15, &mut inp);
         self.teach = self.ag[id].teacher.teach;
         let out = self.m.client_tick(id, &inp);
         self.account(id, &inp, &out);

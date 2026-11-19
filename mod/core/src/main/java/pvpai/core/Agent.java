@@ -238,6 +238,82 @@ public final strictfp class Agent {
      */
     public boolean fullHeal = false;
     public int fullHealS = 4, fullHealD = 0;
+
+    /**
+     * A last guard against dying with potions at hand (the simulator's
+     * {@code Agent::safety_bar}): with a potion at hand, nothing else of the
+     * hotbar under way, none of its own on the way, the other player
+     * within {@link #potSafetyDist} and a policy that asks for no potion
+     * itself, a potion thrown with a turn ({@link #BAR_TURN}, at the
+     * policy's pitch) when its health is within what the other player can
+     * take before a potion thrown now would heal: that heal comes
+     * {@link #lag} ticks plus the turn's tick plus {@link #potSafetyFlight}
+     * after this tick, the last hurt seen lets the next hit come 10 ticks
+     * after it and one every 10 ticks after that (or, if more, what waiting
+     * for the next hit to pot then would let in: that hit and those after it
+     * before the later potion's heal), each counted at the worst
+     * a hit costs ({@link #potSafetyCrit} plain hits, or the last fall of
+     * its health if that took more), with {@link #potSafetyExtra} hits and
+     * {@link #potSafetyMargin} health more. A drink or a meal under way is
+     * stopped first (choice 4). Off unless set.
+     */
+    public boolean potSafety = false;
+    public int potSafetyFlight = 5;
+    public float potSafetyExtra = 0.0f, potSafetyMargin = 0.5f, potSafetyCrit = 1.5f;
+    public double potSafetyDist = 6.0;
+    /** The pitch choice ({@link #throwPitch}) of the guard's potion, or the policy's when below zero. */
+    public int potSafetyPitch = 0;
+    /**
+     * The turn of the guard's potion: 0 none (the view keeps its yaw and
+     * takes the pitch, the click follows on the next tick as for a turned
+     * throw), 1 to 3 those of {@link #BAR_TURNS}.
+     */
+    public int potSafetyTurn = 0;
+    /** The guard acts only on a server seen to hide the opponent's health ({@link #hidden()}). */
+    public boolean potSafetyHidden = false;
+    /** Ticks on which the guard changed the policy's choice (for checks). */
+    public int potSafetyActs;
+    /**
+     * A potion thrown with a turn lets go of the right button on the tick
+     * of the turn, so that the click on the next tick is a press of its
+     * own: with the button held through the turn (a block) the click
+     * throws nothing. Off unless set.
+     */
+    public boolean turnRelease = false;
+    /**
+     * On a server that does not send the opponent's health (minemen.club
+     * sends one every tick), the policy is shown a guess of it instead
+     * (agent.rs {@code GuessCfg}). Off unless set. The guess starts full
+     * and takes {@link #hpGuessScale} times {@link #hpGuessHit} (the duel's
+     * {@link Duel#hitHealth}) off each time the opponent is seen hurt by a hit of its own (above
+     * one for the critical hits and the stronger hits inside the hurt time,
+     * which are not seen), {@link #hpGuessBlock} times that when it holds
+     * its sword up; each potion that breaks adds what this
+     * client foresees it gives the opponent, and one health comes back every
+     * {@link #hpGuessRegen} ticks. With {@link #hpGuessAuto} the guess is
+     * shown only once the server is seen to hide the health ({@link #hidden()});
+     * without it, always.
+     */
+    public boolean hpGuess = false;
+    public boolean hpGuessAuto = false;
+    public float hpGuessHit = 1.0f, hpGuessScale = 1.1f, hpGuessBlock = 0.75f;
+    public int hpGuessRegen = 160;
+    /**
+     * A value the policy is shown in place of the opponent's health
+     * (agent.rs {@code OppShown}), before the guess; off unless set. A
+     * network trained with the health hidden in every duel is shown the
+     * same value on every server: {@link #oppShownHealth} with
+     * {@link #oppShownAuto} off. With it on, only once the server is seen
+     * to hide the health ({@link #hidden()}). Below zero: its own health.
+     */
+    public boolean oppShown = false;
+    public boolean oppShownAuto = false;
+    public float oppShownHealth = 1.0f;
+    private static final float GUESS_MIN = 0.5f;
+    private float guessHp = MAX_HEALTH;
+    private final long[] guessIds = {-1, -1};
+    private float guessFirst = -1.0f;
+    private boolean guessChanged, guessShown, hidden;
     /**
      * How the view gets its pitch back after the throw (fullheal.rs,
      * {@code restore_mode}): 1 on the click's tick to the pitch the policy
@@ -430,6 +506,37 @@ public final strictfp class Agent {
         return bar;
     }
 
+    /** The hotbar choice after the guard against dying with potions at hand ({@link #potSafety}). */
+    private int safetyBar(View v, Duel duel, int bar) {
+        if ((potSafetyHidden && !hidden) || !duel.realHealth || bar == 1 || bar >= BAR_TURN || v.potions == 0 || refill != 0 || pearlStage != 0) {
+            return bar;
+        }
+        if (potionsOnWay(v) > 0) {
+            return bar;
+        }
+        double dx = v.pos[0] - v.oPos[0], dz = v.pos[2] - v.oPos[2];
+        if (dx * dx + dz * dz > potSafetyDist * potSafetyDist) {
+            return bar;
+        }
+        int w = lag + 1 + potSafetyFlight;
+        int first = Math.max(10 - Math.max(v.ticksSinceHurt, 0), 0);
+        int now = first <= w ? (w - first) / 10 + 1 : 0;
+        // Waiting for the next hit to pot then: that hit, and those that
+        // can come after it before a potion thrown then would heal.
+        int hits = Math.max(now, 1 + w / 10);
+        float hit = Math.max(duel.hitHealth * potSafetyCrit, hpDrop);
+        if (v.health > ((float) hits + potSafetyExtra) * hit + potSafetyMargin) {
+            return bar;
+        }
+        if (consume != 0) {
+            return 4;
+        }
+        if (!potionReady(v)) {
+            return bar;
+        }
+        return BAR_TURN;
+    }
+
     private int guardPotion(View v, int bar, int turns) {
         int onWay = potionsOnWay(v);
         float missing = MAX_HEALTH - v.health - POTION_HEAL * onWay;
@@ -544,6 +651,26 @@ public final strictfp class Agent {
                 twice = false;
             }
         }
+        int pitchChoice = action.length > 11 ? action[11] : 0;
+        // A potion of the guard's thrown with no turn (potSafetyTurn).
+        boolean down = false;
+        if (potSafety && potionStage == 0 && turned == 0) {
+            int asked = bar;
+            bar = safetyBar(v, duel, bar);
+            if (bar != asked) {
+                potSafetyActs++;
+                if (bar >= BAR_TURN) {
+                    // The right button let go on the tick of the turn, so
+                    // that the click is a press of its own.
+                    inp.useItem = false;
+                    if (potSafetyPitch >= 0) {
+                        pitchChoice = potSafetyPitch;
+                    }
+                    down = potSafetyTurn <= 0;
+                    bar = BAR_TURN + Math.min(Math.max(potSafetyTurn - 1, 0), 2);
+                }
+            }
+        }
         int turns = BAR_TURNS.length;
         if ((potionGuard || ruleOn()) && potionStage == 0 && turned == 0) {
             int asked = bar;
@@ -554,15 +681,15 @@ public final strictfp class Agent {
                 inp.useItem = false;
             }
         }
-        int turn = bar >= BAR_TURN ? BAR_TURNS[Math.min(bar - BAR_TURN, 2 * turns - 1) % turns] : 0;
+        int turn = down ? 0 : bar >= BAR_TURN ? BAR_TURNS[Math.min(bar - BAR_TURN, 2 * turns - 1) % turns] : 0;
         boolean two = bar >= BAR_TURN + turns;
         Keys screen = refillKeys(v, bar);
         if (screen != null) {
             return screen;
         }
         consumeKeys(v, duel, bar, inp);
-        float pitch = throwPitch(action.length > 11 ? action[11] : 0);
-        potionKeys(v, bar == 1 || turn != 0, turn, pitch, inp);
+        float pitch = throwPitch(pitchChoice);
+        potionKeys(v, bar == 1 || turn != 0 || down, turn, down, pitch, inp);
         if (turn != 0 && turned == 1) {
             twice = two;
             if (potionStage == 1 && fullHeal) {
@@ -613,6 +740,72 @@ public final strictfp class Agent {
         comboOwn = 0;
         oppUseTicks = 0;
         oppPearlAge = 100000;
+        guessHp = MAX_HEALTH;
+        guessIds[0] = -1;
+        guessIds[1] = -1;
+        guessFirst = -1.0f;
+        guessChanged = false;
+        guessShown = false;
+        hidden = false;
+    }
+
+    /**
+     * Whether the server is seen to hide the opponent's health: it was shown
+     * at most one on the first tick of the duel (minemen.club sends one on
+     * every tick; a duel starts at full health) and never changed since.
+     * Kept only with {@link #hpGuess}, {@link #oppShown} or a guard that asks for it
+     * ({@link #potSafetyHidden}).
+     */
+    public boolean hidden() {
+        return hidden;
+    }
+
+    /** The opponent's health the policy is shown: what the server sends, a value in its place ({@link #oppShown}) or the guess ({@link #hpGuess}). */
+    public float oppHealth(View v) {
+        if (oppShown && (!oppShownAuto || hidden)) {
+            return oppShownHealth < 0.0f ? v.health : oppShownHealth;
+        }
+        return guessShown ? guessHp : v.oHealth;
+    }
+
+    /** The guess of the opponent's health ({@link #hpGuess}): what it is now and whether the policy is shown it. */
+    public float guessHp() {
+        return guessHp;
+    }
+
+    public boolean guessShown() {
+        return guessShown;
+    }
+
+    /** {@link #hpGuess} and {@link #hidden()} for this tick, after the potions' fates are known. */
+    private void guessTick(View v) {
+        if (!hpGuess && !oppShown && !(potSafety && potSafetyHidden)) {
+            return;
+        }
+        if (guessFirst < 0.0f) {
+            guessFirst = v.oHealth;
+        }
+        guessChanged |= v.oHealth != guessFirst;
+        hidden = !guessChanged && guessFirst <= 1.0f;
+        // A hurt that follows a hit of its own: a rod, a snowball or an egg hurts for nothing.
+        boolean hitSeen = v.oTicksSinceHurt == 0 && v.ticksSinceAttack <= HIT_WINDOW;
+        if (!hpGuess) {
+            return;
+        }
+        if (guessHp < MAX_HEALTH && hpGuessRegen > 0) {
+            guessHp = Math.min(guessHp + 1.0f / (float) hpGuessRegen, MAX_HEALTH);
+        }
+        if (hitSeen) {
+            float hit = v.oUsing && v.oItem == Inv.SWORD ? hpGuessHit * hpGuessScale * hpGuessBlock : hpGuessHit * hpGuessScale;
+            guessHp = Math.max(guessHp - hit, GUESS_MIN);
+        }
+        for (int k = 0; k < 2; k++) {
+            if (fate[k] != null && fateId[k] != guessIds[k]) {
+                guessIds[k] = fateId[k];
+                guessHp = Math.min(guessHp + fate[k].heal[1], MAX_HEALTH);
+            }
+        }
+        guessShown = !hpGuessAuto || hidden;
     }
 
     /** Whether it is in the middle of a throw, a drink, a meal or the inventory, whose keys must not be changed. */
@@ -847,15 +1040,18 @@ public final strictfp class Agent {
      * view and sets its pitch to the one asked for, and the click is made
      * on the second, along the view the server has by then.
      */
-    private void potionKeys(View v, boolean want, int turn, float pitch, Keys inp) {
+    private void potionKeys(View v, boolean want, int turn, boolean down, float pitch, Keys inp) {
         askedPotion = want;
         if (potionStage == 0) {
             if (want && potionReady(v)) {
                 inp.slotKey = Integer.numberOfTrailingZeros(v.potions) + 1;
                 inp.attack = false;
-                if (turn != 0) {
+                if (turn != 0 || down) {
                     inp.dx += turn;
                     inp.dy = counts(pitch - v.pitch);
+                    if (turnRelease) {
+                        inp.useItem = false;
+                    }
                     potionStage = 1;
                     turned = 1;
                 } else if (prev.useItem) {
@@ -1128,6 +1324,7 @@ public final strictfp class Agent {
             oppPearl = theirs.id;
             oppPearlAge = 0;
         }
+        guessTick(v);
     }
 
     private static float clip(double v, double lim) {
@@ -1349,8 +1546,9 @@ public final strictfp class Agent {
         boolean real = duel.realHealth;
         o[96] = flag(real);
         o[97] = v.health / MAX_HEALTH;
-        o[98] = v.oHealth / MAX_HEALTH;
-        o[99] = (v.health - v.oHealth) / MAX_HEALTH;
+        float rh = oppHealth(v);
+        o[98] = rh / MAX_HEALTH;
+        o[99] = (v.health - rh) / MAX_HEALTH;
         o[100] = real ? duel.hitHealth / 4.0f : 0.0f;
         o[101] = Math.min((MAX_HEALTH - v.health) / POTION_HEAL, 2.5f);
         // How hard it is being hit: what the last fall of its health took
