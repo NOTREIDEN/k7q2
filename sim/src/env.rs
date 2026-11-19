@@ -629,6 +629,21 @@ pub struct Params {
     pub trade_block: f64,
     pub trade_crit: f64,
     pub trade_heal: f64,
+    /// Healing potions left in the shaping potential (`Env::potential`):
+    /// `w_pot_stock` for each of the player's own (hotbar and rows, as the
+    /// server has them, up to `pot_stock_cap`), less the same of the
+    /// opponent's. Over a duel it pays `w_pot_stock` times the potions the
+    /// opponent used less the ones the player used, at the throw: the
+    /// economy that decides a fight of attrition, which the heal alone
+    /// (`w_heal`, worth exactly the hits it undoes) never priced.
+    pub w_pot_stock: f32,
+    pub pot_stock_cap: f32,
+    /// If 1, the second player's Strength (`opp_strength_prob`), the ganks
+    /// (`gank_prob`) and the sudden drops (`drop_prob`) come only in duels
+    /// against scripted bots: in self-play and against earlier versions
+    /// both players are learners or the learner's past, and a handicap
+    /// neither can see makes those duels uneven instead of a fair test.
+    pub extras_bot_only: f64,
 }
 
 impl Default for Params {
@@ -818,6 +833,9 @@ impl Default for Params {
             trade_block: 0.9,
             trade_crit: 0.9,
             trade_heal: 0.0,
+            w_pot_stock: 0.0,
+            pot_stock_cap: 12.0,
+            extras_bot_only: 0.0,
         }
     }
 }
@@ -1039,6 +1057,9 @@ impl Params {
             212 => self.trade_block = v,
             213 => self.trade_crit = v,
             214 => self.trade_heal = v,
+            215 => self.w_pot_stock = v as f32,
+            216 => self.pot_stock_cap = v as f32,
+            217 => self.extras_bot_only = v,
             _ => return false,
         }
         true
@@ -2428,11 +2449,13 @@ impl Env {
         self.ep_len = self.rng.range(p.ep_ticks_min, p.ep_ticks_max.max(p.ep_ticks_min)).round() as i32;
         self.ticks_left = self.ep_len;
         self.strength_at = -1;
-        if p.opp_strength_prob > 0.0 && self.rng.chance(p.opp_strength_prob) {
+        // Drawn as before unless asked to keep these to the bots' duels.
+        let extras = p.extras_bot_only <= 0.0 || self.mode == Mode::Bot;
+        if extras && p.opp_strength_prob > 0.0 && self.rng.chance(p.opp_strength_prob) {
             self.strength_at = self.rng.range(0.0, self.ep_len as f64 * 2.0 / 3.0).round() as i32;
         }
         self.drop_next = -1;
-        if p.drop_prob > 0.0 && self.rng.chance(p.drop_prob) {
+        if extras && p.drop_prob > 0.0 && self.rng.chance(p.drop_prob) {
             self.drop_next = self.rng.range(0.0, self.ep_len as f64 / 2.0).round() as i32;
         }
         self.gank = Gank::NONE;
@@ -2449,7 +2472,7 @@ impl Env {
             let cap = (p.drill_seconds * 20.0 * self.rng.range(0.75, 1.25)).round().max(20.0) as i32;
             self.ep_len = self.ep_len.min(cap);
             self.ticks_left = self.ep_len;
-        } else if p.gank_prob > 0.0 && self.rng.chance(p.gank_prob) {
+        } else if extras && p.gank_prob > 0.0 && self.rng.chance(p.gank_prob) {
             self.gank.next = self.rng.range(0.0, self.ep_len as f64 / 2.0).round() as i32;
         }
         self.rew_acc = [0.0; 2];
@@ -2789,7 +2812,14 @@ impl Env {
         } else {
             0.0
         };
-        (p.w_aim * aim as f32 + p.w_range * range as f32 + fast + fed + stock + health, ang)
+        let pots = if p.w_pot_stock != 0.0 {
+            let cap = p.pot_stock_cap.max(0.0);
+            let n = |q: &crate::server::ServerPlayer| ((q.potions.count_ones() + q.rows.count(Item::Potion)) as f32).min(cap);
+            p.w_pot_stock * (n(sp) - n(&self.m.s.p[1 - id]))
+        } else {
+            0.0
+        };
+        (p.w_aim * aim as f32 + p.w_range * range as f32 + fast + fed + stock + health + pots, ang)
     }
 
     /// The points of a healing potion `id` throws on this tick that cannot
