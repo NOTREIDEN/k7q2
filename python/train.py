@@ -399,6 +399,15 @@ def main():
                         tool_uses_per_min=st.get("tool_uses0", 0.0) / mins0,
                         tool_hits_per_min=st.get("tool_hits0", 0.0) / mins0,
                         opp_tool_hits_per_min=st.get("tool_hits1", 0.0) / mins0,
+                        # Combos: runs of three hits or more taken and landed per
+                        # minute, the share of the hits taken that were the third or
+                        # later of a run, and the runs of two or more taken that
+                        # player 0 ended with a hit of its own or by getting clear.
+                        comboed_per_min=st.get("combo3_taken0", 0.0) / mins0,
+                        combos_per_min=st.get("combo3_taken1", 0.0) / mins0,
+                        comboed_hit_frac=st.get("combo_hits_taken0", 0.0) / max(st["hits1"], 1.0),
+                        combo_breaks_per_min=st.get("combo_breaks0", 0.0) / mins0,
+                        combo_escapes_per_min=st.get("combo_escapes0", 0.0) / mins0,
                     )
             window.clear()
             if league is not None:
@@ -438,7 +447,9 @@ def main():
                   f"visit {b.get('refills_per_visit', 0):.1f} in {b.get('inv_ticks_per_visit', 0):.1f} "
                   f"inv-hit {b.get('inv_hits_taken', 0):.2f} drop {b.get('drops_per_duel', 0):.2f} "
                   f"tool {b.get('tool_uses_per_min', 0):.1f} hit {b.get('tool_hits_per_min', 0):.1f}/{b.get('opp_tool_hits_per_min', 0):.1f} "
-                  f"| self: hit/min {s.get('hits_per_min', 0):5.1f} combo {s.get('max_combo', 0):.1f} "
+                  f"combo3 {b.get('combos_per_min', 0):.2f}/{b.get('comboed_per_min', 0):.2f} in-combo {b.get('comboed_hit_frac', 0):.2f} "
+                  f"break {b.get('combo_breaks_per_min', 0):.2f} clear {b.get('combo_escapes_per_min', 0):.2f} "
+                  f"| self:hit/min {s.get('hits_per_min', 0):5.1f} combo {s.get('max_combo', 0):.1f} "
                   f"aim {s.get('aim_err_deg', 0):5.1f} pot {s.get('potions_per_min', 0):.1f} "
                   f"heal {s.get('potion_heal', 0):.1f} tool {s.get('tool_uses_per_min', 0):.1f} "
                   f"hit {s.get('tool_hits_per_min', 0):.1f}"

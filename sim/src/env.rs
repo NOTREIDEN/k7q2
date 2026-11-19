@@ -35,7 +35,7 @@ pub const FOOD_TO_SPRINT: i32 = 6;
 pub const SHAKE_DEG: f32 = 6.0;
 pub const SHAKE_TICKS: i32 = 2;
 pub const PRIV_DIM: usize = 71;
-pub const STATS_DIM: usize = 111;
+pub const STATS_DIM: usize = 119;
 /// Floats per player and in total written by `Env::write_view`.
 pub const VIEW_PLAYER: usize = 45;
 pub const VIEW_DIM: usize = 2 * VIEW_PLAYER + 24;
@@ -508,6 +508,28 @@ pub struct Params {
     /// potions of it are in the inventory instead, as most players carry
     /// them: to drink one it has to be brought down first.
     pub drinks_stowed: f64,
+    /// Cost to a player of being comboed, on top of what the hits cost and
+    /// what `w_combo` moves to the attacker: for each hit it takes in an
+    /// unanswered run, this many times how far the run is past its first
+    /// `comboed_free` hits, `comboed_cap` times at most. With the defaults
+    /// the first two hits of a run cost nothing more, the third one more
+    /// time this, the fourth two times, and from the sixth on four times.
+    /// The attacker gets none of it, so a run costs its victim more than it
+    /// pays its attacker: getting out of one (a hit back, a pearl, running
+    /// clear for `combo_gap` ticks) is worth more than keeping one going.
+    /// Nothing can be earned with it. Zero turns it off.
+    pub w_comboed: f32,
+    pub comboed_free: f64,
+    pub comboed_cap: f64,
+    /// Ticks after a hit within which the same attacker's next hit goes on
+    /// with its run; after that the run is over, as if the victim had hit
+    /// back (for `w_combo`, `w_comboed` and the stats). A combo is hits that
+    /// follow each other as fast as the invulnerable ticks let them, not
+    /// hits a minute apart. Zero: a run ends only with the victim's hit.
+    pub combo_gap: f64,
+    /// Share of the duels against a scripted bot of level 3 or more (the
+    /// hardest one too) in which it spaces its combos (`BotParams::spacer`).
+    pub bot_spacer: f64,
 }
 
 impl Default for Params {
@@ -667,6 +689,11 @@ impl Default for Params {
             throw_carry_prob: 0.0,
             teach: 0.0,
             drinks_stowed: 0.0,
+            w_comboed: 0.0,
+            comboed_free: 2.0,
+            comboed_cap: 4.0,
+            combo_gap: 0.0,
+            bot_spacer: 0.0,
         }
     }
 }
@@ -855,6 +882,11 @@ impl Params {
             118 => self.w_hungry = v as f32,
             119 => self.w_slow = v as f32,
             120 => self.drinks_stowed = v,
+            179 => self.w_comboed = v as f32,
+            180 => self.comboed_free = v,
+            181 => self.comboed_cap = v,
+            182 => self.combo_gap = v,
+            183 => self.bot_spacer = v,
             _ => return false,
         }
         true
@@ -972,6 +1004,14 @@ pub struct Stats {
     /// other player and counted.
     pub tool_uses: [f64; 2],
     pub tool_hits: [f64; 2],
+    /// Combos: the unanswered runs of three hits or more this player took
+    /// (counted at the third hit), the hits it took as the third or later
+    /// of a run, the runs of two or more it ended with a hit of its own,
+    /// and those that ended by time (`combo_gap`).
+    pub combo3_taken: [f64; 2],
+    pub combo_hits_taken: [f64; 2],
+    pub combo_breaks: [f64; 2],
+    pub combo_escapes: [f64; 2],
 }
 
 impl Stats {
@@ -1041,6 +1081,10 @@ impl Stats {
         for a in 0..2 {
             self.tool_uses[a] += o.tool_uses[a];
             self.tool_hits[a] += o.tool_hits[a];
+            self.combo3_taken[a] += o.combo3_taken[a];
+            self.combo_hits_taken[a] += o.combo_hits_taken[a];
+            self.combo_breaks[a] += o.combo_breaks[a];
+            self.combo_escapes[a] += o.combo_escapes[a];
         }
     }
     pub fn write(&self, out: &mut [f64]) {
@@ -1156,6 +1200,14 @@ impl Stats {
             self.tool_uses[1],
             self.tool_hits[0],
             self.tool_hits[1],
+            self.combo3_taken[0],
+            self.combo3_taken[1],
+            self.combo_hits_taken[0],
+            self.combo_hits_taken[1],
+            self.combo_breaks[0],
+            self.combo_breaks[1],
+            self.combo_escapes[0],
+            self.combo_escapes[1],
         ];
         for (o, x) in out.iter_mut().zip(v.iter()) {
             *o = *x;
@@ -1175,6 +1227,7 @@ struct Moment {
     bot_state: BotState,
     ag: [Agent; 2],
     combo: [u32; 2],
+    combo_age: [i32; 2],
     ping_ms: [f64; 2],
     landed: Option<(usize, i32)>,
     pearl_kill: [i32; 2],
@@ -1220,6 +1273,8 @@ pub struct Env {
     ticks_left: i32,
     ep_len: i32,
     combo: [u32; 2],
+    /// Rounds since each player's last hit, for `Params::combo_gap`.
+    combo_age: [i32; 2],
     max_combo: [u32; 2],
     ep: Stats,
     pub total: Stats,
@@ -1796,6 +1851,11 @@ pub fn new_duel(p: &Params, rng: &mut Rng, mode: Mode) -> (Match, [f64; 2], BotP
         bot.runner = false;
     }
     bot.circler = lesson == 5;
+    // Drawn only when asked for, so that duels without it come out as they
+    // did.
+    if p.bot_spacer > 0.0 {
+        bot.spacer = bot.level >= 3 && !bot.circler && rng.chance(p.bot_spacer);
+    }
     bot.carry = m.s.cfg.throw_carry;
     (m, ping, bot, lesson)
 }
@@ -1818,6 +1878,7 @@ impl Env {
             ticks_left: 0,
             ep_len: 0,
             combo: [0; 2],
+            combo_age: [0; 2],
             max_combo: [0; 2],
             ep: Stats::default(),
             total: Stats::default(),
@@ -1861,6 +1922,7 @@ impl Env {
             bot_state: self.bot_state,
             ag: self.ag.clone(),
             combo: self.combo,
+            combo_age: self.combo_age,
             ping_ms: self.ping_ms,
             landed: self.landed,
             pearl_kill: self.pearl_kill,
@@ -1885,6 +1947,7 @@ impl Env {
         self.bot_state = k.bot_state;
         self.ag = k.ag;
         self.combo = k.combo;
+        self.combo_age = k.combo_age;
         self.ping_ms = k.ping_ms;
         self.landed = k.landed;
         self.pearl_kill = k.pearl_kill;
@@ -2057,6 +2120,7 @@ impl Env {
         }
         self.rew_acc = [0.0; 2];
         self.combo = [0; 2];
+        self.combo_age = [0; 2];
         self.max_combo = [0; 2];
         self.ep = Stats::default();
         self.ep.drills = self.gank.drill as u8 as f64;
@@ -2241,7 +2305,21 @@ impl Env {
             self.rew_acc[h.attacker] += run;
             self.rew_acc[h.victim] -= run;
             self.combo[h.attacker] += 1;
+            if self.combo[h.victim] >= 2 {
+                self.ep.combo_breaks[h.attacker] += 1.0;
+            }
             self.combo[h.victim] = 0;
+            self.combo_age[h.attacker] = 0;
+            // Being comboed (`w_comboed`): the victim's alone.
+            let k = self.combo[h.attacker];
+            if k >= 3 {
+                self.ep.combo_hits_taken[h.victim] += 1.0;
+                if k == 3 {
+                    self.ep.combo3_taken[h.victim] += 1.0;
+                }
+            }
+            let past = (k as f64 - self.params.comboed_free).clamp(0.0, self.params.comboed_cap.max(0.0));
+            self.rew_acc[h.victim] -= self.params.w_comboed * past as f32;
             if self.combo[h.attacker] > self.max_combo[h.attacker] {
                 self.max_combo[h.attacker] = self.combo[h.attacker];
             }
@@ -2608,6 +2686,13 @@ impl Env {
             }
             for a in 0..2 {
                 self.pearl_kill[a] = (self.pearl_kill[a] - 1).max(0);
+                self.combo_age[a] = self.combo_age[a].saturating_add(1);
+                if self.params.combo_gap > 0.0 && self.combo[a] > 0 && self.combo_age[a] as f64 > self.params.combo_gap {
+                    if self.combo[a] >= 2 {
+                        self.ep.combo_escapes[1 - a] += 1.0;
+                    }
+                    self.combo[a] = 0;
+                }
             }
             self.ticks_left -= 1;
             self.change_damage();
