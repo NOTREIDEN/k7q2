@@ -679,8 +679,8 @@ impl Default for Edge {
     }
 }
 
-/// Longest backtrack an `Edge` can ask for, in ticks.
-pub const MAX_BACKTRACK: usize = 8;
+/// Longest backtrack an `Edge` can ask for, in ticks (800 ms).
+pub const MAX_BACKTRACK: usize = 16;
 
 #[derive(Clone, Debug)]
 pub struct Client {

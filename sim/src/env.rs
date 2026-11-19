@@ -18,7 +18,7 @@ use crate::server::{
     feather_points, prot_points, Food, KbPlugin, KbProfile, ServerCfg, DRINK_SHOWN, FOR_GOOD, MAX_HEALTH, PEARL_DAMAGE,
     POTION_HEAL,
 };
-use crate::sim::{Match, NetCfg, Spawn, TICK_US};
+use crate::sim::{Match, NetCfg, Spawn, Timer, TICK_US};
 use crate::world::World;
 
 /// How many of the points a potion did not offer its thrower `w_miss` counts.
@@ -35,7 +35,7 @@ pub const FOOD_TO_SPRINT: i32 = 6;
 pub const SHAKE_DEG: f32 = 6.0;
 pub const SHAKE_TICKS: i32 = 2;
 pub const PRIV_DIM: usize = 71;
-pub const STATS_DIM: usize = 143;
+pub const STATS_DIM: usize = 147;
 /// Floats per player and in total written by `Env::write_view`.
 pub const VIEW_PLAYER: usize = 45;
 pub const VIEW_DIM: usize = 2 * VIEW_PLAYER + 24;
@@ -574,6 +574,29 @@ pub struct Params {
     /// Share of the duels against a scripted bot of level 3 or more (the
     /// hardest one too) in which it spaces its combos (`BotParams::spacer`).
     pub bot_spacer: f64,
+    /// Cheats of the bot's client, each in this share of the duels against
+    /// a bot (lessons aside), drawn per duel; the first player's own game
+    /// is the plain one all the same. A long backtrack: the bot's hits
+    /// count against where it showed the first player up to `bt_ms` ago
+    /// (drawn from this range, `MAX_BACKTRACK` ticks at most), on top of
+    /// whatever else its edge is.
+    pub bt_prob: f64,
+    pub bt_ms: [f64; 2],
+    /// A timer (`sim::Timer`): bursts of `timer_burst_s` seconds in which
+    /// its game runs `timer_rate` times as fast, started while the first
+    /// player is 2.8 to 12 blocks from it, with half to one and a half times
+    /// `timer_gap_s` between them; this share of them are blinks (a timer
+    /// of 3 to 6 for 0.1 to 0.25 seconds).
+    pub timer_prob: f64,
+    pub timer_rate: [f64; 2],
+    pub timer_burst_s: [f64; 2],
+    pub timer_gap_s: f64,
+    pub timer_blink: f64,
+    /// A pearl spammer (`BotParams::spam`, a bot of level 2 or more): no
+    /// pearl cooldown for it whatever the server's (`pearl_cd_s`), and
+    /// this many pearls.
+    pub pearl_spam_prob: f64,
+    pub pearl_spam_pearls: f64,
 }
 
 impl Default for Params {
@@ -745,6 +768,15 @@ impl Default for Params {
             comboed_cap: 4.0,
             combo_gap: 0.0,
             bot_spacer: 0.0,
+            bt_prob: 0.0,
+            bt_ms: [400.0, 650.0],
+            timer_prob: 0.0,
+            timer_rate: [1.2, 2.0],
+            timer_burst_s: [0.3, 1.5],
+            timer_gap_s: 2.0,
+            timer_blink: 0.25,
+            pearl_spam_prob: 0.0,
+            pearl_spam_pearls: 16.0,
         }
     }
 }
@@ -945,6 +977,18 @@ impl Params {
             181 => self.comboed_cap = v,
             182 => self.combo_gap = v,
             183 => self.bot_spacer = v,
+            194 => self.bt_prob = v,
+            195 => self.bt_ms[0] = v,
+            196 => self.bt_ms[1] = v,
+            197 => self.timer_prob = v,
+            198 => self.timer_rate[0] = v,
+            199 => self.timer_rate[1] = v,
+            200 => self.timer_burst_s[0] = v,
+            201 => self.timer_burst_s[1] = v,
+            202 => self.timer_gap_s = v,
+            203 => self.timer_blink = v,
+            204 => self.pearl_spam_prob = v,
+            205 => self.pearl_spam_pearls = v,
             _ => return false,
         }
         true
@@ -1104,6 +1148,13 @@ pub struct Stats {
     pub combo_hits_taken: [f64; 2],
     pub combo_breaks: [f64; 2],
     pub combo_escapes: [f64; 2],
+    /// Cheats of the bot (`Params::bt_prob` and on): the ticks its client
+    /// ran in timer bursts, and the duels with a backtrack of 400 ms or
+    /// more, with a timer, and with a pearl spammer.
+    pub timer_ticks: f64,
+    pub long_bt: f64,
+    pub timer_duels: f64,
+    pub spam_duels: f64,
 }
 
 impl Stats {
@@ -1192,6 +1243,10 @@ impl Stats {
             self.combo_breaks[a] += o.combo_breaks[a];
             self.combo_escapes[a] += o.combo_escapes[a];
         }
+        self.timer_ticks += o.timer_ticks;
+        self.long_bt += o.long_bt;
+        self.timer_duels += o.timer_duels;
+        self.spam_duels += o.spam_duels;
     }
     pub fn write(&self, out: &mut [f64]) {
         let v = [
@@ -1338,6 +1393,10 @@ impl Stats {
             self.combo_breaks[1],
             self.combo_escapes[0],
             self.combo_escapes[1],
+            self.timer_ticks,
+            self.long_bt,
+            self.timer_duels,
+            self.spam_duels,
         ];
         for (o, x) in out.iter_mut().zip(v.iter()) {
             *o = *x;
@@ -2028,8 +2087,41 @@ pub fn new_duel(p: &Params, rng: &mut Rng, mode: Mode) -> (Match, [f64; 2], BotP
             m.c[0].rp.health = h;
         }
     }
+    // The cheats of the bot's client, each drawn only when asked for.
+    let cheat = mode == Mode::Bot && lesson == 0;
+    if cheat && p.bt_prob > 0.0 && rng.chance(p.bt_prob) {
+        let ms = rng.range(p.bt_ms[0], p.bt_ms[1].max(p.bt_ms[0]));
+        m.c[1].edge.backtrack = ((ms / 50.0).round().max(0.0) as usize).min(MAX_BACKTRACK) as u8;
+    }
+    if cheat && p.timer_prob > 0.0 && rng.chance(p.timer_prob) {
+        let us = |s: f64| (s.max(0.0) * 1e6).round() as i64;
+        let rate = [p.timer_rate[0].max(1.0), p.timer_rate[1].max(p.timer_rate[0]).max(1.0)];
+        m.timer[1] = Timer {
+            on: true,
+            rate,
+            burst_us: [us(p.timer_burst_s[0]), us(p.timer_burst_s[1].max(p.timer_burst_s[0]))],
+            gap_us: [us(0.5 * p.timer_gap_s), us(1.5 * p.timer_gap_s)],
+            blink: p.timer_blink.clamp(0.0, 1.0),
+            range: TIMER_RANGE,
+            ..Timer::default()
+        };
+    }
+    if cheat && p.pearl_spam_prob > 0.0 && rng.chance(p.pearl_spam_prob) && bot.level >= 2 {
+        bot.spam = true;
+        bot.pearl_attack = bot.pearl_attack.max(1.0);
+        bot.pearl_escape = bot.pearl_escape.max(0.8);
+        bot.pearl_cd = 0;
+        m.s.p[1].no_pearl_cd = true;
+        let n = p.pearl_spam_pearls.clamp(1.0, 64.0) as u8;
+        m.s.p[1].pearls = n;
+        m.c[1].lp.pearls = n;
+    }
     (m, ping, bot, lesson)
 }
+
+/// How far the other player is, as the cheat sees it, while a timer
+/// burst may start (`Params::timer_prob`).
+const TIMER_RANGE: [f64; 2] = [2.8, 12.0];
 
 impl Env {
     pub fn new(mode: Mode, params: Params, seed: u64) -> Env {
@@ -2871,6 +2963,11 @@ impl Env {
             self.done_flag[a] = how;
         }
         self.ep.episodes = 1.0;
+        if self.mode == Mode::Bot {
+            self.ep.long_bt = (self.m.c[1].edge.backtrack >= 8) as u8 as f64;
+            self.ep.timer_duels = self.m.timer[1].on as u8 as f64;
+            self.ep.spam_duels = self.bot.spam as u8 as f64;
+        }
         let ep = self.ep;
         self.total.add(&ep);
         if self.params.retry_prob > 0.0 {
@@ -2927,7 +3024,9 @@ impl Env {
                 if self.params.opp_cps_min >= 0.0 {
                     self.ag[1].limit_clicks(&mut b, &mut self.rng);
                 }
+                let timed = self.m.timer[1].ticks;
                 let o = self.m.client_tick(1, &b);
+                self.ep.timer_ticks += (self.m.timer[1].ticks - timed) as f64;
                 self.account(1, &b, &o);
                 next = self.m.advance();
                 self.collect_hits();
@@ -3179,7 +3278,9 @@ impl Env {
             let e = &self.m.c[who].edge;
             o[34 + 3 * k] = (e.reach - 3.0) as f32 * 2.0;
             o[35 + 3 * k] = e.kb_taken as f32;
-            o[36 + 3 * k] = e.backtrack as f32 / 4.0;
+            // A quarter for each tick up to four, an eighth beyond.
+            let b = e.backtrack as f32;
+            o[36 + 3 * k] = if b <= 4.0 { b / 4.0 } else { 1.0 + (b - 4.0) / 8.0 };
         }
         match s.plugin {
             Some(k) => {

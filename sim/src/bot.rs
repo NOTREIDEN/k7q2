@@ -94,6 +94,15 @@ pub struct BotParams {
     /// player who sprints back at it straight away catches it backing off
     /// and can hit it first; one who waits for the next hit is comboed.
     pub spacer: bool,
+    /// A pearl spammer (`Params::pearl_spam_prob`): the server lets it
+    /// throw with no cooldown and it has pearls to spare, and it throws
+    /// them all the time, at the opponent (the pearl hits it, knocks it
+    /// back and puts the bot in its face), next to it or behind it, from
+    /// far and near, as soon as its last one has come down, while it has
+    /// the health for the five points a landing costs. Most of all when
+    /// the opponent goes to heal itself: a potion in its hand or in the
+    /// air, or its back turned while hurt.
+    pub spam: bool,
 }
 
 /// What a spacer (`BotParams::spacer`) keeps between itself and the
@@ -132,6 +141,7 @@ impl BotParams {
                 pot_turn: false,
                 pot_run: 0,
                 spacer: false,
+                spam: false,
             },
             2 => BotParams {
                 level,
@@ -158,6 +168,7 @@ impl BotParams {
                 pot_turn: false,
                 pot_run: 0,
                 spacer: false,
+                spam: false,
             },
             3 => BotParams {
                 level,
@@ -184,6 +195,7 @@ impl BotParams {
                 pot_turn: false,
                 pot_run: 0,
                 spacer: false,
+                spam: false,
             },
             _ => BotParams {
                 level: 4,
@@ -210,6 +222,7 @@ impl BotParams {
                 pot_turn: false,
                 pot_run: 0,
                 spacer: false,
+                spam: false,
             },
         }
     }
@@ -233,7 +246,8 @@ pub struct BotState {
     /// The spot the throw under way, or the last one, is meant to reach,
     /// and why it was thrown: 1 to attack, 2 to get out of a combo by
     /// landing next to the opponent, 3 to get away, 4 to get at an
-    /// opponent that is healing itself (0: nothing thrown yet).
+    /// opponent that is healing itself, 5 at the opponent itself (a
+    /// spammer's; 0: nothing thrown yet).
     pub pearl_to: V3,
     pub pearl_kind: u8,
     /// Ticks until the next pearl may be thrown.
@@ -389,6 +403,96 @@ pub fn potion_pitch(speed: f64, drop: f64) -> f64 {
     best.1
 }
 
+/// Where the opponent will be, across the ground, when a pearl thrown at
+/// it now gets there: after the flight and the ticks of `pearl_lead`. A
+/// player on foot loses about half its speed every tick and gains what its
+/// keys add, so the way it moves now fades within a few ticks, and the bot
+/// takes it to end up mostly running the way it faces.
+fn foresee(c: &Client, p: &BotParams, st: &BotState, hdist: f64) -> [f64; 2] {
+    let them = c.rp.pos;
+    let n = (hdist / 1.4).min(20.0) + p.pearl_lead;
+    let run = crate::living::Attr { sprint: true, ..c.lp.l.attr }.value() * 2.1;
+    let yaw = (c.rp.yaw as f64).to_radians();
+    let face = [-yaw.sin(), yaw.cos()];
+    let v = st.seen_vel;
+    let goal = [v[0] + (face[0] * run - v[0]) * 0.7, v[1] + (face[1] * run - v[1]) * 0.7];
+    let keep = 0.55f64;
+    let fade = keep * (1.0 - keep.powf(n)) / (1.0 - keep);
+    let moved = [goal[0] * n + (v[0] - goal[0]) * fade, goal[1] * n + (v[1] - goal[1]) * fade];
+    [them[0] + moved[0], them[2] + moved[1]]
+}
+
+/// A spot for a pearl spammer (`BotParams::spam`) to throw at and the kind
+/// of throw (5 at the opponent itself, 1 next to it or behind it, 4 at an
+/// opponent that heals itself), or `None`.
+fn spam_target(c: &Client, world: &World, p: &BotParams, st: &BotState, hdist: f64, rng: &mut Rng) -> Option<(V3, u8)> {
+    let (me, them) = (c.lp.l.body.pos, c.rp.pos);
+    // Its last pearl still in the air: it waits for it to come down.
+    if c.thrown.iter().any(|e| e.kind == Kind::Pearl && e.mine) {
+        return None;
+    }
+    let yaw = (c.rp.yaw as f64).to_radians();
+    let face = [-yaw.sin(), yaw.cos()];
+    let flank = [-face[1], face[0]];
+    let to_me = if hdist > 1e-6 { [(me[0] - them[0]) / hdist, (me[2] - them[2]) / hdist] } else { [0.0, 1.0] };
+    // Going to heal itself: a potion in hand or in the air, a drink or a
+    // meal, or its back turned to the bot while hurt.
+    let turned = face[0] * to_me[0] + face[1] * to_me[1] < -0.3;
+    let potting = c.rp.item == Item::Potion
+        || c.thrown.iter().any(|e| e.kind == Kind::Potion && !e.mine)
+        || (c.rp.using && matches!(c.rp.item, Item::Drink | Item::Food))
+        || (turned && c.rp.health <= 14.0);
+    // A landing costs five points: kept for a potting opponent once it is
+    // down to ten, and none below six.
+    if c.lp.health <= 6.0 || (c.lp.health <= 10.0 && !potting) {
+        return None;
+    }
+    let chance = if potting && hdist > 2.5 {
+        0.6
+    } else if hdist > 7.0 {
+        0.25
+    } else if hdist > 3.5 {
+        0.12
+    } else {
+        0.05
+    };
+    if !rng.chance(chance) {
+        return None;
+    }
+    let then = foresee(c, p, st, hdist);
+    let lim = world.half - 1.0;
+    let r = rng.f64();
+    let sign = if rng.chance(0.5) { 1.0 } else { -1.0 };
+    let side = |rng: &mut Rng| {
+        let (w, along) = (rng.range(1.2, 2.2) * sign, rng.range(-0.8, 0.3));
+        [flank[0] * w + face[0] * along, flank[1] * w + face[1] * along]
+    };
+    let (off, kind) = if potting {
+        // On it, which knocks it off its potion, or a little ahead of it,
+        // where it runs and its potion breaks, or next to it.
+        if r < 0.4 {
+            ([0.0, 0.0], 4)
+        } else if r < 0.8 {
+            let (a, w) = (rng.range(0.5, 2.0), rng.range(-0.8, 0.8));
+            ([face[0] * a + flank[0] * w, face[1] * a + flank[1] * w], 4)
+        } else {
+            (side(rng), 4)
+        }
+    } else if r < 0.35 && hdist > 3.0 {
+        ([0.0, 0.0], 5)
+    } else if r < 0.65 {
+        (side(rng), 1)
+    } else {
+        let (a, w) = (rng.range(1.2, 2.2), rng.range(-1.0, 1.0));
+        ([-face[0] * a + flank[0] * w, -face[1] * a + flank[1] * w], 1)
+    };
+    let q = [(then[0] + off[0]).clamp(-lim, lim), them[1], (then[1] + off[1]).clamp(-lim, lim)];
+    if (q[0] - me[0]).hypot(q[2] - me[2]) < 2.0 {
+        return None;
+    }
+    Some((q, kind))
+}
+
 /// A spot for the bot to throw a pearl at and the kind of throw it is (see
 /// `BotState::pearl_kind`), or `None`.
 fn pearl_target(c: &Client, world: &World, p: &BotParams, st: &BotState, hdist: f64, rng: &mut Rng) -> Option<(V3, u8)> {
@@ -451,22 +555,12 @@ fn pearl_target(c: &Client, world: &World, p: &BotParams, st: &BotState, hdist: 
             }
         }
     }
-    // Where the opponent will be when the pearl gets there: after the
-    // flight and the ticks of `pearl_lead`. A player on foot
-    // loses about half its speed every tick and gains what its keys add,
-    // so the way it moves now fades within a few ticks, and the bot takes
-    // it to end up mostly running the way it faces.
-    let n = (hdist / 1.4).min(20.0) + p.pearl_lead;
-    let run = crate::living::Attr { sprint: true, ..c.lp.l.attr }.value() * 2.1;
+    // Where the opponent will be when the pearl gets there (`foresee`).
     let yaw = (c.rp.yaw as f64).to_radians();
     let face = [-yaw.sin(), yaw.cos()];
     let flank = [-face[1], face[0]];
     let v = st.seen_vel;
-    let goal = [v[0] + (face[0] * run - v[0]) * 0.7, v[1] + (face[1] * run - v[1]) * 0.7];
-    let keep = 0.55f64;
-    let fade = keep * (1.0 - keep.powf(n)) / (1.0 - keep);
-    let moved = [goal[0] * n + (v[0] - goal[0]) * fade, goal[1] * n + (v[1] - goal[1]) * fade];
-    let then = [them[0] + moved[0], them[2] + moved[1]];
+    let then = foresee(c, p, st, hdist);
     // An opponent that will be on top of the bot by then walks into any
     // pearl thrown past it.
     if !counter && (then[0] - me[0]).hypot(then[1] - me[2]) < 3.5 {
@@ -859,7 +953,9 @@ fn act_flat(c: &Client, world: &World, cfg: &ClientCfg, p: &BotParams, st: &mut 
                 && st.block_left == 0
                 && !st.fleeing;
             if ready {
-                if let Some((q, kind)) = pearl_target(c, world, p, st, hdist, rng) {
+                // A spammer out of a combo throws as the others do.
+                let to = if p.spam && st.taken_run < 3 { spam_target(c, world, p, st, hdist, rng) } else { pearl_target(c, world, p, st, hdist, rng) };
+                if let Some((q, kind)) = to {
                     st.pearl_to = q;
                     st.pearl_kind = kind;
                     st.pearl_stage = 1;
