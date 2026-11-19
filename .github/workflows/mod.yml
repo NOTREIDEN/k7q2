@@ -12,6 +12,9 @@ on:
         description: Put the jar on the branch "mod" (false only builds and tests it)
         type: boolean
         default: true
+      weights_ref:
+        description: Branch or commit to take latest.pt from (the one that was measured)
+        default: weights
 
 permissions:
   contents: write
@@ -27,8 +30,10 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Fetch the newest weights
+        env:
+          WEIGHTS_REF: ${{ inputs.weights_ref }}
         run: |
-          git fetch -q --depth 1 origin weights
+          git fetch -q --depth 1 origin "${WEIGHTS_REF:-weights}"
           git show FETCH_HEAD:latest.pt > latest.pt
           git show FETCH_HEAD:status.txt | head -n 3
       - uses: actions/cache@v4
