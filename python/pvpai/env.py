@@ -46,6 +46,7 @@ PARAM = {
     "w_comboed": 179, "comboed_free": 180, "comboed_cap": 181, "combo_gap": 182, "bot_spacer": 183,
     "w_pot_stock": 215, "pot_stock_cap": 216, "extras_bot_only": 217, "crit_prob": 218, "opp_kb_v": 219, "w_late": 240, "late_pot_free": 241, "w_hurt_click": 242,
     "bot_select": 225, "select_wait": 226, "select_block": 227, "bot_punish": 228, "bot_pot_exact": 220,
+    "pearl_punish": 230, "pearl_punish_hp": 231, "pearl_punish_far": 232, "pearl_punish_rush": 233, "pearl_punish_noise": 234,
 }
 
 STAT_NAMES = [
