@@ -10,6 +10,7 @@ machine that folder is shared directly. Between GitHub Actions machines each
 one has a folder it writes to and a folder it reads from, and the steps of
 the workflow carry the files across as artifacts of the run
 (`.github/actions/round`)."""
+import math
 import os
 import shutil
 import tempfile
@@ -81,8 +82,15 @@ class Syncer:
     unrelated ones."""
 
     def __init__(self, backend, worker_id, n_workers, every_minutes, wait_seconds=30.0, mode="average",
-                 margin=5.0, origin=0.0):
+                 margin=5.0, origin=0.0, outer_lr=1.0, outer_mom=0.0):
         self.b, self.id, self.n = backend, worker_id, n_workers
+        # The step an averaging round takes (mode "average"): from the
+        # weights all members started the round with (`anchor`) towards the
+        # mean, `outer_lr` times as far, with Nesterov momentum `outer_mom`
+        # over the rounds (DiLoCo, arXiv 2311.08105). 1 and 0: the plain mean.
+        self.outer_lr, self.outer_mom = outer_lr, outer_mom
+        self.anchor, self.mom = None, None
+        self.outer_log = ""
         self.every = every_minutes * 60.0
         self.wait = wait_seconds
         self.mode = mode
@@ -154,6 +162,7 @@ class Syncer:
             src = [c for c in cks if newest - c.get("time", 0) < 4 * self.every and c.get("generation", 0.0) == gen]
             src = src or [max(cks, key=lambda c: c.get("time", 0))]
         self._load_mean(policy, vs, src)
+        self.anchor, self.mom = None, None
         self.generation = max(c.get("generation", 0.0) for c in src)
         # A restart every one of them has had is not made again.
         self.marks = sorted(set.intersection(*[set(c.get("marks", ())) for c in src]))
@@ -216,14 +225,54 @@ class Syncer:
         if gen > self.generation:
             src = [c for c in current if c.get("generation", 0.0) == gen]
             self._load_mean(policy, vs, src)
+            self.anchor, self.mom = None, None
             self.generation = gen
             self.fresh = any(c.get("fresh", False) for c in src)
             return f"took over the network of {len(src)} others", ("replaced" if self.fresh else "moved")
         same = [c for c in current if c.get("generation", 0.0) == self.generation]
         if not same:
             return "the others have not caught up yet", ""
-        self._load_mean(policy, vs, same, own={k: v.detach() for k, v in policy.state_dict().items()})
-        return f"averaged with {len(same)} others", ""
+        own = {k: v.detach() for k, v in policy.state_dict().items()}
+        if self.outer:
+            # Rounded as the others receive it, so that every member that
+            # hears from the same ones computes the same mean.
+            own = {k: (v.half().float() if v.is_floating_point() else v) for k, v in own.items()}
+        self._load_mean(policy, vs, same, own=own)
+        if self.outer:
+            self._outer_step(policy)
+        return f"averaged with {len(same)} others{self.outer_log}", ""
+
+    @property
+    def outer(self):
+        return self.mode == "average" and (self.outer_lr != 1.0 or self.outer_mom != 0.0)
+
+    def _outer_step(self, policy):
+        """Policy holds the round's mean; move it to the outer step from the anchor."""
+        mean = {k: v.detach().clone() for k, v in policy.state_dict().items()}
+        keys = [k for k, v in mean.items() if v.is_floating_point()]
+        if (self.anchor is None or any(k not in self.anchor or self.anchor[k].shape != mean[k].shape for k in keys)):
+            # First round of this network here: the plain mean, which the next round starts from.
+            self.anchor, self.mom = {k: mean[k] for k in keys}, {k: torch.zeros_like(mean[k]) for k in keys}
+            self.outer_log = ", outer step from the next round"
+            return
+        g = {k: self.anchor[k] - mean[k] for k in keys}
+        mu, lr = self.outer_mom, self.outer_lr
+        for k in keys:
+            self.mom[k].mul_(mu).add_(g[k])
+        step = {k: lr * (g[k] + mu * self.mom[k]) for k in keys}
+        gn = math.sqrt(sum(float((x * x).sum()) for x in g.values()))
+        sn = math.sqrt(sum(float((x * x).sum()) for x in step.values()))
+        mn = math.sqrt(sum(float((x * x).sum()) for x in self.mom.values()))
+        dot = sum(float((g[k] * self.mom[k]).sum()) for k in keys)
+        # Never more than three times the plain mean's own step.
+        scale = min(1.0, 3.0 * gn / sn) if sn > 0 else 1.0
+        new = dict(mean)
+        for k in keys:
+            new[k] = self.anchor[k] - scale * step[k]
+        policy.load_state_dict(new)
+        self.anchor = {k: new[k].detach().clone() for k in keys}
+        self.outer_log = (f", outer step |mean-anchor| {gn:.3f} -> {sn * scale:.3f}"
+                          f" (cos with momentum {dot / max(gn * mn, 1e-12):+.2f})")
 
     def total_samples(self, own):
         return own + sum(self.peer_samples.values())
