@@ -42,7 +42,7 @@ PARAM = {
     "bt_prob": 194, "bt_ms_min": 195, "bt_ms_max": 196, "timer_prob": 197, "timer_min": 198, "timer_max": 199,
     "timer_burst_min_s": 200, "timer_burst_max_s": 201, "timer_gap_s": 202, "timer_blink": 203,
     "pearl_spam_prob": 204, "pearl_spam_pearls": 205,
-    "pot_relief_hp": 206, "pot_relief": 207, "insane_lessons": 208, "w_sip_near": 209, "sip_near_dist": 210, "bot_trader": 211, "trade_block": 212, "trade_crit": 213, "trade_heal": 214,
+    "pot_relief_hp": 206, "pot_relief": 207, "insane_lessons": 208, "w_sip_near": 209, "sip_near_dist": 210, "bot_trader": 211, "trade_block": 212, "trade_crit": 213, "trade_heal": 214, "crit_prob": 215,
     "w_comboed": 179, "comboed_free": 180, "comboed_cap": 181, "combo_gap": 182, "bot_spacer": 183,
 }
 

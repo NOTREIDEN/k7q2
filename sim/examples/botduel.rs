@@ -2,6 +2,9 @@
 //!
 //!     cargo run --release --example botduel -- A B [--duels N] [--seconds S] [--ping LO HI] [--health] [--trace] [--ticks]
 //!
+//! `--tiny-kb` fights them where hits hardly move anybody (`Params::tiny_kb_prob`),
+//! and `--crits` gives B packet Criticals (`Params::crit_prob`).
+//!
 //! A and B are a level (`4`) optionally followed by settings, for example
 //! `4:jr=0:strafe=0:noise=1.5:click=0.6:pearl=0:escape=0`. `--trace` prints
 //! every hit and `--ticks` every client tick as well. `--health` gives the
@@ -40,6 +43,7 @@ fn main() {
     let mut params = Params::default();
     let mut trace = false;
     let mut per_tick = false;
+    let mut crits = false;
     let mut i = 0;
     while i < args.len() {
         match args[i].as_str() {
@@ -62,6 +66,13 @@ fn main() {
                 params.potions = [7.0, 7.0];
             }
             "--trace" => trace = true,
+            "--tiny-kb" => {
+                params.kb_random = 0.0;
+                params.tiny_kb_prob = 1.0;
+                params.tiny_kb_h = [0.08, 0.32];
+                params.tiny_kb_v = [0.15, 0.35];
+            }
+            "--crits" => crits = true,
             "--ticks" => {
                 trace = true;
                 per_tick = true;
@@ -98,6 +109,7 @@ fn main() {
         for b in bp.iter_mut() {
             b.pearl_cd = m.s.cfg.pearl_cooldown;
         }
+        m.s.p[1].always_crit = crits;
         let mut st = [BotState::default(); 2];
         let mut combo = [0u64; 2];
         let mut top = [0u64; 2];

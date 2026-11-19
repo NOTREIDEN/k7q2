@@ -554,6 +554,11 @@ pub struct ServerPlayer {
     /// Stands for a client that takes no knockback from hits: it is sent
     /// no velocity for them and stays where it is.
     pub no_kb: bool,
+    /// Stands for a client with packet Criticals: before each attack it
+    /// sends the server a tiny hop off the ground, so the server has it
+    /// falling and every hit it makes is a critical one (1.5 times the
+    /// sword's damage), with no jump to be seen.
+    pub always_crit: bool,
     /// The cooldown plugin leaves this player alone (`pearl_cooldown` is
     /// for everyone else): it may throw a pearl whenever it likes, as the
     /// game itself has it.
@@ -635,6 +640,7 @@ impl ServerPlayer {
             pearl_wait: 0,
             immortal: false,
             no_kb: false,
+            always_crit: false,
             no_pearl_cd: false,
         }
     }
@@ -1888,7 +1894,7 @@ impl Server {
         let sprinting = self.p[a].l.sprinting;
         let i = ench + sprinting as i32;
         if f > 0.0 || f1 > 0.0 {
-            let crit = self.p[a].l.body.fall_distance > 0.0 && !self.p[a].l.body.on_ground;
+            let crit = (self.p[a].l.body.fall_distance > 0.0 && !self.p[a].l.body.on_ground) || self.p[a].always_crit;
             if crit && f > 0.0 {
                 f *= 1.5;
             }

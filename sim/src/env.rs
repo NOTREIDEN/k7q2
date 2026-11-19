@@ -597,6 +597,9 @@ pub struct Params {
     /// this many pearls.
     pub pearl_spam_prob: f64,
     pub pearl_spam_pearls: f64,
+    /// Packet Criticals (`ServerPlayer::always_crit`): every hit of the bot
+    /// is a critical one, standing or not.
+    pub crit_prob: f64,
     /// A potion that breaks on its thrower while it has this much health
     /// or less (before the potion's own) pays only `pot_relief` of the
     /// accuracy costs (`w_waste`, `w_miss`, `w_pot_far`): a potion thrown
@@ -808,6 +811,7 @@ impl Default for Params {
             timer_gap_s: 2.0,
             timer_blink: 0.25,
             pearl_spam_prob: 0.0,
+            crit_prob: 0.0,
             pearl_spam_pearls: 16.0,
             pot_relief_hp: 0.0,
             pot_relief: 1.0,
@@ -1039,6 +1043,7 @@ impl Params {
             212 => self.trade_block = v,
             213 => self.trade_crit = v,
             214 => self.trade_heal = v,
+            215 => self.crit_prob = v,
             _ => return false,
         }
         true
@@ -2183,6 +2188,9 @@ pub fn new_duel(p: &Params, rng: &mut Rng, mode: Mode) -> (Match, [f64; 2], BotP
         let n = p.pearl_spam_pearls.clamp(1.0, 64.0) as u8;
         m.s.p[1].pearls = n;
         m.c[1].lp.pearls = n;
+    }
+    if cheat && p.crit_prob > 0.0 && rng.chance(p.crit_prob) {
+        m.s.p[1].always_crit = true;
     }
     (m, ping, bot, lesson)
 }
