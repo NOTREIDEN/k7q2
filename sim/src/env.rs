@@ -35,7 +35,7 @@ pub const FOOD_TO_SPRINT: i32 = 6;
 pub const SHAKE_DEG: f32 = 6.0;
 pub const SHAKE_TICKS: i32 = 2;
 pub const PRIV_DIM: usize = 71;
-pub const STATS_DIM: usize = 147;
+pub const STATS_DIM: usize = 148;
 /// Floats per player and in total written by `Env::write_view`.
 pub const VIEW_PLAYER: usize = 45;
 pub const VIEW_DIM: usize = 2 * VIEW_PLAYER + 24;
@@ -616,6 +616,19 @@ pub struct Params {
     /// hits (and a pearl onto it). Nothing can be earned with it.
     pub w_sip_near: f32,
     pub sip_near_dist: f32,
+    /// Share of the duels against a scripted bot of level 3 or more (the
+    /// hardest one too) in which it trades as the best players do where
+    /// hits hardly move anybody (`BotParams::trader`): a block in the
+    /// opponent's turn, a critical hit in its own; it does not space its
+    /// combos then (`bot_spacer`). `trade_block` and `trade_crit`: how
+    /// readily it does each, drawn at each of its hits. Zero turns it off.
+    /// `trade_heal`: if more than 0, the health (one more or less) at which
+    /// it heals itself, instead of where its kind does (the hardest bot:
+    /// at 4 to 6, one critical hit from death).
+    pub bot_trader: f64,
+    pub trade_block: f64,
+    pub trade_crit: f64,
+    pub trade_heal: f64,
 }
 
 impl Default for Params {
@@ -801,6 +814,10 @@ impl Default for Params {
             insane_lessons: 0.0,
             w_sip_near: 0.0,
             sip_near_dist: 8.0,
+            bot_trader: 0.0,
+            trade_block: 0.9,
+            trade_crit: 0.9,
+            trade_heal: 0.0,
         }
     }
 }
@@ -1018,6 +1035,10 @@ impl Params {
             208 => self.insane_lessons = v,
             209 => self.w_sip_near = v as f32,
             210 => self.sip_near_dist = v as f32,
+            211 => self.bot_trader = v,
+            212 => self.trade_block = v,
+            213 => self.trade_crit = v,
+            214 => self.trade_heal = v,
             _ => return false,
         }
         true
@@ -1184,6 +1205,8 @@ pub struct Stats {
     pub long_bt: f64,
     pub timer_duels: f64,
     pub spam_duels: f64,
+    /// Duels against a bot that trades (`Params::bot_trader`).
+    pub trader_duels: f64,
 }
 
 impl Stats {
@@ -1276,6 +1299,7 @@ impl Stats {
         self.long_bt += o.long_bt;
         self.timer_duels += o.timer_duels;
         self.spam_duels += o.spam_duels;
+        self.trader_duels += o.trader_duels;
     }
     pub fn write(&self, out: &mut [f64]) {
         let v = [
@@ -1426,6 +1450,7 @@ impl Stats {
             self.long_bt,
             self.timer_duels,
             self.spam_duels,
+            self.trader_duels,
         ];
         for (o, x) in out.iter_mut().zip(v.iter()) {
             *o = *x;
@@ -2104,6 +2129,15 @@ pub fn new_duel(p: &Params, rng: &mut Rng, mode: Mode) -> (Match, [f64; 2], BotP
     // did.
     if p.bot_spacer > 0.0 {
         bot.spacer = bot.level >= 3 && !bot.circler && rng.chance(p.bot_spacer);
+    }
+    // Drawn only when asked for, so that duels without it come out as they
+    // did.
+    if p.bot_trader > 0.0 && mode == Mode::Bot && bot.level >= 3 && !bot.circler && rng.chance(p.bot_trader) {
+        bot.trader = true;
+        bot.spacer = false;
+        bot.trade_block = p.trade_block.clamp(0.0, 1.0);
+        bot.trade_crit = p.trade_crit.clamp(0.0, 1.0);
+        bot.trade_heal = p.trade_heal.clamp(0.0, 19.0);
     }
     bot.carry = m.s.cfg.throw_carry;
     // Drawn only when asked for, so that duels without it come out as they
@@ -3014,6 +3048,7 @@ impl Env {
             self.ep.long_bt = (self.m.c[1].edge.backtrack >= 8) as u8 as f64;
             self.ep.timer_duels = self.m.timer[1].on as u8 as f64;
             self.ep.spam_duels = self.bot.spam as u8 as f64;
+            self.ep.trader_duels = self.bot.trader as u8 as f64;
         }
         let ep = self.ep;
         self.total.add(&ep);

@@ -103,6 +103,21 @@ pub struct BotParams {
     /// the opponent goes to heal itself: a potion in its hand or in the
     /// air, or its back turned while hurt.
     pub spam: bool,
+    /// It trades as the best players do where hits hardly move anybody
+    /// (`Params::bot_trader`): in the ticks in which it cannot hit (its own
+    /// last hit still keeps the opponent from being hurt again) it holds
+    /// its sword up with the opponent near (a block halves the damage),
+    /// and lets go of it in time to hit as soon as the opponent can be
+    /// hurt again; and it jumps `TRADE_JUMP_AT` ticks before that, so that
+    /// it is falling then and the hit is a critical one. `trade_block` and
+    /// `trade_crit`: how readily it does each, drawn at each of its hits.
+    pub trader: bool,
+    pub trade_block: f64,
+    pub trade_crit: f64,
+    /// A trader heals itself at this much health (up to one more or less,
+    /// drawn per duel) instead of where its kind does, if more than 0: the
+    /// best players do not wait to be one critical hit from death.
+    pub trade_heal: f64,
 }
 
 /// What a spacer (`BotParams::spacer`) keeps between itself and the
@@ -112,6 +127,24 @@ pub struct BotParams {
 /// which it comes in again.
 pub const SPACE_OUT: f64 = 3.8;
 pub const SPACE_IN: i32 = 4;
+
+/// A trader (`BotParams::trader`) jumps when the opponent's hurt time, as
+/// it sees it, is down to this (or as soon after it as it is on the
+/// ground again, two ticks at most): a jump starts to come down six ticks
+/// after it starts, the server takes a hit with where the client was the
+/// tick before, and the jump is over five ticks later; so it is falling
+/// on the server when the opponent can be hurt again. A jump lasts longer
+/// than the opponent's hurt time, so it gets at most every other hit. It
+/// holds its block while the opponent's hurt time is at least
+/// `TRADE_BLOCK_TO`, so that the button is up (a click on the tick it lets
+/// go is thrown away) when it may hit again. Both only with the opponent
+/// within `TRADE_NEAR`.
+pub const TRADE_JUMP_AT: i32 = 9;
+pub const TRADE_BLOCK_TO: i32 = 4;
+pub const TRADE_NEAR: f64 = 4.5;
+/// It blocks only with the opponent this near (feet to feet): from further
+/// away nobody's reach gets to it, and a block slows it down.
+pub const TRADE_BLOCK_NEAR: f64 = 3.4;
 
 impl BotParams {
     pub fn level(level: u8) -> BotParams {
@@ -142,6 +175,10 @@ impl BotParams {
                 pot_run: 0,
                 spacer: false,
                 spam: false,
+                trader: false,
+                trade_block: 0.0,
+                trade_crit: 0.0,
+                trade_heal: 0.0,
             },
             2 => BotParams {
                 level,
@@ -169,6 +206,10 @@ impl BotParams {
                 pot_run: 0,
                 spacer: false,
                 spam: false,
+                trader: false,
+                trade_block: 0.0,
+                trade_crit: 0.0,
+                trade_heal: 0.0,
             },
             3 => BotParams {
                 level,
@@ -196,6 +237,10 @@ impl BotParams {
                 pot_run: 0,
                 spacer: false,
                 spam: false,
+                trader: false,
+                trade_block: 0.0,
+                trade_crit: 0.0,
+                trade_heal: 0.0,
             },
             _ => BotParams {
                 level: 4,
@@ -223,6 +268,10 @@ impl BotParams {
                 pot_run: 0,
                 spacer: false,
                 spam: false,
+                trader: false,
+                trade_block: 0.0,
+                trade_crit: 0.0,
+                trade_heal: 0.0,
             },
         }
     }
@@ -306,6 +355,10 @@ pub struct BotState {
     /// Ticks of the run with its back turned still to go before the throw
     /// (`BotParams::pot_turn`), while `potion_stage` is 4.
     pot_turn_left: i32,
+    /// A trader's (`BotParams::trader`) choices for the turn after its
+    /// last hit: whether it blocks and whether it jumps for a critical hit.
+    trade_block: bool,
+    trade_crit: bool,
 }
 
 fn gauss(rng: &mut Rng) -> f64 {
@@ -824,6 +877,11 @@ fn act_flat(c: &Client, world: &World, cfg: &ClientCfg, p: &BotParams, st: &mut 
 
     inp.sprint_key = true;
     inp.forward = if hdist > 1.2 { 1 } else { 0 };
+    if p.trader && rp.hurt_time == 10 && lp.ticks_since_attack <= 12 {
+        // Its hit landed: what it does in the turn this gives the opponent.
+        st.trade_block = rng.chance(p.trade_block);
+        st.trade_crit = rng.chance(p.trade_crit);
+    }
     if p.wtap {
         if rp.hurt_time == 10 && lp.ticks_since_attack <= 12 {
             // A hit landed: reset the sprint, by letting go of W or by a
@@ -843,6 +901,16 @@ fn act_flat(c: &Client, world: &World, cfg: &ClientCfg, p: &BotParams, st: &mut 
     st.saw_swing = rp.swing_in_progress;
     if swing_starts && hdist < 3.6 && lp.hurt_time <= 1 && st.block_left == 0 && rng.chance(p.block_react) {
         st.block_left = 2;
+    }
+    // A trader in the opponent's turn: it may not hurt the opponent yet.
+    // Its own hurt time does not matter: in it a critical hit still does
+    // what it has more than the hit before.
+    let trade_free = p.trader && st.pearl_stage == 0 && st.potion_stage == 0 && st.use_stage == 0 && lp.held == SLOT_SWORD && hdist < TRADE_NEAR;
+    // Not while it wants to heal itself: a block keeps the potion back.
+    let heal = lp.potions != 0 && st.potion_at > 0.0 && lp.health <= st.potion_at;
+    if trade_free && st.trade_block && !heal && rp.hurt_time >= TRADE_BLOCK_TO && hdist < TRADE_BLOCK_NEAR {
+        // Two, so that nothing else starts on this tick.
+        st.block_left = st.block_left.max(2);
     }
     if st.block_left > 0 {
         st.block_left -= 1;
@@ -867,6 +935,9 @@ fn act_flat(c: &Client, world: &World, cfg: &ClientCfg, p: &BotParams, st: &mut 
         inp.strafe = st.strafe_dir;
     }
     if p.jump_reset && lp.hurt_time == 10 && lp.l.body.on_ground {
+        inp.jump = true;
+    }
+    if trade_free && st.trade_crit && (TRADE_JUMP_AT - 2..=TRADE_JUMP_AT).contains(&rp.hurt_time) && lp.l.body.on_ground {
         inp.jump = true;
     }
     // A spacer that hit last, while its hit still keeps the opponent from
@@ -1004,7 +1075,15 @@ fn act_flat(c: &Client, world: &World, cfg: &ClientCfg, p: &BotParams, st: &mut 
         st.potion_wait -= 1;
     }
     if st.potion_at == 0.0 && p.potion > 0.0 && lp.potions != 0 {
-        let (lo, hi) = if p.pot_turn { (6.0, 11.0) } else if p.presser { (4.0, 6.0) } else { (7.0, 12.0) };
+        let (lo, hi) = if p.trader && p.trade_heal > 0.0 {
+            (p.trade_heal - 1.0, p.trade_heal + 1.0)
+        } else if p.pot_turn {
+            (6.0, 11.0)
+        } else if p.presser {
+            (4.0, 6.0)
+        } else {
+            (7.0, 12.0)
+        };
         st.potion_at = rng.range(lo, hi) as f32;
     }
     match st.potion_stage {
