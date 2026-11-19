@@ -609,6 +609,13 @@ pub struct Params {
     /// turned (128) fought against the hardest bot (as `insane_prob` for
     /// duels without a lesson). Drawn only when above zero.
     pub insane_lessons: f64,
+    /// Taken from a player that begins to drink or eat with the other one
+    /// closer than `sip_near_dist` blocks: all of it next to it, nothing
+    /// at that distance. A drink or a meal holds the player slow for more
+    /// than a second and a half, which a close opponent turns into free
+    /// hits (and a pearl onto it). Nothing can be earned with it.
+    pub w_sip_near: f32,
+    pub sip_near_dist: f32,
 }
 
 impl Default for Params {
@@ -792,6 +799,8 @@ impl Default for Params {
             pot_relief_hp: 0.0,
             pot_relief: 1.0,
             insane_lessons: 0.0,
+            w_sip_near: 0.0,
+            sip_near_dist: 8.0,
         }
     }
 }
@@ -1007,6 +1016,8 @@ impl Params {
             206 => self.pot_relief_hp = v as f32,
             207 => self.pot_relief = v as f32,
             208 => self.insane_lessons = v,
+            209 => self.w_sip_near = v as f32,
+            210 => self.sip_near_dist = v as f32,
             _ => return false,
         }
         true
@@ -2924,6 +2935,12 @@ impl Env {
             self.ep.sip_ticks[id] += 1.0;
             if !self.ag[id].was_consuming {
                 self.ep.sips[id] += 1.0;
+                let p = &self.params;
+                if p.w_sip_near != 0.0 && p.sip_near_dist > 0.0 {
+                    let (a, b) = (self.m.s.p[id].l.body.pos, self.m.s.p[1 - id].l.body.pos);
+                    let d = (a[0] - b[0]).hypot(a[2] - b[2]) as f32;
+                    self.rew_acc[id] -= p.w_sip_near * ((p.sip_near_dist - d) / p.sip_near_dist).max(0.0);
+                }
             }
         }
         let sp = &mut self.m.s.p[id];
