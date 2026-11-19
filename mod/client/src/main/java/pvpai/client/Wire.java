@@ -15,6 +15,7 @@ import net.minecraft.network.play.server.S13PacketDestroyEntities;
 import net.minecraft.network.play.server.S14PacketEntity;
 import net.minecraft.network.play.server.S18PacketEntityTeleport;
 import net.minecraft.network.play.server.S19PacketEntityStatus;
+import net.minecraft.network.play.server.S28PacketEffect;
 import net.minecraft.network.play.server.S32PacketConfirmTransaction;
 
 /**
@@ -62,7 +63,7 @@ public final class Wire extends ChannelInboundHandlerAdapter {
     static boolean wanted(Object p) {
         return p instanceof S12PacketEntityVelocity || p instanceof S19PacketEntityStatus || p instanceof S08PacketPlayerPosLook
             || p instanceof S18PacketEntityTeleport || p instanceof S0EPacketSpawnObject || p instanceof S14PacketEntity
-            || p instanceof S13PacketDestroyEntities || p instanceof S32PacketConfirmTransaction;
+            || p instanceof S13PacketDestroyEntities || p instanceof S32PacketConfirmTransaction || p instanceof S28PacketEffect;
     }
 
     @Override

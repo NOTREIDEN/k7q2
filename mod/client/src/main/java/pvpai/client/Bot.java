@@ -64,6 +64,8 @@ public final class Bot implements Wire.Tap {
     private double[] eyeBefore, saidBefore;
     private float saidYawBefore, saidPitchBefore;
     private int ticksBefore;
+    /** What writes the duel down, if anything: it only reads. */
+    private Recorder recorder;
 
     /**
      * For the duel that starts now against this player. With a chooser the
@@ -102,6 +104,14 @@ public final class Bot implements Wire.Tap {
         }
         duel.hitHealth = Scout.hitHealth(mc.thePlayer, o, layout);
         glide = GLIDE_TICKS;
+        if (recorder != null) {
+            recorder.target(o);
+        }
+    }
+
+    /** Have the duel written down by this recorder from now on. */
+    void record(Recorder r) {
+        recorder = r;
     }
 
     /**
@@ -163,6 +173,9 @@ public final class Bot implements Wire.Tap {
         if (me == null || mc.theWorld == null) {
             return;
         }
+        if (recorder != null) {
+            recorder.before(p);
+        }
         if (p instanceof S12PacketEntityVelocity) {
             S12PacketEntityVelocity v = (S12PacketEntityVelocity) p;
             if (v.getEntityID() == me.getEntityId()) {
@@ -204,6 +217,9 @@ public final class Bot implements Wire.Tap {
     public void after(Packet<?> p) {
         if (mc.theWorld == null) {
             return;
+        }
+        if (recorder != null) {
+            recorder.after(p);
         }
         if (p instanceof S14PacketEntity) {
             S14PacketEntity m = (S14PacketEntity) p;
@@ -353,6 +369,9 @@ public final class Bot implements Wire.Tap {
         if (turnedYaw != 0.0F || turnedPitch != 0.0F) {
             me.prevRotationYaw = me.rotationYaw - turnedYaw;
             me.prevRotationPitch = me.rotationPitch - turnedPitch;
+        }
+        if (recorder != null) {
+            recorder.tick(view, action, attacked, swung, threwPearl, threwPotion, screen, other);
         }
     }
 
