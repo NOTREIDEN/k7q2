@@ -204,6 +204,7 @@ public final class AgentCheck {
                 }
                 blocks = arena;
                 agent = new Agent(pingOwn, pingOther, cps, mouse, feet);
+                agent.potionGuard = false;
                 book = new Book(feet);
                 duels++;
             }

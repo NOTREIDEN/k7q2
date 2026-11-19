@@ -209,6 +209,40 @@ public final strictfp class Agent {
     private static final double CARRY_MOVED = 0.08;
 
     /**
+     * Never a potion more than the health it misses can take: while its own
+     * potions are on their way (thrown and not yet shown by the server, or
+     * in the air), a new one is thrown only if the health still missing
+     * after theirs is worth a whole potion, and two at once only if the
+     * second fits nearly whole. Off for {@code AgentCheck}, which compares the keys with the
+     * simulator's agent, where it does not apply.
+     */
+    public boolean potionGuard = true;
+    /**
+     * The health two potions at once need to miss: enough for the second
+     * to give at least three quarters of its own, and from three hearts
+     * down staying alive matters more than the rest.
+     */
+    private static final float TWO_MISSING = 14f;
+
+    private int guardPotion(View v, int bar, int turns) {
+        int onWay = v.potionsPending;
+        for (View.Thrown t : v.thrown) {
+            if (t.mine && t.kind == Inv.KIND_POTION) {
+                onWay++;
+            }
+        }
+        float missing = MAX_HEALTH - v.health - POTION_HEAL * onWay;
+        if (missing < POTION_HEAL && onWay > 0) {
+            return 0;
+        }
+        if (bar >= BAR_TURN + turns && missing < TWO_MISSING) {
+            // Two asked for where one is enough: the same turn, one potion.
+            return bar - turns;
+        }
+        return bar;
+    }
+
+    /**
      * An agent at the start of a duel: the two pings in milliseconds, its
      * click rate, the mouse factor of its sensitivity
      * ({@code f * f * f * 8} with {@code f = sensitivity * 0.6 + 0.2}), and
@@ -297,6 +331,9 @@ public final strictfp class Agent {
             }
         }
         int turns = BAR_TURNS.length;
+        if (potionGuard && potionStage == 0 && turned == 0 && (bar == 1 || bar >= BAR_TURN)) {
+            bar = guardPotion(v, bar, turns);
+        }
         int turn = bar >= BAR_TURN ? BAR_TURNS[Math.min(bar - BAR_TURN, 2 * turns - 1) % turns] : 0;
         boolean two = bar >= BAR_TURN + turns;
         Keys screen = refillKeys(v, bar);
