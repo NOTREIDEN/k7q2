@@ -269,9 +269,12 @@ class Policy(nn.Module):
         those choices per control as well, 0 where there is none."""
         hs = self.core_seq(obs, state, done)
         lp = self.flat_logp(hs)
-        _, start, _ = self._segments(lp.device)
+        _, start, sums = self._segments(lp.device)
         logp = lp.gather(-1, actions + start)
-        ent = -(lp.exp() * lp).sum(-1)
+        # Entropy per control [T, B, heads] with `per_head`, summed otherwise.
+        ent = -(lp.exp() * lp) @ sums.to(lp.dtype)
+        if not per_head:
+            ent = ent.sum(-1)
         out = (logp if per_head else logp.sum(-1), ent, self.value(hs, priv))
         if teach is None:
             return out

@@ -206,7 +206,11 @@ def ppo_update(policy, opt, streams, vs, cfg):
             surr = torch.min(ratio * a, torch.clamp(ratio, 1 - cfg["clip"], 1 + cfg["clip"]) * a)
             pi_loss = -(surr * w).sum() / w.sum().clamp(min=1.0)
             v_loss = 0.5 * (v - ret_n[:, mb]).pow(2).mean()
-            entropy = ent.mean()
+            # The pitch of a throw with a turn does nothing on the other
+            # ticks: its entropy counts only where the pitch was played.
+            ew = torch.ones_like(ent)
+            ew[..., PITCH_HEAD] = o[..., PITCH_HEAD]
+            entropy = (ent * ew).sum(-1).mean()
             loss = pi_loss + cfg["vf_coef"] * v_loss - cfg["ent_coef"] * entropy
             if use_teach:
                 # Imitation of the teacher on the choices it has an opinion

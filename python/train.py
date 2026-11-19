@@ -32,6 +32,7 @@ def main():
     ap.add_argument("--hidden", type=int, default=256)
     ap.add_argument("--lr", type=float, default=3e-4)
     ap.add_argument("--ent-coef", type=float, default=0.0015)
+    ap.add_argument("--lr-warmup", type=int, default=20, help="iterations a fresh optimiser takes to come up to --lr")
     ap.add_argument("--gamma", type=float, default=0.995)
     ap.add_argument("--lam", type=float, default=0.95, help="GAE lambda")
     ap.add_argument("--seed", type=int, default=1)
@@ -120,6 +121,7 @@ def main():
     policy = Policy(any_env.obs_dim, any_env.priv_dim, any_env.act_dims, args.hidden)
     torch.manual_seed(args.seed)
     opt = torch.optim.Adam(policy.parameters(), lr=args.lr, eps=1e-5)
+    fresh_iters = 0
     vs = RunningScale()
     total_samples, iters = 0, 0
 
@@ -149,6 +151,7 @@ def main():
         policy.load_state_dict(old.state_dict())
         if not grown and "opt" in ck:
             opt.load_state_dict(ck["opt"])
+            fresh_iters = 10 ** 9
         vs.var, vs.count = ck["vs"]
         # Every process counts its own share, so that the shares add up to
         # the checkpoint's count plus what is trained from here on.
@@ -257,6 +260,11 @@ def main():
             for (k, _), a in zip(later, choose_together(policy, [(streams[k], e.obs, e.priv) for k, e in later])):
                 acts[k] = drilled(k, a)
         t1 = time.time()
+        # A fresh optimiser's first steps move every weight by the whole
+        # learning rate: come up to it over the first iterations.
+        fresh_iters = fresh_iters + 1
+        for pg in opt.param_groups:
+            pg["lr"] = args.lr * min(1.0, fresh_iters / max(args.lr_warmup, 1))
         info = ppo_update(policy, opt, list(streams.values()), vs, cfg)
         # The teacher's weight for the next round of samples, and its
         # teacher on in the duels while it has any.
@@ -282,6 +290,7 @@ def main():
             if changed == "replaced":
                 # An unrelated network: the optimiser's running averages no longer apply.
                 opt = torch.optim.Adam(policy.parameters(), lr=args.lr, eps=1e-5)
+                fresh_iters = 0
                 if sy is remote:
                     score = remote.adopted_score
             if changed and sy is remote and local is not None:
