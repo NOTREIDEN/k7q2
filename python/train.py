@@ -15,9 +15,10 @@ import time
 import numpy as np
 import torch
 
+from pvpai import opp_aux
 from pvpai.env import BOT, SELF_PLAY, VecEnv
 from pvpai.league import League
-from pvpai.model import Policy, load_policy, restart_choices
+from pvpai.model import Policy, carry_opt, carry_state, load_policy, restart_choices
 from pvpai.ppo import RunningScale, Stream, choose_together, ppo_update
 
 
@@ -50,6 +51,9 @@ def main():
     ap.add_argument("--teach-until", type=float, default=0.0, help="samples, in millions, at which it has come down to nothing")
     ap.add_argument("--turn-drill", type=float, default=0.0,
                     help="share of the agent's potions asked for that are thrown with a turn behind instead, to practise them")
+    ap.add_argument("--opp-aux-coef", type=float, default=0.0,
+                    help="weight of a head on the memory that guesses the opponent's true health and what it does next "
+                         "(pvpai/opp_aux.py); 0: no such head")
     ap.add_argument("--n-league", type=int, default=0, help="duels against earlier versions of the agent")
     ap.add_argument("--league-dir", default=None, help="folder with the weights of those versions")
     ap.add_argument("--league-groups", type=int, default=4, help="versions played at the same time")
@@ -128,7 +132,8 @@ def main():
     teaching = False
 
     torch.manual_seed(base_seed)
-    policy = Policy(any_env.obs_dim, any_env.priv_dim, any_env.act_dims, args.hidden)
+    policy = Policy(any_env.obs_dim, any_env.priv_dim, any_env.act_dims, args.hidden,
+                    opp_aux=opp_aux.DIM if args.opp_aux_coef > 0 else 0)
     torch.manual_seed(args.seed)
     opt = torch.optim.Adam(policy.parameters(), lr=args.lr, eps=1e-5)
     fresh_iters = 0
@@ -160,9 +165,9 @@ def main():
     if args.init and not loaded:
         old, ck, grown = load_policy(args.init, (any_env.obs_dim, any_env.priv_dim, any_env.act_dims))
         marks = list(ck.get("marks", []))
-        policy.load_state_dict(old.state_dict())
+        policy.load_state_dict(carry_state(policy, old.state_dict()))
         if not grown and "opt" in ck:
-            opt.load_state_dict(ck["opt"])
+            carry_opt(opt, ck["opt"], policy)
             fresh_iters = 10 ** 9
         vs.var, vs.count = ck["vs"]
         # Every process counts its own share, so that the shares add up to
@@ -180,7 +185,7 @@ def main():
             sy.marks = list(marks)
 
     cfg = dict(gamma=args.gamma, lam=args.lam, clip=0.2, epochs=args.epochs, minibatches=args.minibatches, vf_coef=0.5,
-               ent_coef=args.ent_coef, max_grad_norm=0.5)
+               ent_coef=args.ent_coef, max_grad_norm=0.5, opp_aux_coef=args.opp_aux_coef)
     heads = len(any_env.act_dims)
     mk = lambda name, n: Stream(name, n, any_env.obs_dim, any_env.priv_dim, heads, args.horizon, args.hidden)
     streams = {}
@@ -504,7 +509,9 @@ def main():
                      f"taken {q.get('taken_per_min', 0):5.1f} pearl {q.get('pearls_per_min', 0):.1f} "
                      f"pot {q.get('potions_per_min', 0):.1f} full {q.get('potion_perfect', 0):.2f} ["
                      + ", ".join(f"{name} {beaten:.2f}" for name, beaten in row.get("league", {}).items()) + "]"
-                     if league is not None else ""), flush=True)
+                     if league is not None else "")
+                  + (" | opp: " + " ".join(f"{g} {info[f'opp_aux_{g}']:.3f}" for g, _, _ in opp_aux.GROUPS
+                                           if f"opp_aux_{g}" in info) if "opp_aux_loss" in info else ""), flush=True)
             for name, whats in sync_log.items():
                 print(f"sync between {name}: {len(whats)} rounds, last: {whats[-1]}; together "
                       f"{local.total_samples(total_samples)/1e6:.1f}M samples", flush=True)

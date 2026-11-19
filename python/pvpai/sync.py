@@ -187,7 +187,9 @@ class Syncer:
         sds = [c["policy"] for c in cks]
         if own is not None:
             sds.append(own)
-        mean = {k: torch.stack([sd[k].float() for sd in sds]).mean(0) for k in sds[0]}
+        # A key only some have (the head on the opponent, see
+        # `Policy.opp_aux`) is the mean of those that have it.
+        mean = {k: torch.stack([sd[k].float() for sd in sds if k in sd]).mean(0) for k in sds[0]}
         # Weights from before the simulator gained inputs or controls are
         # grown to fit, the same way on every machine.
         mean, _ = fit_state(mean, policy)

@@ -28,7 +28,7 @@ def main():
     keep = [(pol, ck) for pol, ck, _ in loaded if newest - ck.get("time", newest) <= args.max_age_minutes * 60]
     policy = keep[0][0]
     sds = [pol.state_dict() for pol, _ in keep]
-    policy.load_state_dict({k: torch.stack([sd[k] for sd in sds]).mean(0) for k in sds[0]})
+    policy.load_state_dict({k: torch.stack([sd[k] for sd in sds if k in sd]).mean(0) for k in sds[0]})
     vs = SimpleNamespace(var=sum(ck["vs"][0] for _, ck in keep) / len(keep), count=max(ck["vs"][1] for _, ck in keep))
     samples = sum(ck.get("samples", 0) for _, ck in keep)
     marks = sorted(set.intersection(*[set(ck.get("marks", ())) for _, ck in keep]))

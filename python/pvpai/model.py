@@ -106,11 +106,19 @@ def _init(layer, gain):
     return layer
 
 
+# The width of the layer of the head that guesses what the opponent is up to.
+OPP_AUX_HIDDEN = 128
+
+
 class Policy(nn.Module):
-    def __init__(self, obs_dim, priv_dim, act_dims, hidden=256):
+    def __init__(self, obs_dim, priv_dim, act_dims, hidden=256, opp_aux=0):
+        """`opp_aux`: outputs of a head on the memory that guesses what
+        the opponent is up to (`pvpai.opp_aux`), 0 for none. It is trained
+        beside the policy and plays no part in choosing actions."""
         super().__init__()
         self.act_dims = list(act_dims)
         self.hidden = hidden
+        self.opp_aux_dim = opp_aux
         g = math.sqrt(2.0)
         self.enc = nn.Sequential(
             _init(nn.Linear(obs_dim, hidden), g), nn.ReLU(),
@@ -136,6 +144,10 @@ class Policy(nn.Module):
             for h in START_BIAS:
                 if len(self.act_dims) > h:
                     self.heads[h].bias.copy_(torch.tensor(start_bias(h, self.act_dims[h])))
+        # Made last, so that every other layer starts as it would without it.
+        if opp_aux:
+            self.opp_aux = nn.Sequential(_init(nn.Linear(hidden, OPP_AUX_HIDDEN), g), nn.ReLU(),
+                                         _init(nn.Linear(OPP_AUX_HIDDEN, opp_aux), 0.01))
 
     def initial_state(self, n, device=None):
         z = torch.zeros(n, self.hidden, device=device)
@@ -262,11 +274,13 @@ class Policy(nn.Module):
         logp = lp.gather(-1, a.unsqueeze(-1)).squeeze(-1)
         return a, logp if per_head else logp.sum(-1), self.value(h, priv), state
 
-    def evaluate_seq(self, obs, priv, actions, state, done, per_head=False, teach=None):
+    def evaluate_seq(self, obs, priv, actions, state, done, per_head=False, teach=None, opp_aux=False):
         """Log-prob, entropy and value for stored sequences [T, B, ...];
         with `per_head`, the log-prob of each control apart [T, B, heads].
         With `teach` (choices like `actions`, -1 for none), the log-prob of
-        those choices per control as well, 0 where there is none."""
+        those choices per control as well, 0 where there is none. With
+        `opp_aux`, last, the guesses of the head on the opponent
+        [T, B, opp_aux_dim]."""
         hs = self.core_seq(obs, state, done)
         lp = self.flat_logp(hs)
         _, start, sums = self._segments(lp.device)
@@ -276,10 +290,11 @@ class Policy(nn.Module):
         if not per_head:
             ent = ent.sum(-1)
         out = (logp if per_head else logp.sum(-1), ent, self.value(hs, priv))
-        if teach is None:
-            return out
-        tlogp = lp.gather(-1, teach.clamp(min=0) + start) * (teach >= 0)
-        return out + (tlogp,)
+        if teach is not None:
+            out = out + (lp.gather(-1, teach.clamp(min=0) + start) * (teach >= 0),)
+        if opp_aux:
+            out = out + (self.opp_aux(hs),)
+        return out
 
 
 def fit_state(sd, policy, still=False):
@@ -297,6 +312,12 @@ def fit_state(sd, policy, still=False):
     again = {h for new, hs in RESTART.items() if f"heads.{new}.bias" not in sd for h in hs}
     for k, ref in policy.state_dict().items():
         part = k.split(".")
+        if part[0] == "opp_aux":
+            # The head on the opponent plays no part in the actions: stored
+            # weights that do not fit leave it as it started.
+            ok = k in sd and sd[k].shape == ref.shape
+            out[k] = sd[k].float() if ok else ref.detach().clone()
+            continue
         head = int(part[1]) if part[0] == "heads" else None
         if k not in sd or head in again:
             start = start_bias(head, ref.shape[0]) if head is not None and part[2] == "bias" else None
@@ -345,7 +366,31 @@ def load_policy(path, dims=None, still=False):
     if dims is not None:
         obs, priv = max(obs, dims[0]), max(priv, dims[1])
         acts = [max(a, d) for a, d in zip(acts, dims[2])] + list(dims[2][len(acts):])
-    policy = Policy(obs, priv, acts, hidden)
+    # With the head on the opponent if it was trained with one.
+    aux = sd["opp_aux.2.weight"].shape[0] if "opp_aux.2.weight" in sd else 0
+    policy = Policy(obs, priv, acts, hidden, opp_aux=aux)
     sd, grown = fit_state(sd, policy, still)
     policy.load_state_dict(sd)
     return policy, ck, grown
+
+
+def carry_state(policy, sd):
+    """Weights `sd` of a policy (as `load_policy` gives them) for `policy`,
+    which may have the head on the opponent where `sd` has none or the other
+    way round: a head it has and `sd` lacks stays as it started, one `sd`
+    has and it lacks is left out."""
+    if not getattr(policy, "opp_aux_dim", 0) and not any(k.startswith("opp_aux.") for k in sd):
+        return sd
+    return fit_state(sd, policy)[0]
+
+
+def carry_opt(opt, saved, policy):
+    """Load the optimiser state `saved` into `opt` (over `policy`'s
+    parameters) when the two differ only by the head on the opponent, whose
+    parameters come last: its moments start afresh, or are left out."""
+    n = len(list(policy.parameters()))
+    saved = {"state": dict(saved["state"]), "param_groups": [dict(g) for g in saved["param_groups"]]}
+    if len(saved["param_groups"]) == 1 and len(saved["param_groups"][0]["params"]) != n:
+        saved["param_groups"][0]["params"] = list(range(n))
+        saved["state"] = {i: v for i, v in saved["state"].items() if i < n}
+    opt.load_state_dict(saved)

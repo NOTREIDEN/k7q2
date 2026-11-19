@@ -9,6 +9,8 @@ in ordinary fixed-length sequences."""
 import numpy as np
 import torch
 
+from pvpai import opp_aux
+
 # The pitch of a throw with a turn, and the input that counts down from the
 # tick of the turn (1 on that tick).
 PITCH_HEAD = 11
@@ -182,6 +184,13 @@ def ppo_update(policy, opt, streams, vs, cfg):
     teach = cat([s.teach for s, _, _ in parts])
     teach_coef = cfg.get("teach_coef", 0.0)
     use_teach = teach_coef > 0 and bool((teach >= 0).any())
+    # The head that guesses what the opponent is up to, from the value
+    # function's inputs now and later in the same sequence (`pvpai.opp_aux`).
+    aux_coef = cfg.get("opp_aux_coef", 0.0)
+    use_aux = aux_coef > 0 and getattr(policy, "opp_aux_dim", 0) > 0
+    if use_aux:
+        aux_y, aux_m = opp_aux.targets(priv, done)
+        aux_norm = opp_aux.norms(aux_y, aux_m)
     adv = cat([a for _, a, _ in parts])
     ret = cat([r for _, _, r in parts])
     h0 = cat([s.h0 for s, _, _ in parts], 0)
@@ -197,7 +206,7 @@ def ppo_update(policy, opt, streams, vs, cfg):
         perm = torch.randperm(B)
         for mb in perm.chunk(cfg["minibatches"]):
             got = policy.evaluate_seq(obs[:, mb], priv[:, mb], act[:, mb], (h0[mb], c0[mb]), done[:, mb], per_head=True,
-                                      teach=teach[:, mb] if use_teach else None)
+                                      teach=teach[:, mb] if use_teach else None, opp_aux=use_aux)
             logp_h, ent, v = got[:3]
             o = own[:, mb]
             logp = (logp_h * o).sum(-1)
@@ -219,6 +228,12 @@ def ppo_update(policy, opt, streams, vs, cfg):
                 teach_loss = -(got[3] * tm).sum() / tm.sum().clamp(min=1.0)
                 loss = loss + teach_coef * teach_loss
                 stats["teach_loss"] = stats.get("teach_loss", 0.0) + float(teach_loss)
+            if use_aux:
+                aux_loss, aux_parts = opp_aux.loss(got[-1], aux_y[:, mb], aux_m[:, mb], aux_norm)
+                loss = loss + aux_coef * aux_loss
+                stats["opp_aux_loss"] = stats.get("opp_aux_loss", 0.0) + float(aux_loss.detach())
+                for name, part in aux_parts.items():
+                    stats[f"opp_aux_{name}"] = stats.get(f"opp_aux_{name}", 0.0) + part
             opt.zero_grad(set_to_none=True)
             loss.backward()
             torch.nn.utils.clip_grad_norm_(policy.parameters(), cfg["max_grad_norm"])
