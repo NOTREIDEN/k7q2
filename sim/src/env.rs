@@ -402,6 +402,24 @@ pub struct Params {
     /// corners close by, as in the arenas of many servers.
     pub small_arena_prob: f64,
     pub arena_half_min: f64,
+    /// Potion accuracy, in hits per point of health of the eight a potion
+    /// can give (`POTION_HEAL`), paid by its thrower only. `w_pot_early`
+    /// is paid on the tick of the throw for every point that cannot fit
+    /// as the thrower's own client knows its health: eight less the health
+    /// missing, after eight for each potion of its own still on the way.
+    /// It never costs a potion thrown with eight or more missing, nor the
+    /// second of two thrown with sixteen missing, so it tells the moment to
+    /// pot from the one too early at the moment it is chosen, without the
+    /// hits and the regeneration in the potion's flight; `w_waste` pays for
+    /// the potion's real outcome when it breaks.
+    pub w_pot_early: f32,
+    /// Paid when a potion breaks for every point of the eight it did not
+    /// offer its thrower (`Splash::offered`: it broke away from the
+    /// thrower's feet, was thrown at the wrong angle or moment, the
+    /// thrower was knocked or ran away from it, or the opponent caught
+    /// it): `w_miss` without its `MISS_POINTS` cap. Neither can be
+    /// earned: the best a potion can do is to cost nothing.
+    pub w_pot_far: f32,
     /// Taken, in hits, from the thrower of a pearl when it throws it, and
     /// given back if the other player dies within `pearl_kill_s` seconds:
     /// a pearl is for a kill, not for its own sake. It never pays more
@@ -633,6 +651,8 @@ impl Default for Params {
             w_drop: 0.0,
             small_arena_prob: 0.0,
             arena_half_min: 8.0,
+            w_pot_early: 0.0,
+            w_pot_far: 0.0,
             w_pearl_cost: 0.0,
             pearl_kill_s: 10.0,
             drop_prob: 0.0,
@@ -810,6 +830,8 @@ impl Params {
             176 => self.w_drop = v as f32,
             177 => self.small_arena_prob = v,
             178 => self.arena_half_min = v,
+            184 => self.w_pot_early = v as f32,
+            185 => self.w_pot_far = v as f32,
             140 => self.gank_max = v,
             141 => self.w_pearl_cost = v as f32,
             142 => self.pearl_kill_s = v,
@@ -2159,6 +2181,9 @@ impl Env {
             self.rew_acc[t] -= p.w_waste * (POTION_HEAL - s.would[t]).max(0.0) / hh;
             self.rew_acc[t] -= p.w_gift * s.healed[1 - t] / hh;
             self.rew_acc[t] -= p.w_miss * (POTION_HEAL - s.offered[t]).clamp(0.0, MISS_POINTS) / hh;
+            if p.w_pot_far != 0.0 {
+                self.rew_acc[t] -= p.w_pot_far * (POTION_HEAL - s.offered[t]).clamp(0.0, POTION_HEAL) / hh;
+            }
             self.ep.splashes[t] += 1.0;
             self.ep.heal_self[t] += s.healed[t] as f64;
             self.ep.heal_gift[t] += s.healed[1 - t] as f64;
@@ -2346,6 +2371,20 @@ impl Env {
         (p.w_aim * aim as f32 + p.w_range * range as f32 + fast + fed + stock + health, ang)
     }
 
+    /// The points of a healing potion `id` throws on this tick that cannot
+    /// fit, as its own client knows its health (`Params::w_pot_early`):
+    /// eight less the health missing, after eight for each of its own
+    /// potions still on the way (the client counts this one as on the way
+    /// from the tick it throws it).
+    pub fn pot_unfit(&self, id: usize) -> f32 {
+        let c = &self.m.c[id];
+        let lp = &c.lp;
+        let flying = c.thrown.iter().filter(|e| e.mine && e.kind == Kind::Potion).count();
+        let on_way = lp.potions_pending.saturating_sub(1) as usize + flying;
+        let room = MAX_HEALTH - lp.health - POTION_HEAL * on_way as f32;
+        (POTION_HEAL - room.max(0.0)).clamp(0.0, POTION_HEAL)
+    }
+
     /// Is the other player within attack reach of `id`, in `id`'s own view?
     fn in_reach(&self, id: usize) -> bool {
         let c = &self.m.c[id];
@@ -2472,6 +2511,9 @@ impl Env {
             self.ep.pot_health[id] += self.m.c[id].lp.health as f64;
             if MAX_HEALTH - self.m.c[id].lp.health < POTION_HEAL {
                 self.ep.pot_early[id] += 1.0;
+            }
+            if p.w_pot_early != 0.0 {
+                self.rew_acc[id] -= p.w_pot_early * self.pot_unfit(id) / self.m.s.cfg.hit_health().max(0.1);
             }
             // The ticks spent looking away to aim it, unless they were
             // already counted after the potion before.
