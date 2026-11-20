@@ -215,6 +215,7 @@ final class Demo {
     private int lastPots = -1, lastApples = -1, lastArrows = -1;
     private float lastHp = 20.0F, eatHp = 20.0F, minHp = 99.0F;
     private boolean wasEating, wasDrawing, shotHit;
+    private final java.util.Map<String, Integer> modeTicks = new java.util.TreeMap<String, Integer>(), stillTicks = new java.util.TreeMap<String, Integer>();
     private int shotAt = -1, boostHits;
     private double shotTop;
 
@@ -276,6 +277,16 @@ final class Demo {
                     ticks, me.posX, me.posY, me.posZ, me.rotationYaw, me.onGround, me.isInWater(), around(mc, me)));
             }
         }
+        // Time in each thing the coach does, and of it standing still.
+        String what = mod.session() == null ? "-" : mod.session().coachLine();
+        String m0 = what.split(" ")[0].split("\\+")[0];
+        boolean still = Math.sqrt(dx * dx + dz * dz) < 0.03;
+        Integer n0 = modeTicks.get(m0);
+        modeTicks.put(m0, n0 == null ? 1 : n0 + 1);
+        if (still) {
+            Integer n1 = stillTicks.get(m0);
+            stillTicks.put(m0, n1 == null ? 1 : n1 + 1);
+        }
         if (ticks % 20 == 0) {
             System.out.println(String.format(Locale.ROOT, "ARENA t=%d pos=%.1f,%.1f,%.1f yaw=%.0f pitch=%.0f hp=%.1f fwd=%b sprint=%b on=%b %s",
                 ticks, me.posX, me.posY, me.posZ, me.rotationYaw, me.rotationPitch, me.getHealth(), mc.gameSettings.keyBindForward.isKeyDown(),
@@ -336,6 +347,13 @@ final class Demo {
             SEED, exp, ticks / 20, claims, resets, deaths, offs, firstClaim < 0 ? -1.0 : firstClaim / 20.0, stuck / 20.0, moving,
             moving == 0 ? 0.0 : (double) side / moving, arrows, boostHits, pots, potsHigh, apples, applesFull, minHp, known, chests.size(), obstacles);
         System.out.println("ARENA " + line);
+        StringBuilder modes = new StringBuilder();
+        for (java.util.Map.Entry<String, Integer> e : modeTicks.entrySet()) {
+            Integer st = stillTicks.get(e.getKey());
+            modes.append(String.format(Locale.ROOT, " %s=%.0f/%.0f", e.getKey(), e.getValue() / 20.0, (st == null ? 0 : st) / 20.0));
+        }
+        System.out.println("ARENA modes (seconds / of them still)" + modes);
+        line += " modes:" + modes.toString().trim().replace(' ', ',');
         java.io.OutputStream out = new java.io.FileOutputStream(new java.io.File(mc.mcDataDir, "arena.txt"));
         try {
             out.write((line + "\n").getBytes("UTF-8"));

@@ -437,7 +437,7 @@ public final class Session {
             noFarm &= !k.seen;
         }
         if (noFarm && (tick == 1 || tick % 600 == 0)) {
-            note = (mem.chests.isEmpty() ? "Chest AI: no veo ningun cofre de farmeo, espero quieto." : "Chest AI: no vi hologramas de oleada todavia, reviso los cofres cercanos.")
+            note = (mem.chests.isEmpty() ? "Chest AI: no veo ningun cofre de farmeo, salgo a buscar." : "Chest AI: no vi hologramas de oleada todavia, reviso los cofres cercanos.")
                 + Reader.diag(mc, settings) + "\nSi el texto del holograma es otro, ponelo en texto_claim de ajustes.txt.";
         }
         int[] a;

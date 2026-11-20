@@ -89,4 +89,15 @@ jobs:
           print("stuck %.0f s, walking not facing the way %.1f%% of moving ticks" % (tot("stuck"), 100.0 * sum(float(r["side"]) * float(r["moving"]) for r in rows) / max(tot("moving"), 1)))
           print("arrows %d (boosts that carried %d), potions %d (%d over 16 hp), apples %d (%d at full health), lowest health %.1f" % (tot("arrows"), tot("boosts"), tot("pots"), tot("potsHigh"), tot("apples"), tot("applesFull"), min(float(r["minHp"]) for r in rows)))
           print("no claim on seeds: %s" % [r["seed"] for r in rows if r["claims"] == "0"])
+          modes, still = {}, {}
+          for line in open("all.txt"):
+              for t in line.split():
+                  if t.startswith("modes:"):
+                      for part in t[6:].split(","):
+                          if "=" in part:
+                              k, v = part.split("=", 1)
+                              a, b = v.split("/")
+                              modes[k] = modes.get(k, 0.0) + float(a)
+                              still[k] = still.get(k, 0.0) + float(b)
+          print("time in each mode (seconds, of them standing still): " + ", ".join("%s %.0f (%.0f)" % (k, modes[k], still[k]) for k in sorted(modes, key=lambda k: -modes[k])))
           PY

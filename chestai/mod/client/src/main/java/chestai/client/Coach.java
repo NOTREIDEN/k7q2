@@ -48,8 +48,13 @@ final class Coach {
     /** Ticks between two potions. */
     private static final int POT_GAP = 22;
     /** The Punch boost: from this far, the view this high, the bow drawn this many ticks. */
-    private static final double BOOST_D = Double.parseDouble(System.getProperty("chestai.boost.d", "22")),
+    private static final double BOOST_D = Double.parseDouble(System.getProperty("chestai.boost.d", "30")),
         BOOST_PITCH = Double.parseDouble(System.getProperty("chestai.boost.pitch", "-45"));
+    /** Fastest the player went in the ticks after the last boost, misses in a row, and no boosts until. */
+    private double boostTop;
+    private int boostMisses;
+    private long boostOffUntil = -1;
+    private boolean boostJudged = true;
     private static final int BOOST_DRAW = Integer.getInteger("chestai.boost.draw", 5);
 
     private final Random rnd = new Random();
@@ -93,6 +98,10 @@ final class Coach {
     private long deadAt = -10000, pearlAt = -10000, pearlUntil = -1;
     private double pearlYaw, pearlPitch;
     private boolean pearlThrown;
+    /** Never quite still: a short tap of a side key now and then (an anti-AFK), out exploring with nothing to do. */
+    private int lastMode = NONE, tapDir = 1;
+    private long tapNext, tapUntil = -1, wanderAt = -10000;
+    private double wanderX, wanderZ;
 
     Coach(Settings s, Planner planner) {
         this.s = s;
@@ -478,6 +487,14 @@ final class Coach {
         return out;
     }
 
+    /** Whether a step sideways (left for +1) keeps the player on safe ground: no drop of more than one, no water, no harm. */
+    private boolean sideSafe(Frame f, int dir) {
+        double yr = Math.toRadians(f.yaw);
+        double sx = Math.cos(yr) * dir, sz = Math.sin(yr) * dir;
+        int x = (int) Math.floor(f.x + sx * 0.9), z = (int) Math.floor(f.z + sz * 0.9), y = (int) Math.floor(f.y + 0.01);
+        return (planner.stand(x, y, z) || planner.stand(x, y - 1, z)) && !planner.water(x, y, z) && !planner.water(x, y - 1, z);
+    }
+
     /** The view clear up and ahead for an arrow shot up, and open ground ahead for the boost. */
     private boolean boostRoom(Frame f) {
         if (path == null) {
@@ -485,7 +502,7 @@ final class Coach {
         }
         int[] end = path.get(path.size() - 1);
         int[] ahead = path.get(Math.min(path.size() - 1, pi + 8));
-        if (hd(end[0] + 0.5, end[2] + 0.5, f.x, f.z) < 18.0 || hd(ahead[0] + 0.5, ahead[2] + 0.5, f.x, f.z) < 5.0
+        if (hd(end[0] + 0.5, end[2] + 0.5, f.x, f.z) < 25.0 || hd(ahead[0] + 0.5, ahead[2] + 0.5, f.x, f.z) < 5.0
                 || !planner.straight(f.x, f.y, f.z, ahead[0] + 0.5, ahead[2] + 0.5)) {
             return false;
         }
@@ -504,6 +521,19 @@ final class Coach {
     /** Changes the network's choices {@code a} of this tick, before the pilot turns them into keys. */
     void before(Frame f, Memory mem, Pilot pilot, int[] a, Layout lay) {
         long t = f.tick;
+        if (!boostJudged) {
+            // Did the arrow carry the player? Two that did not: no boosts for a minute.
+            boostTop = Math.max(boostTop, Math.sqrt(f.mx * f.mx + f.mz * f.mz));
+            if (t - lastBoost >= 30) {
+                boostJudged = true;
+                if (boostTop > 0.6) {
+                    boostMisses = 0;
+                } else if (++boostMisses >= 2) {
+                    boostMisses = 0;
+                    boostOffUntil = t + 1200;
+                }
+            }
+        }
         // The coach drives: from keys at rest.
         a[0] = 1;
         a[1] = 1;
@@ -517,6 +547,7 @@ final class Coach {
         if (mode != CLAIM) {
             claimSince = -1;
         }
+        lastMode = mode;
         mode = NONE;
         heal = HEAL_NONE;
         aimSet = false;
@@ -667,7 +698,7 @@ final class Coach {
             // The wave's mobs are out of sight for now: back to its chest and wait there.
             mode = GUARD;
             Memory.Known k = mem.chests.get(lock);
-            if (hd(k.cx(), k.cz(), f.x, f.z) > 3.0) {
+            if (hd(k.cx(), k.cz(), f.x, f.z) > (lastMode == GUARD ? 4.5 : 3.0)) {
                 go(f, k.cx(), k.y, k.cz(), 2.0);
             } else {
                 aim(k.cx(), eyeY(f), k.cz());
@@ -710,7 +741,7 @@ final class Coach {
                 } else if (k.seen && k.state == Frame.CLAIMABLE) {
                     mode = TRAVEL;
                     go(f, k.cx(), k.y, k.cz(), 2.0);
-                } else if (ds < 2.0) {
+                } else if (ds < (lastMode == WAIT ? 3.0 : 2.0)) {
                     mode = WAIT;
                     aim(k.cx(), k.cy() + 0.5, k.cz());
                 } else {
@@ -720,6 +751,17 @@ final class Coach {
                 }
             }
         }
+        if (mode == NONE && heal == HEAL_NONE) {
+            // Nothing known to go to: out looking, 30 blocks at a time.
+            if (t - wanderAt > 600 || hd(wanderX, wanderZ, f.x, f.z) < 3.0) {
+                double ang = rnd.nextDouble() * Math.PI * 2.0;
+                wanderX = f.x + Math.cos(ang) * 30.0;
+                wanderZ = f.z + Math.sin(ang) * 30.0;
+                wanderAt = t;
+            }
+            mode = EXPLORE;
+            go(f, wanderX, f.y, wanderZ, 2.0);
+        }
         if (!boosting && heal == HEAL_NONE && !pilot.using && pilot.slot != Pilot.SWORD && lay.real[Pilot.SWORD] >= 0) {
             a[8] = 1 + Pilot.SWORD;
         }
@@ -727,7 +769,7 @@ final class Coach {
 
     /** Far to go on open ground: a Punch arrow shot up that carries the player along. */
     private void boost(Frame f, Pilot pilot, int[] a, Layout lay, double dist) {
-        boolean can = s.bow && heal == HEAL_NONE && lay.real[Pilot.BOW] >= 0 && lay.arrows > 0 && f.punch >= 1 && !swim;
+        boolean can = s.bow && heal == HEAL_NONE && lay.real[Pilot.BOW] >= 0 && lay.arrows > 0 && f.punch >= 1 && !swim && f.tick >= boostOffUntil;
         if (boosting) {
             if (!can || f.tick - boostFrom > 40) {
                 boosting = false;
@@ -735,7 +777,7 @@ final class Coach {
                 return;
             }
         } else {
-            if (!can || dist < BOOST_D || f.tick - lastBoost < 50 || !f.onGround || !aimSet || Math.abs(yawTo(f, tx, tz)) > 15.0 || !boostRoom(f)) {
+            if (!can || dist < BOOST_D || f.tick - lastBoost < 80 || !boostJudged || !f.onGround || !aimSet || Math.abs(yawTo(f, tx, tz)) > 15.0 || !boostRoom(f)) {
                 return;
             }
             boosting = true;
@@ -762,6 +804,8 @@ final class Coach {
                 lastBoost = f.tick;
                 boosting = false;
                 boostFrom = -1;
+                boostTop = 0.0;
+                boostJudged = false;
             }
         }
     }
@@ -823,6 +867,21 @@ final class Coach {
         if (surface) {
             // The head under water: up for air, whatever else goes on.
             k.jump = true;
+        }
+        if (k.forward == 0 && !(mode == ESCAPE && pearlThrown) && !boosting && heal != HEAL_POTION) {
+            // Never quite still (an anti-AFK): every second or two a side key is tapped for a few ticks,
+            // to a side where the ground is safe; the view is not turned for it.
+            if (f.tick >= tapNext) {
+                tapUntil = f.tick + 2 + rnd.nextInt(3);
+                tapNext = tapUntil + 15 + rnd.nextInt(25);
+                tapDir = rnd.nextBoolean() ? 1 : -1;
+                if (!sideSafe(f, tapDir)) {
+                    tapDir = -tapDir;
+                }
+            }
+            if (f.tick < tapUntil && sideSafe(f, tapDir)) {
+                k.strafe = tapDir;
+            }
         }
     }
 }

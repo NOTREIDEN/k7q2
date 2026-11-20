@@ -35,10 +35,15 @@ final class SelfTest {
         this.mod = mod;
     }
 
-    private static void run(MinecraftServer s, String cmd) {
-        ICommandManager m = s.getCommandManager();
-        int r = m.executeCommand(s, cmd);
-        System.out.println("SELFTEST /" + cmd + " -> " + r);
+    /** A command, run on the server's own thread (from the client's it races the server's tick). */
+    private static void run(final MinecraftServer s, final String cmd) {
+        s.addScheduledTask(new Runnable() {
+            public void run() {
+                ICommandManager m = s.getCommandManager();
+                int r = m.executeCommand(s, cmd);
+                System.out.println("SELFTEST /" + cmd + " -> " + r);
+            }
+        });
     }
 
     void step(Minecraft mc) throws IOException {

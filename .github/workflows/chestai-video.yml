@@ -53,7 +53,7 @@ jobs:
           sleep 1
           kill -INT $F 2>/dev/null || true
           wait $F || true
-          grep -v -e '^\s*at ' -e Authentication -e JsonSyntax -e BEGIN_OBJECT arena.log | grep -e ARENA -e Exception | sed 's/^.*\]: //' | grep -v "ARENA t=" | head -n 300
+          grep -v -e '^\s*at ' -e Authentication -e JsonSyntax -e BEGIN_OBJECT arena.log | grep -e ARENA -e Exception | sed 's/^.*\]: //' | head -n 2000
           ls -la video.mp4 run/arena.txt
           cat run/arena.txt
       - name: Put the video on the branch chestai-video
