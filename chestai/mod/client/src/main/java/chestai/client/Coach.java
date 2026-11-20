@@ -499,7 +499,8 @@ final class Coach {
         for (Frame.Mob m : f.mobs) {
             nearest = Math.min(nearest, hd(m.x, m.z, f.x, f.z));
         }
-        if (mem.sinceHurt == 0) {
+        if (mem.sinceHurt == 0 && t - lastBoost > 40) {
+            // (Its own Punch arrow is no harm from nowhere.)
             harmNoMob = nearest > 12.0 ? harmNoMob + 1 : 0;
         } else if (mem.sinceHurt > 100) {
             harmNoMob = 0;
