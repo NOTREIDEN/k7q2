@@ -41,6 +41,9 @@ public final class Frame {
     public double x, y, z, mx, my, mz;
     public float yaw, pitch;
     public boolean onGround, collidedH, sprinting;
+    /** Air left (300 full), the head under water, in lava, on fire, the head in a block. */
+    public int air = 300;
+    public boolean headInWater, inLava, burning, inWall;
     public float hp, absorption;
     public int regenLeft, slowLeft, blindLeft;
     public int gapples, pearls, potions, arrows, pearlCdLeft;

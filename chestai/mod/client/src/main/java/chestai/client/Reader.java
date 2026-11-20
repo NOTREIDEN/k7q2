@@ -161,6 +161,11 @@ final class Reader {
         f.onGround = me.onGround;
         f.collidedH = me.isCollidedHorizontally;
         f.sprinting = me.isSprinting();
+        f.air = me.getAir();
+        f.headInWater = me.isInsideOfMaterial(net.minecraft.block.material.Material.water);
+        f.inLava = me.isInLava();
+        f.burning = me.isBurning();
+        f.inWall = me.isEntityInsideOpaqueBlock();
         // The simulator's player has 20 health: a kit with more counts in twentieths.
         float hpScale = me.getMaxHealth() > 20.0f ? 20.0f / me.getMaxHealth() : 1.0f;
         f.hp = me.getHealth() * hpScale;
@@ -350,7 +355,9 @@ final class Reader {
         if (mc.objectMouseOver != null && mc.objectMouseOver.typeOfHit == MovingObjectPosition.MovingObjectType.BLOCK) {
             BlockPos b = mc.objectMouseOver.getBlockPos();
             int ci = b == null ? -1 : mem.near(b.getX(), b.getY(), b.getZ(), 1.5);
-            if (ci >= 0) {
+            // The chest itself (or the other half of it), not the ground beside it: a click there claims nothing.
+            Memory.Known k = ci >= 0 ? mem.chests.get(ci) : null;
+            if (k != null && ((k.x == b.getX() && k.y == b.getY() && k.z == b.getZ()) || isChest(w, b))) {
                 f.pickChest = ci;
             }
         }

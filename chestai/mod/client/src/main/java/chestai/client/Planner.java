@@ -110,6 +110,33 @@ final class Planner {
         return below == MapStore.SOLID || below == MapStore.WATER || cell(x, y, z) == MapStore.WATER;
     }
 
+    /**
+     * The nearest spot within {@code r} blocks across (and three up or down)
+     * on dry ground with air for the head, or null: out of water, a wall, lava
+     * or fire.
+     */
+    int[] nearestDry(double px, double py, double pz, int r) {
+        int x0 = (int) Math.floor(px), y0 = (int) Math.floor(py + 0.01), z0 = (int) Math.floor(pz);
+        int[] best = null;
+        double bd = 1e9;
+        for (int dx = -r; dx <= r; dx++) {
+            for (int dz = -r; dz <= r; dz++) {
+                for (int dy = -3; dy <= 3; dy++) {
+                    int x = x0 + dx, y = y0 + dy, z = z0 + dz;
+                    double d = dx * dx + dz * dz + dy * dy * 2.0;
+                    if (d >= bd || d < 1.0) {
+                        continue;
+                    }
+                    if (cell(x, y, z) == MapStore.AIR && cell(x, y + 1, z) == MapStore.AIR && cell(x, y - 1, z) == MapStore.SOLID) {
+                        bd = d;
+                        best = new int[] {x, y, z};
+                    }
+                }
+            }
+        }
+        return best;
+    }
+
     private static final int[][] DIRS = {{1, 0}, {-1, 0}, {0, 1}, {0, -1}, {1, 1}, {1, -1}, {-1, 1}, {-1, -1}};
 
     private static final class Node implements Comparable<Node> {

@@ -134,6 +134,8 @@ final class Demo {
                 return;
             }
             ticks = 0;
+            // No "press E" hint over the picture.
+            mc.guiAchievement.clearAchievements();
             if (!ARENA || Boolean.getBoolean("chestai.arena.video")) {
                 // Seen from behind, for a video.
                 mc.gameSettings.thirdPersonView = 1;
@@ -382,6 +384,7 @@ final class Demo {
         int x0 = (int) Math.floor(px), y = (int) Math.floor(py), z0 = (int) Math.floor(pz);
         if (ARENA) {
             run(s, "gamerule keepInventory true");
+            run(s, "achievement give achievement.openInventory " + n);
             s.setDifficultyForAllWorlds(EnumDifficulty.NORMAL);
             buildArena(w, x0, y, z0);
             farmOn = true;

@@ -33,9 +33,9 @@ import chestai.core.Pilot;
  * look down for a potion or up for the bow).
  */
 final class Coach {
-    static final int NONE = 0, FIGHT = 1, WAIT = 2, CLAIM = 3, GUARD = 4, TRAVEL = 5, APPROACH = 6, EXPLORE = 7;
+    static final int NONE = 0, FIGHT = 1, WAIT = 2, CLAIM = 3, GUARD = 4, TRAVEL = 5, APPROACH = 6, EXPLORE = 7, ESCAPE = 8;
     static final int HEAL_NONE = 0, HEAL_POTION = 1, HEAL_APPLE = 2;
-    private static final String[] NAMES = {"quieto", "pelea", "espera", "reclamo", "guardia", "viaje", "acercarse", "explorar"};
+    private static final String[] NAMES = {"quieto", "pelea", "espera", "reclamo", "guardia", "viaje", "acercarse", "explorar", "escapar"};
 
     /** A mob this close is fought; with a wave going on by the player, any of its mobs. */
     private static final double FIGHT_R = 12.0, WAVE_R = 24.0;
@@ -60,7 +60,7 @@ final class Coach {
     boolean boosting;
     private int target = -1;
     private double tx, ty, tz;
-    private boolean aimSet, move, jumpUp, swim;
+    private boolean aimSet, move, jumpUp, swim, surface;
     private double pitchAbs = Double.NaN;
     private double gain = 0.55;
 
@@ -83,6 +83,10 @@ final class Coach {
     /** Where and when the player got stuck last, and until when it steps back to the middle of its block. */
     private double stuckX = 1e9, stuckZ = 1e9;
     private long stuckAt = -10000, unstickUntil = -1;
+    /** Out of water, a wall, lava or harm from nowhere: where to, and until when. */
+    private int[] dry;
+    private long escapeUntil = -1, claimSince = -1;
+    private int harmNoMob;
 
     Coach(Settings s, Planner planner) {
         this.s = s;
@@ -433,6 +437,9 @@ final class Coach {
         a[6] = 0;
         a[7] = 0;
         a[8] = 0;
+        if (mode != CLAIM) {
+            claimSince = -1;
+        }
         mode = NONE;
         heal = HEAL_NONE;
         aimSet = false;
@@ -487,8 +494,34 @@ final class Coach {
             lastApple = t;
         }
 
-        // 2. Mobs.
-        if (!cand.isEmpty()) {
+        // 2. Out of what hurts with no mob doing it: water over the head, a wall, lava, fire.
+        double nearest = 1e9;
+        for (Frame.Mob m : f.mobs) {
+            nearest = Math.min(nearest, hd(m.x, m.z, f.x, f.z));
+        }
+        if (mem.sinceHurt == 0) {
+            harmNoMob = nearest > 12.0 ? harmNoMob + 1 : 0;
+        } else if (mem.sinceHurt > 100) {
+            harmNoMob = 0;
+        }
+        surface = f.headInWater;
+        boolean hazard = (f.headInWater && f.air < 150) || f.inWall || f.inLava || (f.burning && !f.headInWater) || harmNoMob >= 3;
+        if (hazard && t >= escapeUntil) {
+            planner.clear();
+            dry = planner.nearestDry(f.x, f.y, f.z, 8);
+            escapeUntil = t + 60;
+            harmNoMob = 0;
+        }
+        if (t < escapeUntil && dry != null && heal != HEAL_POTION) {
+            mode = ESCAPE;
+            boosting = false;
+            if (hd(dry[0] + 0.5, dry[2] + 0.5, f.x, f.z) > 0.8 || Math.abs(dry[1] - f.y) > 1.2) {
+                go(f, dry[0] + 0.5, dry[1], dry[2] + 0.5, 0.6);
+            } else {
+                escapeUntil = -1;
+            }
+        } else if (!cand.isEmpty()) {
+            // 3. Mobs.
             boosting = false;
             boostFrom = -1;
             Frame.Mob tgt = null;
@@ -538,7 +571,7 @@ final class Coach {
                 aim(k.cx(), eyeY(f), k.cz());
             }
         } else {
-            // 3. Chests.
+            // 4. Chests.
             int g = chooseGoal(f, mem);
             if (g >= 0) {
                 Memory.Known k = mem.chests.get(g);
@@ -546,11 +579,31 @@ final class Coach {
                 double ds = hd(standX, standZ, f.x, f.z);
                 if (k.seen && k.state == Frame.CLAIMABLE && dc < 4.0) {
                     mode = CLAIM;
-                    aim(k.cx(), k.cy(), k.cz());
+                    if (claimSince < 0) {
+                        claimSince = t;
+                    }
+                    long tried = t - claimSince;
+                    // The lid, seen from above; nothing for a while: closer, and other points of it.
+                    double[][] off = {{0, 0}, {0.25, 0.25}, {-0.25, -0.25}, {0.25, -0.25}, {-0.25, 0.25}};
+                    double[] o = off[(int) ((tried / 15) % off.length)];
+                    double px = k.cx() + o[0], py = k.y + (eyeY(f) > k.y + 1.0 ? 0.8 : 0.5), pz = k.cz() + o[1];
+                    boolean below = Math.abs(k.y - f.y) > 1.5;
+                    if ((tried > 40 || below) && (dc > 1.3 || below)) {
+                        // Up a bank or round something: along a planned way, looking at it once close.
+                        go(f, k.cx(), k.y, k.cz(), 1.0);
+                        if (dc < 2.5 && !below) {
+                            aim(px, py, pz);
+                        }
+                    } else {
+                        aim(px, py, pz);
+                        if (dc > 2.5) {
+                            move = true;
+                            jumpUp = (f.collidedH && f.onGround) || surface;
+                        }
+                    }
                     a[7] = heal == HEAL_NONE && !pilot.using ? 1 : a[7];
-                    if (dc > 2.5) {
-                        move = true;
-                        jumpUp = f.collidedH && f.onGround;
+                    if (tried > 160) {
+                        claimSince = -1;
                     }
                 } else if (k.seen && k.state == Frame.CLAIMABLE) {
                     mode = TRAVEL;
@@ -657,6 +710,10 @@ final class Coach {
             k.forward = 0;
             k.jump = mode == WAIT || mode == CLAIM ? false : f.collidedH && f.onGround && k.forward > 0;
             k.sprint = true;
+        }
+        if (surface) {
+            // The head under water: up for air, whatever else goes on.
+            k.jump = true;
         }
     }
 }

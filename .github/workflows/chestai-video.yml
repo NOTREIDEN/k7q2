@@ -41,7 +41,7 @@ jobs:
           Xvfb :99 -screen 0 854x480x24 > /dev/null 2>&1 &
           export DISPLAY=:99
           sleep 2
-          LIBGL_ALWAYS_SOFTWARE=1 timeout 1800 gradle arena -Parena.seed=505 -Parena.seconds=210 -Parena.video=true --no-daemon > arena.log 2>&1 &
+          LIBGL_ALWAYS_SOFTWARE=1 timeout 1800 gradle arena -Parena.seed=303 -Parena.seconds=210 -Parena.video=true --no-daemon > arena.log 2>&1 &
           G=$!
           for i in $(seq 1 900); do grep -q "DEMO agent on" arena.log && break; sleep 1; done
           ffmpeg -loglevel error -y -f x11grab -video_size 854x480 -framerate 20 -i :99 -t 240 -c:v libx264 -preset veryfast -crf 27 -pix_fmt yuv420p video.mp4 &
