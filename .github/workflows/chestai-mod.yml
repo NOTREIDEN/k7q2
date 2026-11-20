@@ -10,8 +10,9 @@ on:
 permissions:
   contents: write
 
+# A push without the tag gets a group of its own, so it does not stop a build.
 concurrency:
-  group: chestai-mod
+  group: chestai-mod-${{ contains(github.event.head_commit.message, '[chestai-mod]') && 'build' || github.run_id }}
   cancel-in-progress: true
 
 jobs:

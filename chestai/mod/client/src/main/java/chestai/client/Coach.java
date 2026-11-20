@@ -484,7 +484,7 @@ final class Coach {
                 // Low on the body: the name a server keeps over a mob's head can be in the way higher up.
                 double ax = tgt.x + tgt.mx * 2.0, az = tgt.z + tgt.mz * 2.0, ay = tgt.y + Math.min(tgt.h, 2.6) * 0.45;
                 aim(ax, ay, az);
-                if (heal == HEAL_NONE && !pilot.using && Math.abs(yawTo(f, ax, az)) < 25.0 && Math.abs(pitchTo(f, ax, ay, az)) < 35.0) {
+                if (s.hit && heal == HEAL_NONE && !pilot.using && Math.abs(yawTo(f, ax, az)) < 25.0 && Math.abs(pitchTo(f, ax, ay, az)) < 35.0) {
                     a[6] = 1;
                 }
                 if (hd(gc[0], gc[2], f.x, f.z) > 1.8 && hd(tgt.x, tgt.z, f.x, f.z) > 1.2) {

@@ -69,7 +69,7 @@ tasks.register<JavaExec>("selftest") {
     classpath = run.sourceSet.runtimeClasspath
     mainClass.set(run.mainClass)
     jvmArgs(run.vmArgs)
-    jvmArgs("-Dchestai.selftest=true")
+    jvmArgs("-Dchestai.selftest=true", "-Dchestai.pegar=si")
     args(run.programArgs)
     workingDir = file(run.runDir)
     environment(run.envVariables)
@@ -88,9 +88,30 @@ tasks.register<JavaExec>("demo") {
     classpath = run.sourceSet.runtimeClasspath
     mainClass.set(run.mainClass)
     jvmArgs(run.vmArgs)
-    jvmArgs("-Dchestai.demo=true", "-Dchestai.debug=true", "-Dchestai.demo.seconds=" + (project.findProperty("demo.seconds") ?: "120"), "-Dchestai.demo.exp=" + (project.findProperty("demo.exp") ?: "false"))
+    jvmArgs("-Dchestai.demo=true", "-Dchestai.pegar=si", "-Dchestai.debug=true", "-Dchestai.demo.seconds=" + (project.findProperty("demo.seconds") ?: "120"), "-Dchestai.demo.exp=" + (project.findProperty("demo.exp") ?: "false"))
     args(run.programArgs)
     args("--width", "1280", "--height", "720")
+    workingDir = file(run.runDir)
+    environment(run.envVariables)
+    doFirst {
+        workingDir.mkdirs()
+    }
+}
+
+// gradle arena: the same farm on a natural world of a seed, with walls, houses and fences on
+// the ways, the agent at the keys and the play measured into run/arena.txt (see Demo).
+// -Parena.seed=7 -Parena.seconds=300.
+tasks.register<JavaExec>("arena") {
+    val run = net.fabricmc.loom.configuration.ide.RunConfig.runConfig(project, loom.runConfigs.getByName("client"))
+    dependsOn("downloadAssets")
+    javaLauncher.set(javaToolchains.launcherFor { languageVersion.set(JavaLanguageVersion.of(8)) })
+    classpath = run.sourceSet.runtimeClasspath
+    mainClass.set(run.mainClass)
+    jvmArgs(run.vmArgs)
+    jvmArgs("-Dchestai.demo=true", "-Dchestai.arena=true", "-Dchestai.pegar=si",
+        "-Dchestai.arena.seed=" + (project.findProperty("arena.seed") ?: "1"),
+        "-Dchestai.demo.seconds=" + (project.findProperty("arena.seconds") ?: "300"))
+    args(run.programArgs)
     workingDir = file(run.runDir)
     environment(run.envVariables)
     doFirst {

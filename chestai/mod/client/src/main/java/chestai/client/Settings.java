@@ -41,6 +41,8 @@ public final class Settings {
     public double searchRadius = 160.0;
     /** The blocks of every chunk seen kept on disk, for planning ways. */
     public boolean map = true;
+    /** Click on the mobs; when not, the player only goes to them and aims (something else does the hitting). */
+    public boolean hit = false;
 
     /** The lines of the newer settings, added to a file written by an older version. */
     static final String MORE = ""
@@ -63,6 +65,11 @@ public final class Settings {
         + "\n"
         + "# si: guarda los bloques de cada chunk que ve en config/chestai/mapa-<servidor>/ para planear caminos.\n"
         + "mapa=si\n";
+
+    /** The lines of the settings added after MORE. */
+    static final String MORE2 = ""
+        + "# si: hace click a los mobs. no: solo se mueve hacia ellos y los apunta, sin pegar.\n"
+        + "pegar=no\n";
 
     public static final String FIRST = ""
         + "# Chest AI: ajustes. Se leen cada vez que se prende el bot.\n"
@@ -93,7 +100,7 @@ public final class Settings {
         + "\n"
         + "# si: anota lo que ve y hace en config/chestai/registro.txt (para revisar problemas). no: nada.\n"
         + "registro=si\n"
-        + "\n" + MORE;
+        + "\n" + MORE + "\n" + MORE2;
 
     public static Settings parse(Properties p) {
         Settings s = new Settings();
@@ -135,6 +142,8 @@ public final class Settings {
         s.search = yes(p.getProperty("buscar_cofres"), true);
         s.searchRadius = number(p.getProperty("buscar_radio"), 160.0);
         s.map = yes(p.getProperty("mapa"), true);
+        // -Dchestai.pegar=si, for the self test and the arena, where nothing else hits.
+        s.hit = yes(System.getProperty("chestai.pegar", p.getProperty("pegar")), false);
         t = p.getProperty("ignorar");
         if (t != null) {
             for (String n : t.split(",")) {
@@ -183,10 +192,11 @@ public final class Settings {
         } finally {
             in0.close();
         }
-        if (old.getProperty("pocion_vida") == null) {
+        String add = (old.getProperty("pocion_vida") == null ? "\n" + MORE : "") + (old.getProperty("pegar") == null ? "\n" + MORE2 : "");
+        if (add.length() > 0) {
             OutputStream out = new FileOutputStream(f, true);
             try {
-                out.write(("\n" + MORE).getBytes("UTF-8"));
+                out.write(add.getBytes("UTF-8"));
             } finally {
                 out.close();
             }

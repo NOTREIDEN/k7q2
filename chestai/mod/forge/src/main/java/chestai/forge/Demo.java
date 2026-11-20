@@ -15,6 +15,7 @@ import net.minecraft.entity.monster.EntitySkeleton;
 import net.minecraft.entity.monster.EntityZombie;
 import net.minecraft.entity.passive.EntityHorse;
 import net.minecraft.entity.player.EntityPlayer;
+import net.minecraft.block.material.Material;
 import net.minecraft.init.Blocks;
 import net.minecraft.server.MinecraftServer;
 import net.minecraft.util.BlockPos;
@@ -41,9 +42,18 @@ final class Demo {
     private volatile boolean farmOn;
     private volatile String pendingName;
     private volatile double[] pendingAt;
-    private int claims, resets;
-    /** Like Expeditions: two-line holograms, tough armoured skeletons and wolves with names over them, NPC holograms about. */
-    private static final boolean EXP = Boolean.getBoolean("chestai.demo.exp");
+    private volatile int claims, resets, firstClaim = -1;
+    /**
+     * With -Dchestai.arena=true: a natural world of the seed chestai.arena.seed
+     * (hills, mountains, forests, rivers, villages) with the chests spread over
+     * it, walls, houses and fences on the ways between them, and the play
+     * measured into arena.txt: claims, deaths, time stuck, walking not facing
+     * the way, potions and apples and when they were used.
+     */
+    private static final boolean ARENA = Boolean.getBoolean("chestai.arena");
+    private static final long SEED = Long.getLong("chestai.arena.seed", 1L);
+    /** Like Expeditions: two-line holograms, tough armoured skeletons and wolves with names over them, NPC holograms about. In the arena, every other seed. */
+    private final boolean exp = Boolean.getBoolean("chestai.demo.exp") || (ARENA && (SEED & 1L) == 1L);
 
     private static EntityArmorStand stand(WorldServer w, double x, double y, double z, String name) {
         EntityArmorStand a = new EntityArmorStand(w, x, y, z);
@@ -86,18 +96,23 @@ final class Demo {
                 return;
             }
             mc.gameSettings.pauseOnLostFocus = false;
-            mc.gameSettings.renderDistanceChunks = 5;
+            mc.gameSettings.renderDistanceChunks = ARENA ? 6 : 5;
             mc.gameSettings.limitFramerate = 30;
             mc.gameSettings.fancyGraphics = false;
             mc.gameSettings.clouds = 0;
-            WorldSettings ws = new WorldSettings(3L, WorldSettings.GameType.SURVIVAL, false, false, WorldType.FLAT);
+            WorldSettings ws;
+            if (ARENA) {
+                ws = new WorldSettings(SEED, WorldSettings.GameType.SURVIVAL, true, false, WorldType.DEFAULT);
+            } else {
+                ws = new WorldSettings(3L, WorldSettings.GameType.SURVIVAL, false, false, WorldType.FLAT);
+                ws.setWorldName("3;minecraft:bedrock,2*minecraft:dirt,minecraft:grass;1;");
+            }
             ws.enableCommands();
-            ws.setWorldName("3;minecraft:bedrock,2*minecraft:dirt,minecraft:grass;1;");
             mc.launchIntegratedServer("demo" + System.currentTimeMillis(), "demo", ws);
             state = 1;
         } else if (state == 1) {
             EntityPlayerSP me = mc.thePlayer;
-            if (me == null || mc.theWorld == null || me.ticksExisted < 100 || !me.onGround || mc.getIntegratedServer() == null) {
+            if (me == null || mc.theWorld == null || me.ticksExisted < 100 || (!me.onGround && me.ticksExisted < 400) || mc.getIntegratedServer() == null) {
                 return;
             }
             if (mc.currentScreen != null) {
@@ -119,7 +134,9 @@ final class Demo {
                 return;
             }
             ticks = 0;
-            mc.gameSettings.thirdPersonView = 1;
+            if (!ARENA) {
+                mc.gameSettings.thirdPersonView = 1;
+            }
             mod.flip(mc);
             if (!mod.on()) {
                 System.out.println("DEMO FAILED: the agent did not take the keys");
@@ -128,6 +145,55 @@ final class Demo {
             }
             System.out.println("DEMO agent on");
             state = 3;
+        } else if (state == 3 && ARENA) {
+            ticks++;
+            EntityPlayerSP me = mc.thePlayer;
+            if (me == null) {
+                return;
+            }
+            if (me.isDead || me.getHealth() <= 0.0F) {
+                deaths++;
+                System.out.println(String.format(Locale.ROOT, "ARENA death %d at tick %d", deaths, ticks));
+                me.respawnPlayer();
+                mc.displayGuiScreen(null);
+                waitOn = 0;
+                state = 6;
+                return;
+            }
+            if (!mod.on()) {
+                // A screen or something else took the keys: back to the agent.
+                if (mc.currentScreen != null) {
+                    mc.displayGuiScreen(null);
+                }
+                if (++waitOn % 40 == 1) {
+                    offs++;
+                    mod.flip(mc);
+                }
+            } else {
+                waitOn = 0;
+            }
+            measure(mc, me);
+            if (ticks >= 20 * seconds) {
+                finish(mc);
+            }
+        } else if (state == 6) {
+            // Dead: back at the spawn with the kit, then the agent again.
+            ticks++;
+            EntityPlayerSP me = mc.thePlayer;
+            if (mc.currentScreen != null) {
+                mc.displayGuiScreen(null);
+            }
+            if (me != null && !me.isDead && me.getHealth() > 0.0F && ++waitOn > 40) {
+                lastPots = -1;
+                lastApples = -1;
+                lastArrows = -1;
+                mod.flip(mc);
+                waitOn = 0;
+                state = 3;
+            }
+            if (ticks >= 20 * seconds) {
+                finish(mc);
+            }
         } else if (state == 3) {
             ticks++;
             if (!mod.on() || ticks >= 20 * seconds) {
@@ -140,6 +206,101 @@ final class Demo {
                 mc.shutdown();
             }
         }
+    }
+
+    private int deaths, offs, waitOn, stuck, moving, side, arrows, pots, potsHigh, apples, applesFull;
+    private int lastPots = -1, lastApples = -1, lastArrows = -1;
+    private float lastHp = 20.0F, eatHp = 20.0F, minHp = 99.0F;
+    private boolean wasEating;
+    private final double[] ringX = new double[40], ringZ = new double[40];
+
+    private static int count(EntityPlayerSP me, String item) {
+        int n = 0;
+        for (net.minecraft.item.ItemStack st : me.inventory.mainInventory) {
+            if (st != null && net.minecraft.item.Item.itemRegistry.getNameForObject(st.getItem()).toString().equals("minecraft:" + item)) {
+                n += st.stackSize;
+            }
+        }
+        return n;
+    }
+
+    private static boolean mobNear(Minecraft mc, EntityPlayerSP me, double r) {
+        for (Object o : mc.theWorld.loadedEntityList) {
+            if (o instanceof EntityLiving && ((Entity) o).getDistanceToEntity(me) < r) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /** One tick of the arena's measures, on the client. */
+    private void measure(Minecraft mc, EntityPlayerSP me) {
+        float hp = me.getHealth();
+        minHp = Math.min(minHp, hp);
+        double dx = me.posX - me.prevPosX, dz = me.posZ - me.prevPosZ;
+        if (Math.sqrt(dx * dx + dz * dz) > 0.12) {
+            moving++;
+            double err = ((Math.toDegrees(Math.atan2(-dx, dz)) - me.rotationYaw) % 360.0 + 540.0) % 360.0 - 180.0;
+            if (Math.abs(err) > 60.0) {
+                side++;
+            }
+        }
+        int i = ticks % ringX.length;
+        double ox = ringX[i], oz = ringZ[i];
+        ringX[i] = me.posX;
+        ringZ[i] = me.posZ;
+        if (ticks > ringX.length && mod.on() && mc.gameSettings.keyBindForward.isKeyDown()
+                && Math.hypot(me.posX - ox, me.posZ - oz) < 1.5 && !mobNear(mc, me, 5.0)) {
+            stuck++;
+        }
+        boolean eating = me.isUsingItem() && me.getItemInUse() != null && me.getItemInUse().getItem() == net.minecraft.init.Items.golden_apple;
+        if (eating && !wasEating) {
+            eatHp = hp;
+        }
+        wasEating = eating;
+        int p = count(me, "potion"), a = count(me, "golden_apple"), ar = count(me, "arrow");
+        if (lastPots >= 0 && p < lastPots) {
+            pots += lastPots - p;
+            if (lastHp >= 16.0F) {
+                potsHigh += lastPots - p;
+            }
+        }
+        if (lastApples >= 0 && a < lastApples) {
+            apples += lastApples - a;
+            if (eatHp >= 19.0F) {
+                applesFull += lastApples - a;
+            }
+        }
+        if (lastArrows >= 0 && ar < lastArrows) {
+            arrows += lastArrows - ar;
+        }
+        lastPots = p;
+        lastApples = a;
+        lastArrows = ar;
+        lastHp = hp;
+        if (claims > 0 && firstClaim < 0) {
+            firstClaim = ticks;
+        }
+    }
+
+    private void finish(Minecraft mc) throws java.io.IOException {
+        int known = mod.session() != null ? mod.session().chestsKnown() : -1;
+        if (mod.on()) {
+            mod.flip(mc);
+        }
+        String line = String.format(Locale.ROOT,
+            "seed=%d exp=%b secs=%d claims=%d resets=%d deaths=%d offs=%d first=%.1f stuck=%.1f moving=%d side=%.3f arrows=%d pots=%d potsHigh=%d apples=%d applesFull=%d minHp=%.1f known=%d chests=%d obstacles=%d",
+            SEED, exp, ticks / 20, claims, resets, deaths, offs, firstClaim < 0 ? -1.0 : firstClaim / 20.0, stuck / 20.0, moving,
+            moving == 0 ? 0.0 : (double) side / moving, arrows, pots, potsHigh, apples, applesFull, minHp, known, chests.size(), obstacles);
+        System.out.println("ARENA " + line);
+        java.io.OutputStream out = new java.io.FileOutputStream(new java.io.File(mc.mcDataDir, "arena.txt"));
+        try {
+            out.write((line + "\n").getBytes("UTF-8"));
+        } finally {
+            out.close();
+        }
+        state = 4;
+        mc.shutdown();
     }
 
     private static String clock(int ticks) {
@@ -178,6 +339,13 @@ final class Demo {
         run(s, "effect " + n + " 1 1000000 2 true");
         WorldServer w = s.worldServerForDimension(0);
         int x0 = (int) Math.floor(px), y = (int) Math.floor(py), z0 = (int) Math.floor(pz);
+        if (ARENA) {
+            run(s, "gamerule keepInventory true");
+            s.setDifficultyForAllWorlds(EnumDifficulty.NORMAL);
+            buildArena(w, x0, y, z0);
+            farmOn = true;
+            return;
+        }
         // Four chests on stepped hills 3 to 7 blocks high, 25 to 35 blocks apart: the
         // agent climbs, drops and can travel with Punch arrows between them.
         int[][] at = {{24, 4, 4}, {52, -10, 7}, {74, 16, 5}, {44, 38, 3}};
@@ -211,7 +379,7 @@ final class Demo {
         }
         chests.get(3).state = COOLDOWN;
         chests.get(3).timer = 20 * 25;
-        if (EXP) {
+        if (exp) {
             for (Chest c : chests) {
                 c.holo.setPosition(c.pos.getX() + 0.5, c.pos.getY() + 1.0, c.pos.getZ() + 0.5);
                 c.holo2 = stand(w, c.pos.getX() + 0.5, c.pos.getY() + 0.7, c.pos.getZ() + 0.5, "§eNext Wave: §f0 seconds");
@@ -225,6 +393,150 @@ final class Demo {
             stand(w, x0 - 3.5, y + 2.0, z0 - 4.5, "§c§lBOSS RUSH §7(soon)");
         }
         farmOn = true;
+    }
+
+    private int obstacles;
+
+    private static boolean groundLike(Material m) {
+        return m == Material.grass || m == Material.ground || m == Material.sand || m == Material.rock || m == Material.clay
+            || m == Material.craftedSnow || m == Material.ice || m == Material.packedIce;
+    }
+
+    /** The block over the ground at (x, z), or null where that is water, a tree or something built. */
+    private static BlockPos ground(WorldServer w, int x, int z) {
+        w.theChunkProviderServer.loadChunk(x >> 4, z >> 4);
+        for (int y = 200; y > 1; y--) {
+            BlockPos p = new BlockPos(x, y, z);
+            Material m = w.getBlockState(p).getBlock().getMaterial();
+            if (m == Material.air || m == Material.leaves || m == Material.plants || m == Material.vine || m == Material.snow) {
+                continue;
+            }
+            return groundLike(m) ? p.up() : null;
+        }
+        return null;
+    }
+
+    /** The first block over whatever is solid at (x, z), water and trees counting as solid. */
+    private static int top(WorldServer w, int x, int z) {
+        w.theChunkProviderServer.loadChunk(x >> 4, z >> 4);
+        for (int y = 200; y > 1; y--) {
+            Material m = w.getBlockState(new BlockPos(x, y, z)).getBlock().getMaterial();
+            if (m != Material.air && m != Material.plants && m != Material.vine && m != Material.snow) {
+                return y + 1;
+            }
+        }
+        return 2;
+    }
+
+    private static void fill(WorldServer w, int x, int z, int y0, int y1, net.minecraft.block.state.IBlockState st) {
+        for (int y = y0; y <= y1; y++) {
+            w.setBlockState(new BlockPos(x, y, z), st, 2);
+        }
+    }
+
+    private Chest chestAt(WorldServer w, BlockPos at, boolean holo) {
+        for (int up = 0; up < 3; up++) {
+            w.setBlockState(at.up(up), Blocks.air.getDefaultState(), 2);
+        }
+        w.setBlockState(at, Blocks.chest.getDefaultState(), 2);
+        Chest c = new Chest();
+        c.pos = at;
+        if (!holo) {
+            return c;
+        }
+        c.holo = stand(w, at.getX() + 0.5, at.getY() + (exp ? 1.0 : 0.6), at.getZ() + 0.5, "§eNext Wave: §f0 seconds");
+        if (exp) {
+            c.holo2 = stand(w, at.getX() + 0.5, at.getY() + 0.7, at.getZ() + 0.5, "§eNext Wave: §f0 seconds");
+        }
+        return c;
+    }
+
+    /** A wall, a house or a fence across the way at (ox, oz), square to (ux, uz). */
+    private void obstacle(WorldServer w, java.util.Random r, int ox, int oz, double ux, double uz) {
+        int kind = r.nextInt(3);
+        if (kind == 1) {
+            // A house of planks, 7 by 7 with a roof and one doorway.
+            int base = top(w, ox, oz);
+            int door = r.nextInt(4);
+            for (int dx = -3; dx <= 3; dx++) {
+                for (int dz = -3; dz <= 3; dz++) {
+                    int x = ox + dx, z = oz + dz;
+                    boolean edge = Math.abs(dx) == 3 || Math.abs(dz) == 3;
+                    if (edge) {
+                        boolean gap = (door == 0 && dx == 3 && dz == 0) || (door == 1 && dx == -3 && dz == 0)
+                            || (door == 2 && dz == 3 && dx == 0) || (door == 3 && dz == -3 && dx == 0);
+                        fill(w, x, z, Math.min(top(w, x, z), base), base + 3, Blocks.planks.getDefaultState());
+                        if (gap) {
+                            fill(w, x, z, base, base + 1, Blocks.air.getDefaultState());
+                        }
+                    } else {
+                        fill(w, x, z, base, base + 3, Blocks.air.getDefaultState());
+                    }
+                    w.setBlockState(new BlockPos(x, base + 4, z), Blocks.planks.getDefaultState(), 2);
+                }
+            }
+        } else {
+            // A wall of stone 3 high, or a fence, 11 long, square to the way.
+            double px = -uz, pz = ux;
+            for (int i = -5; i <= 5; i++) {
+                int x = (int) Math.floor(ox + px * i), z = (int) Math.floor(oz + pz * i);
+                int b = top(w, x, z);
+                if (kind == 0) {
+                    fill(w, x, z, b, b + 2, Blocks.cobblestone.getDefaultState());
+                } else {
+                    w.setBlockState(new BlockPos(x, b, z), Blocks.oak_fence.getDefaultState(), 2);
+                }
+            }
+        }
+        obstacles++;
+    }
+
+    /** The chests of the arena over the natural ground about where the player starts, and things in the way. */
+    private void buildArena(WorldServer w, int x0, int y0, int z0) {
+        java.util.Random r = new java.util.Random(SEED * 7919L + 17L);
+        for (int tries = 0; tries < 600 && chests.size() < 6; tries++) {
+            double a = r.nextDouble() * Math.PI * 2.0, d = 16.0 + r.nextDouble() * 60.0;
+            int x = x0 + (int) Math.round(Math.cos(a) * d), z = z0 + (int) Math.round(Math.sin(a) * d);
+            boolean near = false;
+            for (Chest c : chests) {
+                near |= Math.hypot(c.pos.getX() - x, c.pos.getZ() - z) < 9.0;
+            }
+            BlockPos at = near ? null : ground(w, x, z);
+            if (at == null || Math.abs(at.getY() - y0) > 30) {
+                continue;
+            }
+            Chest c = chestAt(w, at, true);
+            if (r.nextInt(3) == 0) {
+                c.state = READY;
+            } else {
+                c.state = COOLDOWN;
+                c.timer = 20 * (5 + r.nextInt(50));
+            }
+            chests.add(c);
+            System.out.println(String.format(Locale.ROOT, "ARENA chest %d at %d %d %d (%.0f blocks), %s", chests.size(), at.getX(), at.getY(), at.getZ(), d,
+                c.state == READY ? "ready" : (c.timer / 20) + " s"));
+        }
+        if (!chests.isEmpty()) {
+            chests.get(0).state = READY;
+        }
+        for (Chest c : chests) {
+            double dx = c.pos.getX() - x0, dz = c.pos.getZ() - z0, len = Math.hypot(dx, dz);
+            if (len < 14.0 || r.nextInt(5) < 2) {
+                continue;
+            }
+            double f = 0.4 + r.nextDouble() * 0.3;
+            obstacle(w, r, (int) Math.floor(x0 + dx * f), (int) Math.floor(z0 + dz * f), dx / len, dz / len);
+        }
+        // A chest with no hologram: no farm chest, to be looked at once and then left.
+        for (int tries = 0; tries < 60; tries++) {
+            double a = r.nextDouble() * Math.PI * 2.0;
+            BlockPos at = ground(w, x0 + (int) Math.round(Math.cos(a) * 20.0), z0 + (int) Math.round(Math.sin(a) * 20.0));
+            if (at != null) {
+                chestAt(w, at, false);
+                System.out.println("ARENA plain chest at " + at.getX() + " " + at.getY() + " " + at.getZ());
+                break;
+            }
+        }
     }
 
     /** The server's side, every tick. */
@@ -243,10 +555,21 @@ final class Demo {
             return;
         }
         EntityPlayer p = (EntityPlayer) players.get(0);
-        // Slimes that a flat world spawned in chunks loaded later.
-        for (Object o : new ArrayList<Object>(w.loadedEntityList)) {
-            if (o instanceof net.minecraft.entity.monster.EntitySlime) {
-                ((Entity) o).setDead();
+        // Slimes that a flat world spawned in chunks loaded later; in the arena, any animal of the world.
+        if (!ARENA || w.getTotalWorldTime() % 20 == 0) {
+            java.util.Set<Entity> keep = new java.util.HashSet<Entity>();
+            for (Chest c : chests) {
+                for (EntityLiving m : c.mobs) {
+                    keep.add(m);
+                    if (m.ridingEntity != null) {
+                        keep.add(m.ridingEntity);
+                    }
+                }
+            }
+            for (Object o : new ArrayList<Object>(w.loadedEntityList)) {
+                if (o instanceof net.minecraft.entity.monster.EntitySlime || (ARENA && o instanceof EntityLiving && !keep.contains(o))) {
+                    ((Entity) o).setDead();
+                }
             }
         }
         for (Chest c : chests) {
@@ -262,7 +585,7 @@ final class Demo {
                 if (p.getDistance(cx, c.pos.getY(), cz) <= 12.0) {
                     spawn(w, c);
                     c.state = ACTIVE;
-                    c.waveTicks = EXP ? 20 * 60 : 200;
+                    c.waveTicks = exp ? 20 * 60 : 200;
                     c.started = w.getTotalWorldTime();
                 }
             } else if (c.state == ACTIVE) {
@@ -299,7 +622,7 @@ final class Demo {
                 name = "§aClick here to claim the rewards!";
             }
             String sub = null;
-            if (EXP) {
+            if (exp) {
                 if (c.state == ACTIVE) {
                     name = "§c§lWAVE IN PROGRESS";
                     sub = "§7Kill the creatures to get the rewards!";
@@ -338,7 +661,7 @@ final class Demo {
             if (c.pos.equals(pos)) {
                 if (c.state == CLAIMABLE) {
                     c.state = COOLDOWN;
-                    c.timer = 20 * 40;
+                    c.timer = 20 * (ARENA ? 30 + (int) (p.worldObj.rand.nextInt(31)) : 40);
                     claims++;
                     double secs = (p.worldObj.getTotalWorldTime() - c.started) / 20.0;
                     p.addChatMessage(new ChatComponentText(String.format(Locale.ROOT,
@@ -350,15 +673,24 @@ final class Demo {
         return false;
     }
 
+    /** Where a mob of the wave stands: on the ground by the chest, not in it. */
+    private static int mobY(WorldServer w, Chest c, double x, double z) {
+        if (!ARENA) {
+            return c.pos.getY();
+        }
+        int y = top(w, (int) Math.floor(x), (int) Math.floor(z));
+        return Math.abs(y - c.pos.getY()) <= 3 ? y : c.pos.getY() + 1;
+    }
+
     private void spawn(WorldServer w, Chest c) {
-        if (EXP) {
+        if (exp) {
             spawnExp(w, c);
             return;
         }
         double cx = c.pos.getX() + 0.5, cz = c.pos.getZ() + 0.5;
-        int y = c.pos.getY();
         for (int i = 0; i < 5; i++) {
             double a = i * Math.PI * 2 / 5, x = cx + 2.5 * Math.cos(a), z = cz + 2.5 * Math.sin(a);
+            int y = mobY(w, c, x, z);
             EntityLiving m;
             if (i == 4) {
                 EntitySkeleton sk = new EntitySkeleton(w);
@@ -391,9 +723,9 @@ final class Demo {
 
     private void spawnExp(WorldServer w, Chest c) {
         double cx = c.pos.getX() + 0.5, cz = c.pos.getZ() + 0.5;
-        int y = c.pos.getY();
         for (int i = 0; i < 5; i++) {
             double a = i * Math.PI * 2 / 5, x = cx + 2.5 * Math.cos(a), z = cz + 2.5 * Math.sin(a);
+            int y = mobY(w, c, x, z);
             EntityLiving m;
             if (i < 3) {
                 EntitySkeleton sk = new EntitySkeleton(w);
