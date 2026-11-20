@@ -151,6 +151,21 @@ final class Planner {
         return true;
     }
 
+    /** A player can be at this block: room for the body, and ground or water to keep it there. */
+    boolean stand(int x, int y, int z) {
+        if (!bans.isEmpty()) {
+            Long until = bans.get(key(x, y, z));
+            if (until != null && until > now) {
+                return false;
+            }
+        }
+        if (!open(x, y, z) || !open(x, y + 1, z)) {
+            return false;
+        }
+        byte below = cell(x, y - 1, z);
+        return below == MapStore.SOLID || below == MapStore.WATER || cell(x, y, z) == MapStore.WATER;
+    }
+
     /**
      * The nearest spot within {@code r} blocks across (and three up or down)
      * on dry ground with air for the head, or null: out of water, a wall, lava
