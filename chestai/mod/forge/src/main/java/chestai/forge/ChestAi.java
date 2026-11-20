@@ -114,6 +114,10 @@ public final class ChestAi {
 
     @SubscribeEvent
     public void hurt(net.minecraftforge.event.entity.living.LivingHurtEvent e) {
+        if (demo != null && !e.entity.worldObj.isRemote && e.entity instanceof net.minecraft.entity.player.EntityPlayer && e.source.isProjectile()
+                && !(e.source.getEntity() instanceof net.minecraft.entity.player.EntityPlayer)) {
+            demo.projHit(e.ammount);
+        }
         if (demo != null && Boolean.getBoolean("chestai.debug") && !e.entity.worldObj.isRemote) {
             net.minecraft.entity.Entity src = e.source.getEntity();
             String held = src instanceof net.minecraft.entity.player.EntityPlayer && ((net.minecraft.entity.player.EntityPlayer) src).getHeldItem() != null

@@ -38,6 +38,8 @@ import net.minecraft.world.chunk.storage.ExtendedBlockStorage;
  */
 final class MapStore {
     static final byte AIR = 0, SOLID = 1, WATER = 2, DANGER = 3, UNKNOWN = 4, TALL = 5;
+    /** Tall grass, flowers, vines: walked through, but a click hits them and not what is behind. */
+    static final byte PLANT = 6;
     /** Chunks kept unpacked in memory at once; the rest stay on disk. */
     private static final int IN_MEMORY = 600;
     /** A chunk near the player is read again after this many ticks; one farther, after ten times as many. */
@@ -113,7 +115,7 @@ final class MapStore {
         }
         AxisAlignedBB box = b.getCollisionBoundingBox(w, p, s);
         if (box == null) {
-            return AIR;
+            return m == Material.plants || m == Material.vine ? PLANT : AIR;
         }
         // A carpet or a thin layer of snow: walked over.
         return box.maxY - p.getY() <= 0.2 ? AIR : SOLID;

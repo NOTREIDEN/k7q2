@@ -91,10 +91,40 @@ final class Planner {
         return cell(x, y, z) == MapStore.WATER;
     }
 
-    /** Air or water: a body fits through. */
+    /** Air, water or plants: a body fits through. */
     boolean open(int x, int y, int z) {
         byte c = cell(x, y, z);
-        return c == MapStore.AIR || c == MapStore.WATER;
+        return c == MapStore.AIR || c == MapStore.WATER || c == MapStore.PLANT;
+    }
+
+    /** Air or plants: dry room for a body. */
+    private boolean dryOpen(int x, int y, int z) {
+        byte c = cell(x, y, z);
+        return c == MapStore.AIR || c == MapStore.PLANT;
+    }
+
+    /**
+     * Whether a click from (ax, ay, az) reaches (bx, by, bz): nothing on the
+     * line that the game's ray would stop at (a block, a fence, tall grass);
+     * water lets it through. The block (sx, sy, sz), the one clicked, is not
+     * counted.
+     */
+    boolean see(double ax, double ay, double az, double bx, double by, double bz, int sx, int sy, int sz) {
+        double dx = bx - ax, dy = by - ay, dz = bz - az;
+        double len = Math.sqrt(dx * dx + dy * dy + dz * dz);
+        int n = Math.max(1, (int) Math.ceil(len / 0.1));
+        for (int i = 1; i < n; i++) {
+            double t = (double) i / n;
+            int x = (int) Math.floor(ax + dx * t), y = (int) Math.floor(ay + dy * t), z = (int) Math.floor(az + dz * t);
+            if (x == sx && y == sy && z == sz) {
+                continue;
+            }
+            byte c = cell(x, y, z);
+            if (c != MapStore.AIR && c != MapStore.WATER) {
+                return false;
+            }
+        }
+        return true;
     }
 
     /** A player can be at this block: room for the body, and ground or water to keep it there. */
@@ -129,7 +159,7 @@ final class Planner {
                     if (d >= bd || d < 1.0) {
                         continue;
                     }
-                    if (cell(x, y, z) == MapStore.AIR && cell(x, y + 1, z) == MapStore.AIR && cell(x, y - 1, z) == MapStore.SOLID) {
+                    if (dryOpen(x, y, z) && dryOpen(x, y + 1, z) && cell(x, y - 1, z) == MapStore.SOLID) {
                         bd = d;
                         best = new int[] {x, y, z};
                     }

@@ -75,9 +75,32 @@ final class Demo {
         EntityArmorStand holo, holo2;
         final java.util.Map<EntityLiving, EntityArmorStand> tags = new java.util.HashMap<EntityLiving, EntityArmorStand>();
         int state = READY, timer, waveTicks;
-        long started;
+        long started, clearedAt;
         final List<EntityLiving> mobs = new ArrayList<EntityLiving>();
+        /** Mobs of the wave with a bow that keep back and shoot, and where each stands. */
+        final java.util.Map<EntityLiving, double[]> archers = new java.util.HashMap<EntityLiving, double[]>();
         String shown = "";
+    }
+
+    /**
+     * In the arena: skeletons with bows out in the field, no part of any wave, that
+     * shoot at the player whenever it is in range and in sight (every second or so),
+     * each kept to its spot; one killed comes back elsewhere a while later.
+     */
+    private final List<EntitySkeleton> snipers = new ArrayList<EntitySkeleton>();
+    private final java.util.Map<EntitySkeleton, double[]> sniperAt = new java.util.HashMap<EntitySkeleton, double[]>();
+    private int sniperBack = -1, sniperKills;
+    /** A wave's mobs all dead: how long it took, the claim after it, and from a claim to the next wave. */
+    private volatile int clears, clearTicks, claimWaits, claimWaitTicks, betweens, betweenTicks, projHits;
+    private volatile long lastClaimAt = -1;
+    private volatile float projDamage;
+    /** Seeds with plain food in the kit, with one chest in a pool of water. */
+    private static final boolean STEAK = (SEED % 4) < 2, POOL = SEED % 3 == 0;
+
+    /** A mob's arrow or fireball hit the player (on the server). */
+    void projHit(float amount) {
+        projHits++;
+        projDamage += amount;
     }
 
     Demo(ChestAi mod) {
@@ -212,7 +235,7 @@ final class Demo {
     }
 
     private int deaths, offs, waitOn, stuck, moving, side, arrows, pots, potsHigh, apples, applesFull;
-    private int lastPots = -1, lastApples = -1, lastArrows = -1;
+    private int lastPots = -1, lastApples = -1, lastArrows = -1, lastSteak = -1, steak, foodLow, minFood = 20;
     private float lastHp = 20.0F, eatHp = 20.0F, minHp = 99.0F;
     private boolean wasEating, wasDrawing, shotHit;
     private final java.util.Map<String, Integer> modeTicks = new java.util.TreeMap<String, Integer>(), stillTicks = new java.util.TreeMap<String, Integer>();
@@ -306,7 +329,16 @@ final class Demo {
             eatHp = hp;
         }
         wasEating = eating;
-        int p = count(me, "potion"), a = count(me, "golden_apple"), ar = count(me, "arrow");
+        int p = count(me, "potion"), a = count(me, "golden_apple"), ar = count(me, "arrow"), st = count(me, "cooked_beef");
+        int food = me.getFoodStats().getFoodLevel();
+        minFood = Math.min(minFood, food);
+        if (food < 20) {
+            foodLow++;
+        }
+        if (lastSteak >= 0 && st < lastSteak) {
+            steak += lastSteak - st;
+        }
+        lastSteak = st;
         if (lastPots >= 0 && p < lastPots) {
             pots += lastPots - p;
             if (lastHp >= 16.0F) {
@@ -342,10 +374,14 @@ final class Demo {
         if (mod.on()) {
             mod.flip(mc);
         }
+        String hits = mod.session() != null ? mod.session().hitLine() : "-";
         String line = String.format(Locale.ROOT,
-            "seed=%d exp=%b secs=%d claims=%d resets=%d deaths=%d offs=%d first=%.1f stuck=%.1f moving=%d side=%.3f arrows=%d boosts=%d pots=%d potsHigh=%d apples=%d applesFull=%d minHp=%.1f known=%d chests=%d obstacles=%d",
-            SEED, exp, ticks / 20, claims, resets, deaths, offs, firstClaim < 0 ? -1.0 : firstClaim / 20.0, stuck / 20.0, moving,
-            moving == 0 ? 0.0 : (double) side / moving, arrows, boostHits, pots, potsHigh, apples, applesFull, minHp, known, chests.size(), obstacles);
+            "seed=%d variant=%s exp=%b secs=%d claims=%d resets=%d deaths=%d offs=%d first=%.1f stuck=%.1f moving=%d side=%.3f arrows=%d boosts=%d pots=%d potsHigh=%d apples=%d applesFull=%d minHp=%.1f known=%d chests=%d obstacles=%d"
+                + " clears=%d clearS=%.1f claimWaitS=%.1f betweenS=%.1f steak=%d foodLowS=%.0f minFood=%d projHits=%d projDmg=%.0f sniperKills=%d pool=%b hits=%s",
+            SEED, System.getProperty("chestai.arena.variant", "base"), exp, ticks / 20, claims, resets, deaths, offs, firstClaim < 0 ? -1.0 : firstClaim / 20.0, stuck / 20.0, moving,
+            moving == 0 ? 0.0 : (double) side / moving, arrows, boostHits, pots, potsHigh, apples, applesFull, minHp, known, chests.size(), obstacles,
+            clears, clears == 0 ? -1.0 : clearTicks / 20.0 / clears, claimWaits == 0 ? -1.0 : claimWaitTicks / 20.0 / claimWaits,
+            betweens == 0 ? -1.0 : betweenTicks / 20.0 / betweens, steak, foodLow / 20.0, minFood, projHits, projDamage, sniperKills, POOL, hits);
         System.out.println("ARENA " + line);
         StringBuilder modes = new StringBuilder();
         for (java.util.Map.Entry<String, Integer> e : modeTicks.entrySet()) {
@@ -391,12 +427,15 @@ final class Demo {
         run(s, "give " + n + " bow 1 0 {ench:[{id:49,lvl:2},{id:51,lvl:1}]}");
         run(s, "give " + n + " golden_apple 32");
         run(s, "give " + n + " ender_pearl 8");
+        if (ARENA && STEAK) {
+            run(s, "give " + n + " cooked_beef 32");
+        }
         run(s, "give " + n + " potion 6 16421");
         run(s, "give " + n + " arrow 64");
         run(s, "replaceitem entity " + n + " slot.armor.head diamond_helmet 1 0 {ench:[{id:0,lvl:2}]}");
         run(s, "replaceitem entity " + n + " slot.armor.chest diamond_chestplate 1 0 {ench:[{id:0,lvl:2}]}");
         run(s, "replaceitem entity " + n + " slot.armor.legs diamond_leggings 1 0 {ench:[{id:0,lvl:2}]}");
-        run(s, "replaceitem entity " + n + " slot.armor.feet diamond_boots 1 0 {ench:[{id:0,lvl:2},{id:2,lvl:4}]}");
+        run(s, "replaceitem entity " + n + " slot.armor.feet diamond_boots 1 0 {ench:[{id:0,lvl:2},{id:2,lvl:4},{id:8,lvl:3}]}");
         run(s, "effect " + n + " 1 1000000 2 true");
         WorldServer w = s.worldServerForDimension(0);
         int x0 = (int) Math.floor(px), y = (int) Math.floor(py), z0 = (int) Math.floor(pz);
@@ -553,6 +592,60 @@ final class Demo {
         obstacles++;
     }
 
+    /** Water three deep round the chest (six blocks out), the chest on a pillar in the middle: waves fought swimming. */
+    private void pool(WorldServer w, BlockPos c) {
+        int g = c.getY();
+        for (int dx = -6; dx <= 6; dx++) {
+            for (int dz = -6; dz <= 6; dz++) {
+                if (dx * dx + dz * dz > 36) {
+                    continue;
+                }
+                int x = c.getX() + dx, z = c.getZ() + dz;
+                if (dx == 0 && dz == 0) {
+                    fill(w, x, z, g - 4, g - 1, Blocks.dirt.getDefaultState());
+                    continue;
+                }
+                fill(w, x, z, g - 4, g - 4, Blocks.dirt.getDefaultState());
+                fill(w, x, z, g - 3, g - 1, Blocks.water.getDefaultState());
+                fill(w, x, z, g, g + 4, Blocks.air.getDefaultState());
+            }
+        }
+        System.out.println("ARENA pool round chest 2 at " + c.getX() + " " + g + " " + c.getZ());
+    }
+
+    /** A skeleton with a bow out in the field, 9 to 15 blocks from a chest, that shoots at the player. */
+    private void sniper(WorldServer w, java.util.Random r) {
+        if (chests.isEmpty()) {
+            return;
+        }
+        for (int tries = 0; tries < 40; tries++) {
+            Chest c = chests.get(r.nextInt(chests.size()));
+            double a = r.nextDouble() * Math.PI * 2.0, d = 9.0 + r.nextDouble() * 6.0;
+            BlockPos at = ground(w, (int) Math.floor(c.pos.getX() + 0.5 + Math.cos(a) * d), (int) Math.floor(c.pos.getZ() + 0.5 + Math.sin(a) * d));
+            if (at == null || Math.abs(at.getY() - c.pos.getY()) > 6) {
+                continue;
+            }
+            EntitySkeleton sk = new EntitySkeleton(w);
+            sk.setLocationAndAngles(at.getX() + 0.5, at.getY(), at.getZ() + 0.5, 0, 0);
+            sk.setCurrentItemOrArmor(0, new net.minecraft.item.ItemStack(net.minecraft.init.Items.bow));
+            // A head (it does not wear out) keeps it from burning in the sun.
+            sk.setCurrentItemOrArmor(4, new net.minecraft.item.ItemStack(net.minecraft.init.Items.skull, 1, 0));
+            sk.setCombatTask();
+            w.spawnEntityInWorld(sk);
+            snipers.add(sk);
+            sniperAt.put(sk, new double[] {at.getX() + 0.5, at.getY(), at.getZ() + 0.5});
+            System.out.println(String.format(Locale.ROOT, "ARENA sniper at %d %d %d", at.getX(), at.getY(), at.getZ()));
+            return;
+        }
+    }
+
+    /** One more arrow from a bow mob at the player, when it is in range and sight: they never stop shooting. */
+    private static void shoot(EntitySkeleton sk, EntityPlayer p, double range) {
+        if (!sk.isDead && sk.getHealth() > 0 && sk.getDistanceToEntity(p) < range && sk.canEntityBeSeen(p)) {
+            sk.attackEntityWithRangedAttack(p, 1.0F);
+        }
+    }
+
     /** The chests of the arena over the natural ground about where the player starts, and things in the way. */
     private void buildArena(WorldServer w, int x0, int y0, int z0) {
         java.util.Random r = new java.util.Random(SEED * 7919L + 17L);
@@ -580,6 +673,9 @@ final class Demo {
         }
         if (!chests.isEmpty()) {
             chests.get(0).state = READY;
+        }
+        if (POOL && chests.size() > 1) {
+            pool(w, chests.get(1).pos);
         }
         for (Chest c : chests) {
             double dx = c.pos.getX() - x0, dz = c.pos.getZ() - z0, len = Math.hypot(dx, dz);
@@ -628,10 +724,39 @@ final class Demo {
                     }
                 }
             }
+            keep.addAll(snipers);
             for (Object o : new ArrayList<Object>(w.loadedEntityList)) {
                 if (o instanceof net.minecraft.entity.monster.EntitySlime || (ARENA && o instanceof EntityLiving && !keep.contains(o))) {
                     ((Entity) o).setDead();
                 }
+            }
+        }
+        if (ARENA) {
+            long now = w.getTotalWorldTime();
+            if (snipers.isEmpty() && sniperBack < 0 && sniperKills == 0) {
+                java.util.Random r = new java.util.Random(SEED * 31L + 5L);
+                sniper(w, r);
+                sniper(w, r);
+            }
+            for (int i = snipers.size() - 1; i >= 0; i--) {
+                EntitySkeleton sk = snipers.get(i);
+                if (sk.isDead || sk.getHealth() <= 0) {
+                    snipers.remove(i);
+                    sniperAt.remove(sk);
+                    sniperKills++;
+                    sniperBack = 600;
+                    continue;
+                }
+                double[] h = sniperAt.get(sk);
+                if (h != null && Math.hypot(sk.posX - h[0], sk.posZ - h[2]) > 4.0) {
+                    sk.setPositionAndUpdate(h[0], h[1], h[2]);
+                }
+                if ((now + i * 7) % 22 == 0) {
+                    shoot(sk, p, 22.0);
+                }
+            }
+            if (sniperBack >= 0 && --sniperBack < 0) {
+                sniper(w, new java.util.Random(now));
             }
         }
         for (Chest c : chests) {
@@ -653,12 +778,26 @@ final class Demo {
                     c.state = ACTIVE;
                     c.waveTicks = exp ? 20 * 60 : 200;
                     c.started = w.getTotalWorldTime();
+                    if (lastClaimAt >= 0) {
+                        betweens++;
+                        betweenTicks += (int) (c.started - lastClaimAt);
+                        lastClaimAt = -1;
+                    }
                 }
             } else if (c.state == ACTIVE) {
                 for (int i = c.mobs.size() - 1; i >= 0; i--) {
                     EntityLiving m = c.mobs.get(i);
+                    double[] home = c.archers.get(m);
                     if (m.isDead || m.getHealth() <= 0) {
                         c.mobs.remove(i);
+                        c.archers.remove(m);
+                    } else if (home != null) {
+                        if (Math.hypot(m.posX - home[0], m.posZ - home[2]) > 4.0) {
+                            m.setPositionAndUpdate(home[0], home[1], home[2]);
+                        }
+                        if ((w.getTotalWorldTime() + i * 5) % 20 == 0) {
+                            shoot((EntitySkeleton) m, p, 24.0);
+                        }
                     } else if (Math.hypot(m.posX - cx, m.posZ - cz) > 5.5) {
                         Entity top = m.ridingEntity != null ? m.ridingEntity : m;
                         top.setPositionAndUpdate(cx + 1.5, c.pos.getY(), cz + 1.5);
@@ -666,6 +805,12 @@ final class Demo {
                 }
                 if (c.mobs.isEmpty()) {
                     c.state = CLAIMABLE;
+                    c.clearedAt = w.getTotalWorldTime();
+                    clears++;
+                    clearTicks += (int) (c.clearedAt - c.started);
+                    if (ARENA) {
+                        System.out.println(String.format(Locale.ROOT, "ARENA cleared chest %d in %.1f s", chests.indexOf(c) + 1, (c.clearedAt - c.started) / 20.0));
+                    }
                 } else if (--c.waveTicks <= 0) {
                     if (ARENA) {
                         StringBuilder left = new StringBuilder();
@@ -685,6 +830,7 @@ final class Demo {
                         m.setDead();
                     }
                     c.mobs.clear();
+                    c.archers.clear();
                     c.state = COOLDOWN;
                     c.timer = 20 * 8;
                     resets++;
@@ -733,6 +879,10 @@ final class Demo {
         for (Chest c : chests) {
             if (c.pos.equals(pos)) {
                 if (c.state == CLAIMABLE) {
+                    long now = p.worldObj.getTotalWorldTime();
+                    claimWaits++;
+                    claimWaitTicks += (int) (now - c.clearedAt);
+                    lastClaimAt = now;
                     c.state = COOLDOWN;
                     c.timer = 20 * (ARENA ? 30 + (int) (p.worldObj.rand.nextInt(31)) : 40);
                     claims++;
@@ -803,9 +953,16 @@ final class Demo {
             double a = i * Math.PI * 2 / 5, x = cx + 2.5 * Math.cos(a), z = cz + 2.5 * Math.sin(a);
             int y = mobY(w, c, x, z);
             EntityLiving m;
+            boolean archer = ARENA && i == 2;
+            if (archer) {
+                // The archer keeps back, 7 blocks out, and shoots.
+                x = cx + 7.0 * Math.cos(a);
+                z = cz + 7.0 * Math.sin(a);
+                y = mobY(w, c, x, z);
+            }
             if (i < 3) {
                 EntitySkeleton sk = new EntitySkeleton(w);
-                sk.setCurrentItemOrArmor(0, new net.minecraft.item.ItemStack(net.minecraft.init.Items.stone_sword));
+                sk.setCurrentItemOrArmor(0, new net.minecraft.item.ItemStack(archer ? net.minecraft.init.Items.bow : net.minecraft.init.Items.stone_sword));
                 sk.setCurrentItemOrArmor(4, new net.minecraft.item.ItemStack(net.minecraft.init.Items.skull, 1, 3));
                 sk.setCurrentItemOrArmor(3, new net.minecraft.item.ItemStack(net.minecraft.init.Items.iron_chestplate));
                 sk.setCurrentItemOrArmor(2, new net.minecraft.item.ItemStack(net.minecraft.init.Items.iron_leggings));
@@ -819,6 +976,10 @@ final class Demo {
             m.setLocationAndAngles(x, y, z, 0, 0);
             m.getEntityAttribute(SharedMonsterAttributes.maxHealth).setBaseValue(200);
             m.setHealth(50);
+            if (archer) {
+                ((EntitySkeleton) m).setCombatTask();
+                c.archers.put(m, new double[] {x, y, z});
+            }
             w.spawnEntityInWorld(m);
             if (m instanceof net.minecraft.entity.passive.EntityWolf) {
                 List<?> ps = w.playerEntities;

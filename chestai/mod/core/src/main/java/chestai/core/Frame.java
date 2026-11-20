@@ -45,6 +45,9 @@ public final class Frame {
     public int air = 300;
     public boolean headInWater, inLava, burning, inWall;
     public float hp, absorption;
+    /** The food bar (of 20) and its saturation. */
+    public int food = 20;
+    public float saturation = 5.0f;
     public int regenLeft, slowLeft, blindLeft;
     public int gapples, pearls, potions, arrows, pearlCdLeft;
     /** The agent's slot (0 sword, 1 bow, 2 golden apple, 3 pearl, 4 potion), whether it holds the right button on an item and for how many ticks, and its click allowance. */

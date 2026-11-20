@@ -56,6 +56,9 @@ final class Coach {
     private long boostOffUntil = -1;
     private boolean boostJudged = true;
     private static final int BOOST_DRAW = Integer.getInteger("chestai.boost.draw", 5);
+    /** In a fight with a mob in reach: jump (blows on the way down are critical), and walk (no sprint knockback). */
+    private static final boolean FIGHT_JUMP = Boolean.getBoolean("chestai.fight.jump"), FIGHT_WALK = Boolean.getBoolean("chestai.fight.walk");
+    private boolean fightJump, fightWalk;
 
     private final Random rnd = new Random();
     private final Settings s;
@@ -70,6 +73,10 @@ final class Coach {
     private double gain = 0.55;
 
     private long lastPot = -1000, lastApple = -10000, lastBoost = -1000, boostFrom = -1;
+    /** Plain food being eaten (through the apple's slot), since when; the most absorption seen. */
+    private boolean foodBite;
+    private long foodAt = -1000;
+    private float absTop;
 
     /** The chest gone for (its block), where to stand for it, and when it was picked. */
     private int goalX, goalY, goalZ;
@@ -155,7 +162,7 @@ final class Coach {
         if (heal == HEAL_POTION) {
             b.append("+pocion");
         } else if (heal == HEAL_APPLE) {
-            b.append("+manzana");
+            b.append(foodBite ? "+comida" : "+manzana");
         }
         if (boosting) {
             b.append("+arco");
@@ -330,6 +337,7 @@ final class Coach {
      */
     private void go(Frame f, double gx, double gy, double gz, double tol) {
         move = true;
+        objective(gx, gy, gz, f.tick);
         swim = inWater(f);
         double d = hd(gx, gz, f.x, f.z);
         // Stuck: the way is planned again from here.
@@ -487,6 +495,76 @@ final class Coach {
         return out;
     }
 
+    /** Points of a chest's box a click can be aimed at: its middle, its lid, and in from its corners. */
+    private static final double[][] LID = {{0, 0.8, 0}, {0, 0.45, 0}, {0.28, 0.8, 0.28}, {-0.28, 0.8, -0.28}, {0.28, 0.8, -0.28},
+        {-0.28, 0.8, 0.28}, {0.3, 0.4, 0}, {-0.3, 0.4, 0}, {0, 0.4, 0.3}, {0, 0.4, -0.3}};
+
+    /** Whether a click from the eyes at (ex, ey, ez) reaches point i of the chest. */
+    private boolean seesLid(double ex, double ey, double ez, Memory.Known k, int i) {
+        double px = k.cx() + LID[i][0], py = k.y + LID[i][1], pz = k.cz() + LID[i][2];
+        double dx = px - ex, dy = py - ey, dz = pz - ez;
+        return dx * dx + dy * dy + dz * dz <= 4.3 * 4.3 && planner.see(ex, ey, ez, px, py, pz, k.x, k.y, k.z);
+    }
+
+    /** A point of the chest a click reaches from where the player is, the one nearest the view (another after a while), or null. */
+    private double[] lidPoint(Frame f, Memory.Known k, long tried) {
+        double ex = f.x, ey = eyeY(f), ez = f.z;
+        List<double[]> ok = new ArrayList<double[]>();
+        for (int i = 0; i < LID.length; i++) {
+            if (seesLid(ex, ey, ez, k, i)) {
+                double px = k.cx() + LID[i][0], py = k.y + LID[i][1], pz = k.cz() + LID[i][2];
+                ok.add(new double[] {px, py, pz, Math.abs(yawTo(f, px, pz)) + Math.abs(pitchTo(f, px, py, pz))});
+            }
+        }
+        if (ok.isEmpty()) {
+            return null;
+        }
+        java.util.Collections.sort(ok, new java.util.Comparator<double[]>() {
+            public int compare(double[] p, double[] q) {
+                return Double.compare(p[3], q[3]);
+            }
+        });
+        return ok.get((int) ((tried / 20) % ok.size()));
+    }
+
+    private int[] spot;
+    private long spotAt = -1000;
+    private int spotFor = Integer.MIN_VALUE;
+
+    /** A spot within four blocks of the chest to stand at, from where a click reaches it, the nearest to the player; or null. */
+    private int[] claimSpot(Frame f, Memory.Known k, long t) {
+        int key = k.x * 31 + k.z * 17 + k.y;
+        if (key == spotFor && t - spotAt < 20) {
+            return spot;
+        }
+        spotFor = key;
+        spotAt = t;
+        spot = null;
+        double best = 1e9;
+        for (int dx = -4; dx <= 4; dx++) {
+            for (int dz = -4; dz <= 4; dz++) {
+                if (dx * dx + dz * dz > 16 || (dx == 0 && dz == 0)) {
+                    continue;
+                }
+                for (int dy = -2; dy <= 1; dy++) {
+                    int x = k.x + dx, y = k.y + dy, z = k.z + dz;
+                    double d = hd(x + 0.5, z + 0.5, f.x, f.z) + 0.6 * Math.abs(y - f.y);
+                    if (d >= best || !planner.stand(x, y, z)) {
+                        continue;
+                    }
+                    for (int i = 0; i < LID.length; i++) {
+                        if (seesLid(x + 0.5, y + 1.62, z + 0.5, k, i)) {
+                            best = d;
+                            spot = new int[] {x, y, z};
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+        return spot;
+    }
+
     /** Whether a step sideways (left for +1) keeps the player on safe ground: no drop of more than one, no water, no harm. */
     private boolean sideSafe(Frame f, int dir) {
         double yr = Math.toRadians(f.yaw);
@@ -555,6 +633,8 @@ final class Coach {
         jumpUp = false;
         swim = false;
         pitchAbs = Double.NaN;
+        fightJump = false;
+        fightWalk = false;
         double hp = f.hp;
 
         int lock = waveLock(f, mem);
@@ -575,16 +655,41 @@ final class Coach {
 
         // 1. Not dying comes first.
         boolean havePot = lay.real[Pilot.POTION] >= 0 && lay.potions > 0;
-        boolean haveApple = lay.real[Pilot.GAPPLE] >= 0 && lay.gapples > 0;
+        int apples = lay.real[Pilot.GAPPLE] >= 0 ? lay.gapples : 0;
+        boolean haveApple = apples > 0, haveFood = lay.food >= 0 && lay.foodCount > 0;
+        absTop = Math.max(absTop, f.absorption);
+        double nearest = 1e9;
+        for (Frame.Mob m : f.mobs) {
+            nearest = Math.min(nearest, hd(m.x, m.z, f.x, f.z));
+        }
+        boolean claimNear = false;
+        for (Memory.Known k : mem.chests) {
+            claimNear |= k.seen && k.state == Frame.CLAIMABLE && hd(k.cx(), k.cz(), f.x, f.z) < 5.0;
+        }
         boolean potNeed = havePot && !eating && t - lastPot > POT_GAP
             && ((hp <= s.potHp && (mem.sinceHurt < 100 || close > 0)) || hp <= s.potHp * 0.6);
-        boolean appleNeed = !potNeed && !eating && haveApple && t - lastApple > Math.round(s.appleWaitS * 20.0)
-            && f.absorption < 0.5f && f.regenLeft == 0
-            && ((hp <= s.appleHp && mem.sinceHurt < 60) || (hp <= s.potHp && !havePot));
-        if (drawing && (potNeed || appleNeed || !cand.isEmpty())) {
+        boolean appleGap = t - lastApple > Math.round(s.appleWaitS * 20.0);
+        // An apple when hurt: health or absorption down (the absorption kept full), while there are
+        // apples to spare; with few left, only when health is low.
+        boolean spare = apples > s.appleKeep;
+        boolean absDown = f.absorption < Math.max(0.5, absTop - 0.4);
+        // (Its own Punch arrow, with no mob about, is no reason.)
+        boolean ownArrow = t - lastBoost < 60 && nearest > 12.0;
+        boolean appleNeed = !potNeed && !eating && haveApple && appleGap
+            && ((mem.sinceHurt < 60 && (s.appleOnHit && spare && !ownArrow ? hp < 19.9 || absDown : hp <= s.appleHp && f.absorption < 0.5f && f.regenLeft == 0))
+                || (hp <= s.potHp && !havePot));
+        // Food as soon as the bar is short: plain food first, else an apple; not with a claim at hand,
+        // nor with a mob at the sword while the bar still lets the player sprint for long.
+        boolean foodNeed = s.foodFull && !potNeed && !appleNeed && !eating && f.food < 20 && !claimNear
+            && (nearest > 3.5 || f.food <= 14)
+            && (haveFood || (haveApple && (f.food <= 6 || (spare && appleGap))));
+        if (drawing && (potNeed || appleNeed || foodNeed || !cand.isEmpty())) {
             // The bow is let go: something matters more.
             boosting = false;
             boostFrom = -1;
+        }
+        if (foodBite && !eating && t - foodAt > 3) {
+            foodBite = false;
         }
         if (eating) {
             heal = HEAL_APPLE;
@@ -595,18 +700,24 @@ final class Coach {
             if (f.pitch >= 76.0f && !pilot.using) {
                 a[8] = 1 + Pilot.POTION;
             }
-        } else if (appleNeed && !pilot.using) {
+        } else if ((appleNeed || foodNeed) && !pilot.using) {
             heal = HEAL_APPLE;
             a[8] = 1 + Pilot.GAPPLE;
             a[7] = 1;
-            lastApple = t;
+            if (appleNeed || !haveFood) {
+                lastApple = t;
+            } else {
+                foodBite = true;
+                foodAt = t;
+            }
+        }
+        if (foodBite && haveFood) {
+            // Plain food goes through the apple's slot: the hotbar key is the food's.
+            lay.real[Pilot.GAPPLE] = lay.food;
+            lay.gapples = lay.foodCount;
         }
 
         // 2. Out of what hurts with no mob doing it: water over the head, a wall, lava, fire.
-        double nearest = 1e9;
-        for (Frame.Mob m : f.mobs) {
-            nearest = Math.min(nearest, hd(m.x, m.z, f.x, f.z));
-        }
         if (mem.sinceHurt == 0 && t - lastBoost > 40) {
             // (Its own Punch arrow is no harm from nowhere.)
             harmNoMob = nearest > 12.0 ? harmNoMob + 1 : 0;
@@ -658,31 +769,48 @@ final class Coach {
             boosting = false;
             boostFrom = -1;
             Frame.Mob tgt = null;
-            double bs = 1e9;
+            double bs = 1e9, tgtY = Double.NaN;
             for (Frame.Mob m : cand) {
                 double r = reach(f, m);
                 if (r > REACH) {
                     continue;
                 }
-                // One just hit takes no harm for half a second: another one meanwhile.
-                double sc = r + Math.abs(yawTo(f, m.x, m.z)) / 30.0 + (m.hurtTime > 2 ? 2.0 : 0.0) + (m.id == target && m.hurtTime <= 2 ? -0.8 : 0.0);
+                // One just hit takes no harm for half a second: another one meanwhile. One behind a
+                // block or tall grass, where a click would stop, only if there is no other.
+                double vy = seenAt(f, m);
+                double sc = r + Math.abs(yawTo(f, m.x, m.z)) / 30.0 + (m.hurtTime > 2 ? 2.0 : 0.0) + (m.id == target && m.hurtTime <= 2 ? -0.8 : 0.0)
+                    + (vy != vy ? 2.5 : 0.0);
                 if (sc < bs) {
                     bs = sc;
                     tgt = m;
+                    tgtY = vy;
                 }
             }
             double[] gc = groupCenter(f, cand);
+            objective(gc[0], gc[1], gc[2], t);
             if (tgt != null) {
                 mode = FIGHT;
                 target = tgt.id;
-                // Low on the body: the name a server keeps over a mob's head can be in the way higher up.
-                // On a horse: the rider, not the horse.
+                // Low on the body (the name a server keeps over a mob's head can be in the way higher up),
+                // higher where grass or a block is in the way. On a horse: the rider, not the horse.
                 double ax = tgt.x + tgt.mx * 2.0, az = tgt.z + tgt.mz * 2.0,
-                    ay = tgt.kind == Frame.HORSEMAN ? tgt.y + 2.0 : tgt.y + Math.min(tgt.h, 2.6) * 0.45;
+                    ay = tgtY == tgtY ? tgtY : tgt.kind == Frame.HORSEMAN ? tgt.y + 2.0 : tgt.y + Math.min(tgt.h, 2.6) * 0.45;
                 aim(ax, ay, az);
-                if (s.hit && heal == HEAL_NONE && !pilot.using && Math.abs(yawTo(f, ax, az)) < 25.0 && Math.abs(pitchTo(f, ax, ay, az)) < 35.0) {
-                    a[6] = 1;
+                if (s.hit && heal == HEAL_NONE && !pilot.using) {
+                    // A click only with a mob under the crosshair that can take it (none spent on air).
+                    boolean ok = false;
+                    for (Frame.Mob m : f.mobs) {
+                        ok |= m.id == f.pickMob && m.hurtTime <= 2;
+                    }
+                    if (f.pickMob < 0 && tgtY == tgtY && Math.abs(yawTo(f, ax, az)) < 4.0 && Math.abs(pitchTo(f, ax, ay, az)) < 6.0) {
+                        ok = true;
+                    }
+                    if (ok) {
+                        a[6] = 1;
+                    }
                 }
+                fightJump = FIGHT_JUMP && f.onGround && !inWater(f);
+                fightWalk = FIGHT_WALK;
                 if (hd(gc[0], gc[2], f.x, f.z) > 1.8 && hd(tgt.x, tgt.z, f.x, f.z) > 1.2) {
                     move = true;
                     jumpUp = (f.collidedH && f.onGround) || inWater(f);
@@ -716,26 +844,21 @@ final class Coach {
                         claimSince = t;
                     }
                     long tried = t - claimSince;
-                    // The lid, seen from above; nothing for a while: closer, and other points of it.
-                    double[][] off = {{0, 0}, {0.25, 0.25}, {-0.25, -0.25}, {0.25, -0.25}, {-0.25, 0.25}};
-                    double[] o = off[(int) ((tried / 15) % off.length)];
-                    double px = k.cx() + o[0], py = k.y + (eyeY(f) > k.y + 1.0 ? 0.8 : 0.5), pz = k.cz() + o[1];
-                    boolean below = Math.abs(k.y - f.y) > 1.5;
-                    if ((tried > 40 || below) && (dc > 1.3 || below)) {
-                        // Up a bank or round something: along a planned way, looking at it once close.
-                        go(f, k.cx(), k.y, k.cz(), 1.0);
-                        if (dc < 2.5 && !below) {
-                            aim(px, py, pz);
-                        }
+                    // A point of the chest a click reaches from here (nothing in between, not even tall
+                    // grass); with none, to a spot near it from where one is.
+                    double[] lid = lidPoint(f, k, tried);
+                    if (lid != null) {
+                        aim(lid[0], lid[1], lid[2]);
                     } else {
-                        aim(px, py, pz);
-                        if (dc > 2.5) {
-                            move = true;
-                            jumpUp = (f.collidedH && f.onGround) || surface;
+                        int[] at = claimSpot(f, k, t);
+                        if (at != null) {
+                            go(f, at[0] + 0.5, at[1], at[2] + 0.5, 0.4);
+                        } else {
+                            go(f, k.cx(), k.y, k.cz(), 1.0);
                         }
                     }
                     a[7] = heal == HEAL_NONE && !pilot.using ? 1 : a[7];
-                    if (tried > 160) {
+                    if (tried > 240) {
                         claimSince = -1;
                     }
                 } else if (k.seen && k.state == Frame.CLAIMABLE) {
@@ -751,7 +874,7 @@ final class Coach {
                 }
             }
         }
-        if (mode == NONE && heal == HEAL_NONE) {
+        if (mode == NONE && heal != HEAL_POTION) {
             // Nothing known to go to: out looking, 30 blocks at a time.
             if (t - wanderAt > 600 || hd(wanderX, wanderZ, f.x, f.z) < 3.0) {
                 double ang = rnd.nextDouble() * Math.PI * 2.0;
@@ -765,6 +888,108 @@ final class Coach {
         if (!boosting && heal == HEAL_NONE && !pilot.using && pilot.slot != Pilot.SWORD && lay.real[Pilot.SWORD] >= 0) {
             a[8] = 1 + Pilot.SWORD;
         }
+        trapped(f);
+        dodge(f);
+    }
+
+    /** Where the player is trying to get to (a way's goal, a group of mobs), and when that was last said. */
+    private double objX, objY, objZ;
+    private long objAt = -1000;
+    /** Where the player has stayed (within four blocks) since when. */
+    private double trapX = 1e9, trapZ = 1e9;
+    private long trapAt;
+
+    private void objective(double x, double y, double z, long t) {
+        objX = x;
+        objY = y;
+        objZ = z;
+        objAt = t;
+    }
+
+    /**
+     * Twelve seconds within four blocks while trying to get somewhere farther
+     * or well above (a pit, a ravine, a hole by a bank, mobs up on the edge):
+     * out by an ender pearl, as with a way that ends short.
+     */
+    private void trapped(Frame f) {
+        long t = f.tick;
+        boolean busy = mode == WAIT || mode == CLAIM || mode == GUARD || mode == ESCAPE || heal != HEAL_NONE || t - objAt > 2;
+        if (busy || hd(trapX, trapZ, f.x, f.z) > 4.0) {
+            trapX = f.x;
+            trapZ = f.z;
+            trapAt = t;
+            return;
+        }
+        if (t - trapAt > 240 && (hd(objX, objZ, f.x, f.z) > 5.0 || objY - f.y > 2.5)) {
+            trapAt = t;
+            deadEnds = 2;
+            pgx = objX;
+            pgy = objY;
+            pgz = objZ;
+        }
+    }
+
+    /** A mob's arrow (or snowball, or fireball) on its way to the player: a step aside, to the side it passes. */
+    private int dodgeDir;
+    private long dodgeUntil = -1;
+
+    private void dodge(Frame f) {
+        for (Frame.Proj p : f.projs) {
+            if (p.owner < 0 || (p.kind != Frame.ARROW && p.kind != Frame.SNOWBALL)) {
+                continue;
+            }
+            double vx = p.mx, vy = p.my, vz = p.mz;
+            if (vx * vx + vy * vy + vz * vz < 0.09) {
+                continue;
+            }
+            double x = p.x, y = p.y, z = p.z, cy = f.y + 0.9, near = 1e9;
+            int when = -1;
+            for (int i = 1; i <= 25; i++) {
+                x += vx;
+                y += vy;
+                z += vz;
+                vx *= 0.99;
+                vy = vy * 0.99 - 0.05;
+                vz *= 0.99;
+                double dx = x - f.x, dy = (y - cy) * 0.6, dz = z - f.z, d = Math.sqrt(dx * dx + dy * dy + dz * dz);
+                if (d < near) {
+                    near = d;
+                    when = i;
+                }
+            }
+            if (near > 1.4 || when < 2 || when > 20) {
+                continue;
+            }
+            double hl = Math.sqrt(p.mx * p.mx + p.mz * p.mz);
+            if (hl < 1e-3) {
+                continue;
+            }
+            double hx = p.mx / hl, hz = p.mz / hl;
+            double side = hx * (f.z - p.z) - hz * (f.x - p.x);
+            double sg = side >= 0 ? 1.0 : -1.0;
+            double nx = -hz * sg, nz = hx * sg;
+            double yr = Math.toRadians(f.yaw);
+            double dot = nx * Math.cos(yr) + nz * Math.sin(yr);
+            if (Math.abs(dot) > 0.25) {
+                dodgeDir = dot > 0 ? 1 : -1;
+                dodgeUntil = f.tick + 6;
+            }
+            return;
+        }
+    }
+
+    /** The height on a mob to aim at that a click from the eyes reaches (no block or tall grass between), or NaN. */
+    private double seenAt(Frame f, Frame.Mob m) {
+        double ex = f.x, ey = eyeY(f), ez = f.z;
+        double base = m.kind == Frame.HORSEMAN ? m.y + 1.4 : m.y, h = m.kind == Frame.HORSEMAN ? 1.0 : Math.min(m.h, 2.6);
+        double[] at = {0.45, 0.7, 0.25, 0.88};
+        for (double q : at) {
+            double y = base + h * q;
+            if (planner.see(ex, ey, ez, m.x, y, m.z, Integer.MIN_VALUE, 0, 0)) {
+                return y;
+            }
+        }
+        return Double.NaN;
     }
 
     /** Far to go on open ground: a Punch arrow shot up that carries the player along. */
@@ -882,6 +1107,17 @@ final class Coach {
             if (f.tick < tapUntil && sideSafe(f, tapDir)) {
                 k.strafe = tapDir;
             }
+        }
+        if (f.tick < dodgeUntil && heal != HEAL_POTION && !(mode == ESCAPE && pearlThrown) && sideSafe(f, dodgeDir)) {
+            // Out of the way of an arrow.
+            k.strafe = dodgeDir;
+        }
+        if (fightJump && !surface) {
+            // Up and down in the fight: blows that land on the way down are critical.
+            k.jump = true;
+        }
+        if (fightWalk) {
+            k.sprint = false;
         }
     }
 }

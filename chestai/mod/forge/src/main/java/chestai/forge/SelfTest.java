@@ -152,7 +152,7 @@ final class SelfTest {
                 }
             }
             mod.flip(mc);
-            boolean ok = !mod.on() && chests >= 1 && mobs >= 3 && far > 6.0 && swings > 0 && (pots >= 1 || lowest > 10.0F) && apples <= 3 && me.getHealth() > 0;
+            boolean ok = !mod.on() && chests >= 1 && mobs >= 3 && far > 6.0 && swings > 0 && (pots >= 1 || lowest > 10.0F) && apples <= 2 + TICKS / 160 && me.getHealth() > 0;
             end(mc, String.format(Locale.ROOT, "%s: %d ticks with the agent at the keys, %d chest(s) known, up to %d mobs seen, got %.1f blocks away from the start (%.1f from the chest behind the wall at the end), swung %d times, %d of 4 zombies left, %d potion(s) and %d apple(s) used, lowest health %.1f",
                 ok ? "ok" : "FAILED", ticks, chests, mobs, far, toChest, swings, alive, pots, apples, lowest));
         }

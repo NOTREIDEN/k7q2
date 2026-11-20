@@ -83,6 +83,11 @@ public final class Session {
     }
 
     /** What the coach is doing, for a test's log. */
+    /** Clicks, clicks on a mob, blows on a mob that could take one, and of them the ones that took health. */
+    public String hitLine() {
+        return dbgAttacks + "/" + dbgOnMob + "/" + blows + "/" + blowsLanded;
+    }
+
     public String coachLine() {
         return coach == null ? "-" : coach.describe();
     }

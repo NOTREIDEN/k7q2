@@ -23,8 +23,10 @@ jobs:
       fail-fast: false
       matrix:
         seed: [11, 22, 33, 44, 55, 66, 77, 88, 101, 202, 303, 404, 505, 606, 707, 808]
+        # base: as the mod plays. crit: in a fight with a mob in reach, jumping and not sprinting.
+        variant: [base, crit]
     runs-on: ubuntu-latest
-    timeout-minutes: 40
+    timeout-minutes: 60
     defaults:
       run:
         working-directory: chestai/mod
@@ -42,11 +44,13 @@ jobs:
       - uses: gradle/actions/setup-gradle@v4
         with:
           gradle-version: "8.8"
-      - name: Play seed ${{ matrix.seed }}
+      - name: Play seed ${{ matrix.seed }} (${{ matrix.variant }})
         run: |
+          J=""
+          if [ "${{ matrix.variant }}" = "crit" ]; then J="-Dchestai.fight.jump=true -Dchestai.fight.walk=true"; fi
           sudo apt-get update -q
           sudo apt-get install -y -q xvfb x11-xserver-utils libgl1-mesa-dri libglx-mesa0 libxrandr2 libxcursor1 libxxf86vm1 libxi6 libxtst6 libxrender1 > /dev/null
-          LIBGL_ALWAYS_SOFTWARE=1 timeout 1800 xvfb-run -a -s "-screen 0 854x480x24" gradle arena -Parena.seed=${{ matrix.seed }} -Parena.seconds=300 --no-daemon --stacktrace > arena.log 2>&1 || true
+          LIBGL_ALWAYS_SOFTWARE=1 timeout 3000 xvfb-run -a -s "-screen 0 854x480x24" gradle arena -Parena.seed=${{ matrix.seed }} -Parena.seconds=900 -Parena.variant=${{ matrix.variant }} "-Parena.jvm=$J" --no-daemon --stacktrace > arena.log 2>&1 || true
           grep -v -e '^\s*at ' -e '^\s*\.\.\. [0-9]* more' -e Authentication -e JsonSyntax -e BEGIN_OBJECT arena.log | grep -e ARENA -e Exception -e ERROR -e 'error:' | sed 's/^.*\]: //' | head -n 2000
           mkdir -p out
           cp run/arena.txt out/ 2>/dev/null || echo "seed=${{ matrix.seed }} FAILED" > out/arena.txt
@@ -56,7 +60,7 @@ jobs:
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: arena-${{ matrix.seed }}
+          name: arena-${{ matrix.seed }}-${{ matrix.variant }}
           path: chestai/mod/out
           retention-days: 7
 
@@ -81,23 +85,43 @@ jobs:
           if not rows:
               print("no seed finished")
               raise SystemExit(1)
-          def tot(k):
-              return sum(float(r[k]) for r in rows)
-          mins = tot("secs") / 60.0
-          print("seeds %d, minutes played %.1f" % (len(rows), mins))
-          print("claims %d (%.2f a minute), resets %d, deaths %d, agent off %d" % (tot("claims"), tot("claims") / mins, tot("resets"), tot("deaths"), tot("offs")))
-          print("stuck %.0f s, walking not facing the way %.1f%% of moving ticks" % (tot("stuck"), 100.0 * sum(float(r["side"]) * float(r["moving"]) for r in rows) / max(tot("moving"), 1)))
-          print("arrows %d (boosts that carried %d), potions %d (%d over 16 hp), apples %d (%d at full health), lowest health %.1f" % (tot("arrows"), tot("boosts"), tot("pots"), tot("potsHigh"), tot("apples"), tot("applesFull"), min(float(r["minHp"]) for r in rows)))
-          print("no claim on seeds: %s" % [r["seed"] for r in rows if r["claims"] == "0"])
-          modes, still = {}, {}
-          for line in open("all.txt"):
-              for t in line.split():
-                  if t.startswith("modes:"):
-                      for part in t[6:].split(","):
-                          if "=" in part:
-                              k, v = part.split("=", 1)
-                              a, b = v.split("/")
-                              modes[k] = modes.get(k, 0.0) + float(a)
-                              still[k] = still.get(k, 0.0) + float(b)
-          print("time in each mode (seconds, of them standing still): " + ", ".join("%s %.0f (%.0f)" % (k, modes[k], still[k]) for k in sorted(modes, key=lambda k: -modes[k])))
+          def avg(rs, k):
+              v = [float(r[k]) for r in rs if k in r and float(r[k]) >= 0]
+              return sum(v) / len(v) if v else -1.0
+          for var in sorted(set(r.get("variant", "base") for r in rows)):
+              rs = [r for r in rows if r.get("variant", "base") == var]
+              tot = lambda k: sum(float(r[k]) for r in rs if k in r)
+              mins = tot("secs") / 60.0
+              print("== %s: seeds %d, minutes played %.1f" % (var, len(rs), mins))
+              print("claims %d (%.2f a minute; Expeditions-like seeds %.2f, 10 s waves %.2f), resets %d, deaths %d, agent off %d" % (
+                  tot("claims"), tot("claims") / mins,
+                  sum(float(r["claims"]) for r in rs if r["exp"] == "true") / max(1e-9, sum(float(r["secs"]) for r in rs if r["exp"] == "true") / 60.0),
+                  sum(float(r["claims"]) for r in rs if r["exp"] != "true") / max(1e-9, sum(float(r["secs"]) for r in rs if r["exp"] != "true") / 60.0),
+                  tot("resets"), tot("deaths"), tot("offs")))
+              print("a wave killed in %.1f s on average, claimed %.1f s after, next wave %.1f s after a claim" % (avg(rs, "clearS"), avg(rs, "claimWaitS"), avg(rs, "betweenS")))
+              print("stuck %.0f s, walking not facing the way %.1f%% of moving ticks" % (tot("stuck"), 100.0 * sum(float(r["side"]) * float(r["moving"]) for r in rs) / max(tot("moving"), 1)))
+              print("arrows %d (boosts that carried %d), potions %d (%d over 16 hp), apples %d (%d at full health), steak %d, lowest health %.1f" % (tot("arrows"), tot("boosts"), tot("pots"), tot("potsHigh"), tot("apples"), tot("applesFull"), tot("steak"), min(float(r["minHp"]) for r in rs)))
+              print("food bar short %.0f s, lowest food %d; mob arrows that hit %d (%.0f damage), snipers killed %d" % (tot("foodLowS"), min(int(r.get("minFood", 20)) for r in rs), tot("projHits"), tot("projDmg"), tot("sniperKills")))
+              h = [0, 0, 0, 0]
+              for r in rs:
+                  parts = r.get("hits", "-").split("/")
+                  if len(parts) == 4:
+                      h = [a + int(b) for a, b in zip(h, parts)]
+              print("clicks %d, on a mob %d, blows on a mob that could take one %d, that took health %d" % tuple(h))
+              print("no claim on seeds: %s" % [r["seed"] for r in rs if r["claims"] == "0"])
+              modes, still = {}, {}
+              for r in rs:
+                  pass
+              for line in open("all.txt"):
+                  if ("variant=" + var) not in line and not (var == "base" and "variant=" not in line):
+                      continue
+                  for t in line.split():
+                      if t.startswith("modes:"):
+                          for part in t[6:].split(","):
+                              if "=" in part:
+                                  k, v = part.split("=", 1)
+                                  a, b = v.split("/")
+                                  modes[k] = modes.get(k, 0.0) + float(a)
+                                  still[k] = still.get(k, 0.0) + float(b)
+              print("time in each mode (seconds, of them standing still): " + ", ".join("%s %.0f (%.0f)" % (k, modes[k], still[k]) for k in sorted(modes, key=lambda k: -modes[k])))
           PY

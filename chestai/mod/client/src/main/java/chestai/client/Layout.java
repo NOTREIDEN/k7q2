@@ -5,6 +5,7 @@ import net.minecraft.entity.player.InventoryPlayer;
 import net.minecraft.init.Items;
 import net.minecraft.item.Item;
 import net.minecraft.item.ItemBow;
+import net.minecraft.item.ItemFood;
 import net.minecraft.item.ItemPotion;
 import net.minecraft.item.ItemStack;
 import net.minecraft.item.ItemSword;
@@ -14,12 +15,26 @@ import chestai.core.Pilot;
 
 /**
  * Where the agent's five items are in the hotbar: sword, bow, golden
- * apples, pearls and splash potions of healing, and how many there are.
+ * apples, pearls and splash potions of healing, and how many there are;
+ * and the best plain food, eaten through the apple's slot when the bar is short.
  */
 final class Layout {
     /** Hotbar index of each of the agent's slots, or -1. */
     final int[] real = {-1, -1, -1, -1, -1};
     int gapples, pearls, potions, arrows;
+    /** Hotbar index of the food that fills the bar most (not a golden apple), or -1, and how much of it there is. */
+    int food = -1, foodCount;
+    private int foodFill;
+
+    /** Food that does no harm: not rotten flesh, a spider eye, a poisonous potato, raw chicken or a pufferfish. */
+    static int fill(ItemStack s) {
+        Item it = s.getItem();
+        if (!(it instanceof ItemFood) || it == Items.golden_apple || it == Items.rotten_flesh || it == Items.spider_eye
+                || it == Items.poisonous_potato || it == Items.chicken || (it == Items.fish && s.getMetadata() == 3)) {
+            return 0;
+        }
+        return ((ItemFood) it).getHealAmount(s);
+    }
 
     static boolean healSplash(ItemStack s) {
         if (s == null || s.getItem() != Items.potionitem || !ItemPotion.isSplash(s.getMetadata())) {
@@ -66,6 +81,13 @@ final class Layout {
                 l.potions += s.stackSize;
                 if (l.real[Pilot.POTION] < 0) {
                     l.real[Pilot.POTION] = i;
+                }
+            } else {
+                int fill = fill(s);
+                if (fill > l.foodFill) {
+                    l.foodFill = fill;
+                    l.food = i;
+                    l.foodCount = s.stackSize;
                 }
             }
         }

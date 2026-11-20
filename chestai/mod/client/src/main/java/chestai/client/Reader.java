@@ -170,6 +170,8 @@ final class Reader {
         float hpScale = me.getMaxHealth() > 20.0f ? 20.0f / me.getMaxHealth() : 1.0f;
         f.hp = me.getHealth() * hpScale;
         f.absorption = me.getAbsorptionAmount() * hpScale;
+        f.food = me.getFoodStats().getFoodLevel();
+        f.saturation = me.getFoodStats().getSaturationLevel();
         f.regenLeft = effect(me, Potion.regeneration);
         f.slowLeft = effect(me, Potion.moveSlowdown);
         f.blindLeft = effect(me, Potion.blindness);
@@ -283,7 +285,8 @@ final class Reader {
                 }
                 continue;
             }
-            if (e instanceof EntityArrow || e instanceof EntitySnowball || e instanceof EntityEnderPearl || e instanceof EntityPotion) {
+            if (e instanceof EntityArrow || e instanceof EntitySnowball || e instanceof EntityEnderPearl || e instanceof EntityPotion
+                    || e instanceof net.minecraft.entity.projectile.EntityFireball) {
                 double dx = e.posX - e.lastTickPosX, dy = e.posY - e.lastTickPosY, dz = e.posZ - e.lastTickPosZ;
                 if (dx * dx + dy * dy + dz * dz < 1e-4) {
                     // Stuck in a block.
@@ -293,7 +296,8 @@ final class Reader {
                 if (e instanceof EntityArrow) {
                     p.kind = Frame.ARROW;
                     p.owner = ((EntityArrow) e).shootingEntity == me ? -1 : 0;
-                } else if (e instanceof EntitySnowball) {
+                } else if (e instanceof EntitySnowball || e instanceof net.minecraft.entity.projectile.EntityFireball) {
+                    // (A fireball counts as a snowball: something thrown at the player.)
                     p.kind = Frame.SNOWBALL;
                     p.owner = 0;
                 } else {
@@ -303,9 +307,10 @@ final class Reader {
                 p.x = e.posX;
                 p.y = e.posY;
                 p.z = e.posZ;
-                p.mx = e.motionX;
-                p.my = e.motionY;
-                p.mz = e.motionZ;
+                boolean fire = e instanceof net.minecraft.entity.projectile.EntityFireball;
+                p.mx = fire ? dx : e.motionX;
+                p.my = fire ? dy : e.motionY;
+                p.mz = fire ? dz : e.motionZ;
                 f.projs.add(p);
                 continue;
             }
