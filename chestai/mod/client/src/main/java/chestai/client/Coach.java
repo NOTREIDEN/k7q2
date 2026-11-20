@@ -94,6 +94,9 @@ final class Coach {
      * off it, keeping the view on the mob, so a knock does not throw the player in. NaN when not.
      */
     private double rimX = Double.NaN, rimZ;
+    /** Clicks on a chest to claim it (with nothing to say it was claimed), and since when waiting at one. */
+    private int claimClicks;
+    private long waitSince = -1;
     private double apprBest = 1e9;
     private long apprAt = -1000, apprLast = -1000;
     /** Mobs whose arrows (or fireballs, snowballs) came at the player, and when last. */
@@ -716,8 +719,10 @@ final class Coach {
         List<Frame.Mob> own = new ArrayList<Frame.Mob>();
         for (Frame.Mob m : f.mobs) {
             Long gone = unreach.get(m.id), nohit = unhit.get(m.id);
-            if (hd(m.x, m.z, k.cx(), k.cz()) < 12.0 && Math.abs(m.y - k.y) <= 8.0 && (gone == null || gone <= t || reach(f, m) <= REACH)
-                    && (nohit == null || nohit <= t)) {
+            // By its chest, or one that came out of it wherever it is now (knocked away, after the player).
+            boolean of = (hd(m.x, m.z, k.cx(), k.cz()) < 12.0 && Math.abs(m.y - k.y) <= 8.0)
+                || (mem.waveMobOf(m.id, k) && hd(m.x, m.z, f.x, f.z) < 30.0 && Math.abs(m.y - f.y) <= 10.0);
+            if (of && (gone == null || gone <= t || reach(f, m) <= REACH) && (nohit == null || nohit <= t)) {
                 own.add(m);
             }
         }
@@ -1046,6 +1051,7 @@ final class Coach {
         a[8] = 0;
         if (mode != CLAIM) {
             claimSince = -1;
+            claimClicks = 0;
         }
         lastMode = mode;
         mode = NONE;
@@ -1477,6 +1483,14 @@ final class Coach {
                     if (claimSince < 0) {
                         claimSince = t;
                     }
+                    if (k.guessed && k.claimTicks > 60 && claimClicks > 20) {
+                        // No hologram to say it was claimed: clicked on a while, taken as done (the next
+                        // wave as far off as its hologram said last time).
+                        mem.claimedGuess(k, t);
+                        claimClicks = 0;
+                        hasGoal = false;
+                        goalAt = -1000;
+                    }
                     if (++k.claimTicks > 600) {
                         // Thirty seconds at it and no wave: left aside for a minute.
                         k.claimTicks = 0;
@@ -1510,6 +1524,9 @@ final class Coach {
                         }
                     }
                     a[7] = heal == HEAL_NONE && !pilot.using ? 1 : a[7];
+                    if (a[7] == 1 && f.pickChest >= 0) {
+                        claimClicks++;
+                    }
                     if (tried > 240) {
                         claimSince = -1;
                     }
@@ -1534,6 +1551,16 @@ final class Coach {
                     mode = WAIT;
                     evade = shooter != null;
                     aim(k.cx(), k.cy() + 0.5, k.cz());
+                    if (lastMode != WAIT || waitSince < 0) {
+                        waitSince = t;
+                    }
+                    if (k.guessed && t - waitSince > 300) {
+                        // Waited for a wave on a guess (no hologram): not yet, other chests meanwhile.
+                        mem.claimedGuess(k, t);
+                        waitSince = -1;
+                        hasGoal = false;
+                        goalAt = -1000;
+                    }
                 } else {
                     mode = k.seen ? TRAVEL : EXPLORE;
                     go(f, standX, k.y, standZ, 1.5);

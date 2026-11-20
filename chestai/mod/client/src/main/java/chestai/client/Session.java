@@ -231,7 +231,12 @@ public final class Session {
             double dx = p.getX() + 0.5 - f.x, dz = p.getZ() + 0.5 - f.z;
             if (dx * dx + dz * dz < 10.0 * 10.0 && Math.abs(p.getY() - f.y) < 8.0) {
                 e.setValue(e.getValue() + 1);
-                if (e.getValue() > 60) {
+                if (e.getValue() > 60 && f.tick - mem.holoWorkAt > 6000) {
+                    // No farm hologram read anywhere for five minutes: the server may not be showing them,
+                    // so not taken off for good (a wave from it says it is one); other chests for a minute.
+                    mem.chests.get(ci).skipUntil = f.tick + 1200;
+                    e.setValue(0);
+                } else if (e.getValue() > 60) {
                     notFarm.add(e.getKey());
                     mem.chests.remove(ci);
                     it.remove();

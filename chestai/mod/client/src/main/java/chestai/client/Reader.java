@@ -45,6 +45,38 @@ import chestai.core.Pilot;
 final class Reader {
     /** How far under a hologram its chest may be. */
     private static final int HOLO_DEPTH = 8;
+    /** -Dchestai.holo.off=true: no hologram read, as on a server that does not show them (for the arena). */
+    private static final boolean HOLO_OFF = Boolean.getBoolean("chestai.holo.off");
+
+    /**
+     * Whether this entity can be a line of a hologram: a named stand, or a named invisible thing of
+     * the server's (some put the text on those), alone or stacked on others of the same (lines a
+     * plugin keeps one on another), not on or under a mob or a player (that is the mob's own name).
+     */
+    static boolean holoLine(Entity e) {
+        if (HOLO_OFF || !e.hasCustomName() || e instanceof EntityPlayer) {
+            return false;
+        }
+        if (!(e instanceof EntityArmorStand) && !e.isInvisible()) {
+            return false;
+        }
+        for (Entity o = e.ridingEntity; o != null; o = o.ridingEntity) {
+            if (carries(o)) {
+                return false;
+            }
+        }
+        for (Entity o = e.riddenByEntity; o != null; o = o.riddenByEntity) {
+            if (carries(o)) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    /** A mob or player under or on a named thing: the name is theirs, no hologram's. */
+    private static boolean carries(Entity o) {
+        return o instanceof EntityPlayer || (o instanceof EntityLivingBase && !(o instanceof EntityArmorStand) && !o.isInvisible());
+    }
 
     private Reader() {
     }
@@ -201,7 +233,7 @@ final class Reader {
         Map<Long, List<Entity>> cols = new HashMap<Long, List<Entity>>();
         Map<Long, BlockPos> colChest = new HashMap<Long, BlockPos>();
         for (Entity e : all) {
-            if (!(e instanceof EntityArmorStand) || !e.hasCustomName() || e.ridingEntity != null || e.riddenByEntity != null) {
+            if (!holoLine(e)) {
                 continue;
             }
             double mx = e.posX - e.lastTickPosX, my = e.posY - e.lastTickPosY, mz = e.posZ - e.lastTickPosZ;
@@ -390,7 +422,7 @@ final class Reader {
     /** A stand kept on a living thing (a mob's name over its head). */
     static boolean onLiving(List<Entity> all, Entity stand) {
         for (Entity o : all) {
-            if (o == stand || !(o instanceof EntityLivingBase) || o instanceof EntityArmorStand || o instanceof EntityPlayer) {
+            if (o == stand || !(o instanceof EntityLivingBase) || o instanceof EntityArmorStand || o instanceof EntityPlayer || o.isInvisible()) {
                 continue;
             }
             double dx = o.posX - stand.posX, dz = o.posZ - stand.posZ, dy = stand.posY - o.posY;
@@ -414,7 +446,7 @@ final class Reader {
         java.util.Set<String> seen = new java.util.HashSet<String>();
         for (Object o : new ArrayList<Object>(w.loadedEntityList)) {
             Entity e = (Entity) o;
-            if (!(e instanceof EntityArmorStand) || !e.hasCustomName() || e.getDistanceToEntity(me) > 48) {
+            if (!(holoLine(e) || (e instanceof EntityArmorStand && e.hasCustomName())) || e.getDistanceToEntity(me) > 48) {
                 continue;
             }
             String t = HoloText.plain(e.getCustomNameTag());
