@@ -33,9 +33,9 @@ import chestai.core.Pilot;
  * look down for a potion or up for the bow).
  */
 final class Coach {
-    static final int NONE = 0, FIGHT = 1, WAIT = 2, CLAIM = 3, GUARD = 4, TRAVEL = 5, APPROACH = 6, EXPLORE = 7, ESCAPE = 8;
+    static final int NONE = 0, FIGHT = 1, WAIT = 2, CLAIM = 3, GUARD = 4, TRAVEL = 5, APPROACH = 6, EXPLORE = 7, ESCAPE = 8, RETREAT = 9;
     static final int HEAL_NONE = 0, HEAL_POTION = 1, HEAL_APPLE = 2;
-    private static final String[] NAMES = {"quieto", "pelea", "espera", "reclamo", "guardia", "viaje", "acercarse", "explorar", "escapar"};
+    private static final String[] NAMES = {"quieto", "pelea", "espera", "reclamo", "guardia", "viaje", "acercarse", "explorar", "escapar", "retirada"};
 
     /** A mob this close is fought; with a wave going on by the player, any of its mobs. */
     private static final double FIGHT_R = 12.0, WAVE_R = 24.0;
@@ -68,6 +68,24 @@ final class Coach {
     private int hitN;
     private boolean pressed;
     private static final boolean ADAPT = !"false".equals(System.getProperty("chestai.fight.adapt"));
+    /**
+     * Out of the fight to live: health low with nothing left to heal it (no potion, no apple), very
+     * low with or without, or going fast. Away from the mobs to a spot twenty blocks off, eating
+     * there, until health is back (or for a while, when nothing can bring it back), then on again.
+     */
+    private static final boolean RETREAT_ON = !"false".equals(System.getProperty("chestai.retreat"));
+    /**
+     * Mobs gone for that the player got no nearer to in eight seconds (up on a cliff, down a pit,
+     * across water it cannot get out of): left alone for half a minute unless they come in reach.
+     */
+    private final java.util.Map<Integer, Long> unreach = new java.util.HashMap<Integer, Long>();
+    private double apprBest = 1e9;
+    private long apprAt = -1000, apprLast = -1000;
+    private final double[] lifeAgo = new double[40];
+    private boolean lifeSet;
+    private long retreatUntil = -1, retreatSpotAt = -10000;
+    private double retreatExit;
+    private int[] retreatSpot;
 
     private final Random rnd = new Random();
     private final Settings s;
@@ -225,6 +243,10 @@ final class Coach {
     /** How good a chest is to go to now: lower is better. */
     private double score(Frame f, Memory mem, int ci) {
         Memory.Known k = mem.chests.get(ci);
+        if (f.tick < k.skipUntil) {
+            // Tried long and not claimed (no chest block to click, walled in): another for now.
+            return 1e9;
+        }
         for (double[] r : f.rivals) {
             if (hd(r[0], r[2], k.cx(), k.cz()) <= 14.0) {
                 // Someone else's to farm.
@@ -599,6 +621,68 @@ final class Coach {
     }
 
     /** A drop of more than two blocks (or water) just ahead, where the player looks: no walking on blindly into it. */
+    /** How far the nearest mob is from this spot, across. */
+    private static double mobNear(Frame f, int[] at) {
+        double d = 1e9;
+        for (Frame.Mob m : f.mobs) {
+            d = Math.min(d, hd(m.x, m.z, at[0] + 0.5, at[2] + 0.5));
+        }
+        return d;
+    }
+
+    /** A height a player can stand at in column (x, z), the nearest to y0 within eight, or MIN_VALUE. */
+    private int standY(int x, int z, int y0) {
+        for (int d = 0; d <= 8; d++) {
+            if (planner.stand(x, y0 + d, z)) {
+                return y0 + d;
+            }
+            if (d > 0 && planner.stand(x, y0 - d, z)) {
+                return y0 - d;
+            }
+        }
+        return Integer.MIN_VALUE;
+    }
+
+    /**
+     * Where to get away to: of spots 9, 14 and 20 blocks off all round, the one
+     * farthest from every mob, away from where they are, not much up or down,
+     * dry. Or null.
+     */
+    private int[] retreatSpot(Frame f) {
+        double wx = 0.0, wz = 0.0;
+        for (Frame.Mob m : f.mobs) {
+            double d = Math.max(hd(m.x, m.z, f.x, f.z), 1.0);
+            if (d < 30.0) {
+                wx += (m.x - f.x) / (d * d);
+                wz += (m.z - f.z) / (d * d);
+            }
+        }
+        boolean side = wx * wx + wz * wz > 1e-9;
+        double away = Math.atan2(-wz, -wx);
+        int y0 = (int) Math.floor(f.y + 0.01);
+        planner.now(f.tick);
+        int[] best = null;
+        double bs = -1e9;
+        for (int i = 0; i < 16; i++) {
+            double a = i * Math.PI / 8.0;
+            for (double r : new double[] {20.0, 14.0, 9.0}) {
+                int x = (int) Math.floor(f.x + Math.cos(a) * r), z = (int) Math.floor(f.z + Math.sin(a) * r);
+                int y = standY(x, z, y0);
+                if (y == Integer.MIN_VALUE) {
+                    continue;
+                }
+                int[] at = {x, y, z};
+                double sc = Math.min(mobNear(f, at), 30.0) + r * 0.3 - Math.abs(y - y0) * 0.6
+                    + (side ? Math.cos(a - away) * 4.0 : 0.0) - (planner.water(x, y, z) || planner.water(x, y - 1, z) ? 6.0 : 0.0);
+                if (sc > bs) {
+                    bs = sc;
+                    best = at;
+                }
+            }
+        }
+        return best;
+    }
+
     private boolean ledge(Frame f) {
         double yr = Math.toRadians(f.yaw);
         int x = (int) Math.floor(f.x - Math.sin(yr) * 0.9), z = (int) Math.floor(f.z + Math.cos(yr) * 0.9), y = (int) Math.floor(f.y + 0.01);
@@ -690,6 +774,10 @@ final class Coach {
             if (d < 8.0) {
                 close++;
             }
+            Long gone = unreach.get(m.id);
+            if (gone != null && gone > t && reach(f, m) > REACH + 1.0) {
+                continue;
+            }
             if (d <= engage && Math.abs(m.y - f.y) <= 8.0) {
                 cand.add(m);
             }
@@ -769,6 +857,42 @@ final class Coach {
             lay.gapples = lay.foodCount;
         }
 
+        // 1b. Out of the fight to live: low with nothing left to heal (no potion, no apple), very low
+        // anyway, or going fast with no potion. Until health is back (food at 18 or more brings it
+        // back on its own), or for twenty seconds when nothing can.
+        double life = hp + f.absorption;
+        int li = (int) (t % lifeAgo.length);
+        if (!lifeSet) {
+            java.util.Arrays.fill(lifeAgo, life);
+            lifeSet = true;
+        }
+        double lifeBefore = lifeAgo[li];
+        lifeAgo[li] = life;
+        boolean threat = nearest < 16.0 || mem.sinceHurt < 40;
+        boolean regen = f.food >= 18 || haveFood || haveApple;
+        if (RETREAT_ON && t >= retreatUntil && threat) {
+            double exit = 0.0;
+            if (!havePot && !haveApple && life <= 11.0) {
+                exit = 17.0;
+            } else if (life <= 6.0 || (!havePot && life <= 12.0 && lifeBefore - life >= 6.0)) {
+                exit = 14.0;
+            }
+            if (exit > 0.0) {
+                retreatExit = exit;
+                retreatUntil = t + (regen ? 1800 : 400);
+                retreatSpot = null;
+            }
+        }
+        if (t < retreatUntil && life >= retreatExit) {
+            retreatUntil = -1;
+        }
+        boolean retreating = t < retreatUntil;
+        for (Memory.Known k : mem.chests) {
+            if (k.state != Frame.CLAIMABLE) {
+                k.claimTicks = 0;
+            }
+        }
+
         // 2. Out of what hurts with no mob doing it: water over the head, a wall, lava, fire.
         if (mem.sinceHurt == 0 && t - lastBoost > 40) {
             // (Its own Punch arrow is no harm from nowhere.)
@@ -815,6 +939,32 @@ final class Coach {
                 go(f, dry[0] + 0.5, dry[1], dry[2] + 0.5, 0.6);
             } else {
                 escapeUntil = -1;
+            }
+        } else if (retreating) {
+            mode = RETREAT;
+            boosting = false;
+            boostFrom = -1;
+            target = -1;
+            boolean there = retreatSpot != null && hd(retreatSpot[0] + 0.5, retreatSpot[2] + 0.5, f.x, f.z) < 2.0;
+            if (retreatSpot == null || mobNear(f, retreatSpot) < 8.0 || (there && nearest < 12.0) || (!there && t - retreatSpotAt > 300)) {
+                retreatSpot = retreatSpot(f);
+                retreatSpotAt = t;
+                there = false;
+            }
+            if (retreatSpot != null && !there) {
+                go(f, retreatSpot[0] + 0.5, retreatSpot[1], retreatSpot[2] + 0.5, 1.5);
+            } else if (retreatSpot == null) {
+                // No spot known to stand at: straight away from the nearest mob.
+                Frame.Mob nm = null;
+                for (Frame.Mob m : f.mobs) {
+                    if (nm == null || hd(m.x, m.z, f.x, f.z) < hd(nm.x, nm.z, f.x, f.z)) {
+                        nm = m;
+                    }
+                }
+                if (nm != null) {
+                    double d = Math.max(hd(nm.x, nm.z, f.x, f.z), 0.5);
+                    go(f, f.x + (f.x - nm.x) / d * 12.0, f.y, f.z + (f.z - nm.z) / d * 12.0, 2.0);
+                }
             }
         } else if (!cand.isEmpty()) {
             // 3. Mobs.
@@ -871,6 +1021,24 @@ final class Coach {
                 // None in reach: straight at the group, without swinging.
                 mode = APPROACH;
                 target = -1;
+                double dg = hd(gc[0], gc[2], f.x, f.z) + Math.abs(gc[1] - f.y);
+                if (t - apprLast > 20 || dg < apprBest - 1.0) {
+                    apprBest = dg;
+                    apprAt = t;
+                }
+                apprLast = t;
+                if (t - apprAt > 160) {
+                    if (unreach.size() > 64) {
+                        unreach.values().removeIf(u -> u <= t);
+                    }
+                    for (Frame.Mob m : cand) {
+                        if (hd(m.x, m.z, gc[0], gc[2]) < 5.0) {
+                            unreach.put(m.id, t + 600);
+                        }
+                    }
+                    apprBest = 1e9;
+                    apprAt = t;
+                }
                 go(f, gc[0], gc[1], gc[2], 1.5);
                 aim(tx, gc[1] + 1.0, tz);
             }
@@ -894,6 +1062,13 @@ final class Coach {
                     mode = CLAIM;
                     if (claimSince < 0) {
                         claimSince = t;
+                    }
+                    if (++k.claimTicks > 600) {
+                        // Thirty seconds at it and no wave: left aside for a minute.
+                        k.claimTicks = 0;
+                        k.skipUntil = t + 1200;
+                        hasGoal = false;
+                        goalAt = -1000;
                     }
                     long tried = t - claimSince;
                     // A point of the chest a click reaches from here (nothing in between, not even tall
@@ -976,7 +1151,7 @@ final class Coach {
      */
     private void trapped(Frame f) {
         long t = f.tick;
-        boolean busy = mode == WAIT || mode == CLAIM || mode == GUARD || mode == ESCAPE || heal != HEAL_NONE || t - objAt > 2;
+        boolean busy = mode == WAIT || mode == CLAIM || mode == GUARD || mode == ESCAPE || mode == RETREAT || heal != HEAL_NONE || t - objAt > 2;
         if (busy || hd(trapX, trapZ, f.x, f.z) > 4.0) {
             trapX = f.x;
             trapZ = f.z;

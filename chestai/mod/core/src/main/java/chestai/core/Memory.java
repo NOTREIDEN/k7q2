@@ -16,6 +16,9 @@ public final class Memory {
         public long tick;
         public int state, secs;
         public long activeSeenAt;
+        /** Ticks spent trying to claim it since it was last not claimable; left aside until skipUntil when that runs long. */
+        public int claimTicks;
+        public long skipUntil = -1;
 
         public Known(int x, int y, int z) {
             this.x = x;

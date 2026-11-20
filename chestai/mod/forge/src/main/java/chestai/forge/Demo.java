@@ -499,6 +499,8 @@ final class Demo {
     }
 
     private int obstacles;
+    /** Where the obstacles stand (x, z). */
+    private final List<int[]> blocks = new ArrayList<int[]>();
 
     private static boolean groundLike(Material m) {
         return m == Material.grass || m == Material.ground || m == Material.sand || m == Material.rock || m == Material.clay
@@ -554,16 +556,45 @@ final class Demo {
         return c;
     }
 
-    /** A wall, a house or a fence across the way at (ox, oz), square to (ux, uz). */
-    private void obstacle(WorldServer w, java.util.Random r, int ox, int oz, double ux, double uz) {
+    /** Whether column (x, z) is within two blocks of a chest (an obstacle there would bury or wall it in). */
+    private boolean byChest(int x, int z) {
+        for (Chest c : chests) {
+            if (Math.abs(c.pos.getX() - x) <= 2 && Math.abs(c.pos.getZ() - z) <= 2) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /** How far the nearest chest is from (x, z), across. */
+    private double chestGap(double x, double z) {
+        double d = 1e9;
+        for (Chest c : chests) {
+            d = Math.min(d, Math.hypot(c.pos.getX() + 0.5 - x, c.pos.getZ() + 0.5 - z));
+        }
+        return d;
+    }
+
+    /**
+     * A wall, a house or a fence across the way at (ox, oz), square to (ux, uz);
+     * with build false only the random numbers it would take (the rest of the
+     * arena stays as it was), none of it near a chest.
+     */
+    private void obstacle(WorldServer w, java.util.Random r, int ox, int oz, double ux, double uz, boolean build) {
         int kind = r.nextInt(3);
         if (kind == 1) {
             // A house of planks, 7 by 7 with a roof and one doorway.
             int base = top(w, ox, oz);
             int door = r.nextInt(4);
+            if (!build) {
+                return;
+            }
             for (int dx = -3; dx <= 3; dx++) {
                 for (int dz = -3; dz <= 3; dz++) {
                     int x = ox + dx, z = oz + dz;
+                    if (byChest(x, z)) {
+                        continue;
+                    }
                     boolean edge = Math.abs(dx) == 3 || Math.abs(dz) == 3;
                     if (edge) {
                         boolean gap = (door == 0 && dx == 3 && dz == 0) || (door == 1 && dx == -3 && dz == 0)
@@ -580,9 +611,15 @@ final class Demo {
             }
         } else {
             // A wall of stone 3 high, or a fence, 11 long, square to the way.
+            if (!build) {
+                return;
+            }
             double px = -uz, pz = ux;
             for (int i = -5; i <= 5; i++) {
                 int x = (int) Math.floor(ox + px * i), z = (int) Math.floor(oz + pz * i);
+                if (byChest(x, z)) {
+                    continue;
+                }
                 int b = top(w, x, z);
                 if (kind == 0) {
                     fill(w, x, z, b, b + 2, Blocks.cobblestone.getDefaultState());
@@ -685,13 +722,31 @@ final class Demo {
                 continue;
             }
             double f = 0.4 + r.nextDouble() * 0.3;
-            obstacle(w, r, (int) Math.floor(x0 + dx * f), (int) Math.floor(z0 + dz * f), dx / len, dz / len);
+            // Not on top of another chest: a little nearer or farther along the way, or none.
+            double use = -1.0;
+            for (double g : new double[] {f, f - 0.1, f + 0.1, f - 0.2, f + 0.2}) {
+                if (g >= 0.25 && g <= 0.85 && chestGap(x0 + dx * g, z0 + dz * g) >= 8.0) {
+                    use = g;
+                    break;
+                }
+            }
+            double g = use < 0.0 ? f : use;
+            obstacle(w, r, (int) Math.floor(x0 + dx * g), (int) Math.floor(z0 + dz * g), dx / len, dz / len, use >= 0.0);
+            if (use >= 0.0) {
+                blocks.add(new int[] {(int) Math.floor(x0 + dx * g), (int) Math.floor(z0 + dz * g)});
+            } else {
+                System.out.println("ARENA obstacle left out: no room away from the chests");
+            }
         }
         // A chest with no hologram: no farm chest, to be looked at once and then left.
         for (int tries = 0; tries < 60; tries++) {
             double a = r.nextDouble() * Math.PI * 2.0;
             BlockPos at = ground(w, x0 + (int) Math.round(Math.cos(a) * 20.0), z0 + (int) Math.round(Math.sin(a) * 20.0));
-            if (at != null) {
+            boolean clear = true;
+            for (int[] b : blocks) {
+                clear &= at == null || Math.hypot(b[0] - at.getX(), b[1] - at.getZ()) >= 7.0;
+            }
+            if (at != null && clear) {
                 chestAt(w, at, false);
                 System.out.println("ARENA plain chest at " + at.getX() + " " + at.getY() + " " + at.getZ());
                 break;
