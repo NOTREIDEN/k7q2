@@ -40,7 +40,7 @@ final class Coach {
     /** A mob this close is fought; with a wave going on by the player, any of its mobs. */
     private static final double FIGHT_R = 12.0, WAVE_R = 24.0;
     /** A chest whose wave is on, this close, is not left until its mobs are dead. */
-    private static final double LOCK_R = 16.0;
+    private static final double LOCK_R = 40.0;
     /** Reach of the sword, from the eyes to the mob's box. */
     private static final double REACH = 3.0;
     /** Two chests this close: stand between them, so that both waves come. */
@@ -81,6 +81,14 @@ final class Coach {
     private final java.util.Map<Integer, Long> unreach = new java.util.HashMap<Integer, Long>();
     private double apprBest = 1e9;
     private long apprAt = -1000, apprLast = -1000;
+    /** Mobs whose arrows (or fireballs, snowballs) came at the player, and when last. */
+    private final java.util.Map<Integer, Long> shotAt = new java.util.HashMap<Integer, Long>();
+    /** A mob shooting at the player now (the nearest), and whether it is fought; strafing meanwhile. */
+    private Frame.Mob shooter;
+    private boolean evade, coverOn;
+    private int evadeDir = 1;
+    private long evadeNext, coverAt = -1000;
+    private int[] cover;
     private final double[] lifeAgo = new double[40];
     private boolean lifeSet;
     private long retreatUntil = -1, retreatSpotAt = -10000;
@@ -343,14 +351,25 @@ final class Coach {
         return best;
     }
 
-    /** The chest with a wave on close by, which is not left until its mobs are dead, or -1. */
+    /**
+     * The chest with a wave on, which is not left until its mobs are dead, or -1. Of several (one
+     * set off on the way to another), the one whose wave came first: its time runs out first, so
+     * its mobs are finished first, then the next one's. Two that came within a second: the nearer.
+     */
     private static int waveLock(Frame f, Memory mem) {
         int lock = -1;
-        double ld = LOCK_R;
+        long first = Long.MAX_VALUE;
+        double ld = 1e9;
         for (int i = 0; i < mem.chests.size(); i++) {
             Memory.Known k = mem.chests.get(i);
             double d = hd(k.cx(), k.cz(), f.x, f.z);
-            if (k.seen && k.state == Frame.ACTIVE && f.tick - k.tick < 200 && d < ld) {
+            if (!k.seen || k.state != Frame.ACTIVE || f.tick - k.tick >= 200 || d >= LOCK_R) {
+                continue;
+            }
+            boolean sooner = lock < 0 || k.activeSeenAt < first - 20;
+            boolean same = lock >= 0 && Math.abs(k.activeSeenAt - first) <= 20 && d < ld;
+            if (sooner || same) {
+                first = Math.min(first, k.activeSeenAt);
                 ld = d;
                 lock = i;
             }
@@ -383,8 +402,9 @@ final class Coach {
         planner.now(f.tick);
         if (stuck) {
             movedAt = f.tick;
-            if (partial) {
+            if (partial && mode != APPROACH && mode != FIGHT) {
                 // Stuck where the way ends short of the goal: a pit, a ravine, a pond with high banks.
+                // (Not after mobs: those it cannot get to are left alone instead, no pearl after them.)
                 deadEnds = f.tick - deadAt < 600 ? deadEnds + 1 : 1;
                 deadAt = f.tick;
             }
@@ -621,6 +641,95 @@ final class Coach {
     }
 
     /** A drop of more than two blocks (or water) just ahead, where the player looks: no walking on blindly into it. */
+    /**
+     * The mobs to fight: with a wave on, those by its chest (twelve blocks: its archers too), or none
+     * while they are out of sight and the chest is far (back to it first); else all close by.
+     */
+    private List<Frame.Mob> focus(Frame f, Memory mem, int lock, List<Frame.Mob> cand, long t) {
+        if (lock < 0) {
+            return cand;
+        }
+        Memory.Known k = mem.chests.get(lock);
+        List<Frame.Mob> own = new ArrayList<Frame.Mob>();
+        for (Frame.Mob m : f.mobs) {
+            Long gone = unreach.get(m.id);
+            if (hd(m.x, m.z, k.cx(), k.cz()) < 12.0 && Math.abs(m.y - k.y) <= 8.0 && (gone == null || gone <= t || reach(f, m) <= REACH + 1.0)) {
+                own.add(m);
+            }
+        }
+        if (!own.isEmpty()) {
+            if (shooter != null && cand.contains(shooter) && !own.contains(shooter) && hd(shooter.x, shooter.z, f.x, f.z) < 8.0) {
+                own.add(shooter);
+            }
+            return own;
+        }
+        return hd(k.cx(), k.cz(), f.x, f.z) > 12.0 ? own : cand;
+    }
+
+    /**
+     * A spot within six blocks of (cx, cz) where the one shooting cannot see the player (a block
+     * between its eyes and the body), the nearest; kept two seconds. Or null.
+     */
+    private int[] cover(Frame f, double cx, double cz, long t) {
+        if (cover != null && t - coverAt < 40 && hd(cover[0] + 0.5, cover[2] + 0.5, cx, cz) < 7.0) {
+            return cover;
+        }
+        coverAt = t;
+        cover = null;
+        Frame.Mob sh = shooter;
+        double ex = sh.x, ey = sh.y + Math.max(sh.h, 1.0) * 0.85, ez = sh.z;
+        int y0 = (int) Math.floor(f.y + 0.01), x0 = (int) Math.floor(cx), z0 = (int) Math.floor(cz);
+        double bd = 1e9;
+        for (int dx = -6; dx <= 6; dx++) {
+            for (int dz = -6; dz <= 6; dz++) {
+                if (dx * dx + dz * dz > 36) {
+                    continue;
+                }
+                int x = x0 + dx, z = z0 + dz;
+                int y = standY(x, z, y0);
+                if (y == Integer.MIN_VALUE || Math.abs(y - y0) > 2 || planner.water(x, y, z)) {
+                    continue;
+                }
+                double d = hd(x + 0.5, z + 0.5, f.x, f.z);
+                if (d >= bd) {
+                    continue;
+                }
+                // Hidden at the head and at the chest both.
+                boolean hidden = !planner.see(ex, ey, ez, x + 0.5, y + 1.5, z + 0.5, Integer.MIN_VALUE, 0, 0)
+                    && !planner.see(ex, ey, ez, x + 0.5, y + 0.9, z + 0.5, Integer.MIN_VALUE, 0, 0);
+                if (hidden && mobNear(f, new int[] {x, y, z}) > 3.0) {
+                    bd = d;
+                    cover = new int[] {x, y, z};
+                }
+            }
+        }
+        return cover;
+    }
+
+    /** How near a projectile comes to the player's body in the next 25 ticks, and in how many: {near, when}. */
+    private static double[] closest(Frame f, Frame.Proj p) {
+        double vx = p.mx, vy = p.my, vz = p.mz;
+        if (vx * vx + vy * vy + vz * vz < 0.09) {
+            return new double[] {1e9, -1};
+        }
+        double x = p.x, y = p.y, z = p.z, cy = f.y + 0.9, near = 1e9;
+        int when = -1;
+        for (int i = 1; i <= 25; i++) {
+            x += vx;
+            y += vy;
+            z += vz;
+            vx *= 0.99;
+            vy = vy * 0.99 - 0.05;
+            vz *= 0.99;
+            double dx = x - f.x, dy = (y - cy) * 0.6, dz = z - f.z, d = Math.sqrt(dx * dx + dy * dy + dz * dz);
+            if (d < near) {
+                near = d;
+                when = i;
+            }
+        }
+        return new double[] {near, when};
+    }
+
     /** How far the nearest mob is from this spot, across. */
     private static double mobNear(Frame f, int[] at) {
         double d = 1e9;
@@ -766,6 +875,7 @@ final class Coach {
         double hp = f.hp;
 
         int lock = waveLock(f, mem);
+        List<Frame.Mob> focus = null;
         double engage = lock >= 0 ? WAVE_R : FIGHT_R;
         List<Frame.Mob> cand = new ArrayList<Frame.Mob>();
         int close = 0;
@@ -780,6 +890,37 @@ final class Coach {
             }
             if (d <= engage && Math.abs(m.y - f.y) <= 8.0) {
                 cand.add(m);
+            }
+        }
+        // Who is shooting at the player: a projectile of a mob's that comes within two blocks.
+        for (Frame.Proj p : f.projs) {
+            if (p.owner >= 0 && (p.kind == Frame.ARROW || p.kind == Frame.SNOWBALL)) {
+                double[] c = closest(f, p);
+                if (c[0] < 2.0 && c[1] >= 0 && c[1] <= 25) {
+                    shotAt.put(p.owner, t);
+                }
+            }
+        }
+        if (shotAt.size() > 64) {
+            shotAt.values().removeIf(u -> t - u > 200);
+        }
+        shooter = null;
+        evade = false;
+        coverOn = false;
+        double sd = 1e9;
+        for (Frame.Mob m : f.mobs) {
+            Long st = shotAt.get(m.id);
+            double d = hd(m.x, m.z, f.x, f.z);
+            if (st != null && t - st <= 80 && d < 30.0 && d < sd) {
+                sd = d;
+                shooter = m;
+            }
+        }
+        if (shooter != null && sd <= 20.0 && Math.abs(shooter.y - f.y) <= 8.0 && !cand.contains(shooter)) {
+            Long gone = unreach.get(shooter.id);
+            if (gone == null || gone <= t) {
+                // One shooting from out there is gone for too, not only the ones close by.
+                cand.add(shooter);
             }
         }
         boolean eating = pilot.using && pilot.slot == Pilot.GAPPLE;
@@ -942,6 +1083,7 @@ final class Coach {
             }
         } else if (retreating) {
             mode = RETREAT;
+            evade = shooter != null;
             boosting = false;
             boostFrom = -1;
             target = -1;
@@ -966,12 +1108,16 @@ final class Coach {
                     go(f, f.x + (f.x - nm.x) / d * 12.0, f.y, f.z + (f.z - nm.z) / d * 12.0, 2.0);
                 }
             }
-        } else if (!cand.isEmpty()) {
-            // 3. Mobs.
+        } else if (!(focus = focus(f, mem, lock, cand, t)).isEmpty()) {
+            // 3. Mobs: those of the wave that came first, or any about.
             boosting = false;
             boostFrom = -1;
             Frame.Mob tgt = null;
             double bs = 1e9, tgtY = Double.NaN;
+            int melee = 0;
+            for (Frame.Mob m : cand) {
+                melee += m != shooter && hd(m.x, m.z, f.x, f.z) < 4.0 ? 1 : 0;
+            }
             for (Frame.Mob m : cand) {
                 double r = reach(f, m);
                 if (r > REACH) {
@@ -980,15 +1126,21 @@ final class Coach {
                 // One just hit takes no harm for half a second: another one meanwhile. One behind a
                 // block or tall grass, where a click would stop, only if there is no other.
                 double vy = seenAt(f, m);
+                // The first wave's own before the others; one shooting before one that is not.
                 double sc = r + Math.abs(yawTo(f, m.x, m.z)) / 30.0 + (m.hurtTime > 2 ? 2.0 : 0.0) + (m.id == target && m.hurtTime <= 2 ? -0.8 : 0.0)
-                    + (vy != vy ? 2.5 : 0.0);
+                    + (vy != vy ? 2.5 : 0.0) + (focus.contains(m) ? 0.0 : 2.0) + (m == shooter ? -1.0 : 0.0);
                 if (sc < bs) {
                     bs = sc;
                     tgt = m;
                     tgtY = vy;
                 }
             }
-            double[] gc = groupCenter(f, cand);
+            double[] gc = groupCenter(f, focus);
+            if (shooter != null && focus.contains(shooter) && melee == 0) {
+                // Only arrows coming, nobody at the sword: straight at the one shooting, strafing.
+                gc = new double[] {shooter.x, shooter.y, shooter.z};
+            }
+            evade = shooter != null;
             objective(gc[0], gc[1], gc[2], t);
             if (tgt != null) {
                 mode = FIGHT;
@@ -1011,8 +1163,9 @@ final class Coach {
                         a[6] = 1;
                     }
                 }
-                fightJump = s.fightJump && !pressed && f.onGround && !inWater(f);
-                fightWalk = s.fightJump && !pressed && !Boolean.getBoolean("chestai.fight.sprint");
+                // Shot at: sprinting and strafing, not hopping on the spot.
+                fightJump = s.fightJump && !pressed && shooter == null && f.onGround && !inWater(f);
+                fightWalk = s.fightJump && !pressed && shooter == null && !Boolean.getBoolean("chestai.fight.sprint");
                 if (hd(gc[0], gc[2], f.x, f.z) > 1.8 && hd(tgt.x, tgt.z, f.x, f.z) > 1.2 && !ledge(f)) {
                     move = true;
                     jumpUp = (f.collidedH && f.onGround) || inWater(f);
@@ -1031,7 +1184,7 @@ final class Coach {
                     if (unreach.size() > 64) {
                         unreach.values().removeIf(u -> u <= t);
                     }
-                    for (Frame.Mob m : cand) {
+                    for (Frame.Mob m : focus) {
                         if (hd(m.x, m.z, gc[0], gc[2]) < 5.0) {
                             unreach.put(m.id, t + 600);
                         }
@@ -1046,14 +1199,24 @@ final class Coach {
             // The wave's mobs are out of sight for now: back to its chest and wait there.
             mode = GUARD;
             Memory.Known k = mem.chests.get(lock);
-            if (hd(k.cx(), k.cz(), f.x, f.z) > (lastMode == GUARD ? 4.5 : 3.0)) {
+            int[] cv = shooter != null ? cover(f, k.cx(), k.cz(), t) : null;
+            if (cv != null) {
+                coverOn = true;
+                if (hd(cv[0] + 0.5, cv[2] + 0.5, f.x, f.z) > 0.6) {
+                    go(f, cv[0] + 0.5, cv[1], cv[2] + 0.5, 0.4);
+                } else {
+                    aim(k.cx(), eyeY(f), k.cz());
+                }
+            } else if (hd(k.cx(), k.cz(), f.x, f.z) > (lastMode == GUARD ? 4.5 : 3.0)) {
                 go(f, k.cx(), k.y, k.cz(), 2.0);
             } else {
                 aim(k.cx(), eyeY(f), k.cz());
             }
+            evade = shooter != null && cv == null;
         } else {
             // 4. Chests.
             int g = chooseGoal(f, mem);
+            int[] cv;
             if (g >= 0) {
                 Memory.Known k = mem.chests.get(g);
                 double dc = hd(k.cx(), k.cz(), f.x, f.z);
@@ -1102,8 +1265,18 @@ final class Coach {
                 } else if (k.seen && k.state == Frame.CLAIMABLE) {
                     mode = TRAVEL;
                     go(f, k.cx(), k.y, k.cz(), 2.0);
+                } else if (shooter != null && ds < 8.0 && (cv = cover(f, standX, standZ, t)) != null) {
+                    // Arrows from one that cannot be got at: the wait out of its sight, behind something.
+                    mode = WAIT;
+                    coverOn = true;
+                    if (hd(cv[0] + 0.5, cv[2] + 0.5, f.x, f.z) > 0.6) {
+                        go(f, cv[0] + 0.5, cv[1], cv[2] + 0.5, 0.4);
+                    } else {
+                        aim(k.cx(), k.cy() + 0.5, k.cz());
+                    }
                 } else if (ds < (lastMode == WAIT ? 3.0 : 2.0)) {
                     mode = WAIT;
+                    evade = shooter != null;
                     aim(k.cx(), k.cy() + 0.5, k.cz());
                 } else {
                     mode = k.seen ? TRAVEL : EXPLORE;
@@ -1151,7 +1324,8 @@ final class Coach {
      */
     private void trapped(Frame f) {
         long t = f.tick;
-        boolean busy = mode == WAIT || mode == CLAIM || mode == GUARD || mode == ESCAPE || mode == RETREAT || heal != HEAL_NONE || t - objAt > 2;
+        boolean busy = mode == WAIT || mode == CLAIM || mode == GUARD || mode == ESCAPE || mode == RETREAT || mode == FIGHT || mode == APPROACH
+            || heal != HEAL_NONE || t - objAt > 2;
         if (busy || hd(trapX, trapZ, f.x, f.z) > 4.0) {
             trapX = f.x;
             trapZ = f.z;
@@ -1176,25 +1350,9 @@ final class Coach {
             if (p.owner < 0 || (p.kind != Frame.ARROW && p.kind != Frame.SNOWBALL)) {
                 continue;
             }
-            double vx = p.mx, vy = p.my, vz = p.mz;
-            if (vx * vx + vy * vy + vz * vz < 0.09) {
-                continue;
-            }
-            double x = p.x, y = p.y, z = p.z, cy = f.y + 0.9, near = 1e9;
-            int when = -1;
-            for (int i = 1; i <= 25; i++) {
-                x += vx;
-                y += vy;
-                z += vz;
-                vx *= 0.99;
-                vy = vy * 0.99 - 0.05;
-                vz *= 0.99;
-                double dx = x - f.x, dy = (y - cy) * 0.6, dz = z - f.z, d = Math.sqrt(dx * dx + dy * dy + dz * dz);
-                if (d < near) {
-                    near = d;
-                    when = i;
-                }
-            }
+            double[] c = closest(f, p);
+            double near = c[0];
+            int when = (int) c[1];
             if (near > 1.4 || when < 2 || when > 20) {
                 continue;
             }
@@ -1331,7 +1489,23 @@ final class Coach {
             // The head under water: up for air, whatever else goes on.
             k.jump = true;
         }
-        if (k.forward == 0 && !(mode == ESCAPE && pearlThrown) && !boosting && heal != HEAL_POTION) {
+        boolean strafing = false;
+        if (evade && heal != HEAL_POTION && !(mode == ESCAPE && pearlThrown) && !boosting && mode != CLAIM) {
+            // Shot at: never a still mark. Side to side (with the forward key, sprinting, when it
+            // goes somewhere), the side changed every half second or so, never off safe ground.
+            if (f.tick >= evadeNext) {
+                evadeDir = -evadeDir;
+                evadeNext = f.tick + 8 + rnd.nextInt(10);
+            }
+            if (!sideSafe(f, evadeDir)) {
+                evadeDir = -evadeDir;
+            }
+            if (sideSafe(f, evadeDir)) {
+                k.strafe = evadeDir;
+                strafing = true;
+            }
+        }
+        if (!strafing && k.forward == 0 && !(mode == ESCAPE && pearlThrown) && !boosting && heal != HEAL_POTION) {
             // Never quite still (an anti-AFK): every second or two a side key is tapped for a few ticks,
             // to a side where the ground is safe; the view is not turned for it.
             if (f.tick >= tapNext) {
