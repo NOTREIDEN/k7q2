@@ -23,9 +23,9 @@ jobs:
       fail-fast: false
       matrix:
         seed: [11, 22, 33, 44, 55, 66, 77, 88, 101, 202, 303, 404, 505, 606, 707, 808]
-        # base: as the mod plays. oldretreat: back from a retreat as before (at 14 counting the
-        # absorption, apples eaten while still chased). Both on the seeds plus 1000 (other ground).
-        variant: [base, oldretreat]
+        # base: as the mod plays. nobow: the same with no bow at mobs shooting from where they
+        # cannot be got to. Both on the seeds plus 1000 (other ground).
+        variant: [base, nobow]
     runs-on: ubuntu-latest
     timeout-minutes: 60
     defaults:
@@ -49,7 +49,7 @@ jobs:
         run: |
           J=""
           S=$(( ${{ matrix.seed }} + 1000 ))
-          if [ "${{ matrix.variant }}" = "oldretreat" ]; then J="-Dchestai.retreat.old=true"; fi
+          if [ "${{ matrix.variant }}" = "nobow" ]; then J="-Dchestai.bow.mobs=false"; fi
           sudo apt-get update -q
           sudo apt-get install -y -q xvfb x11-xserver-utils libgl1-mesa-dri libglx-mesa0 libxrandr2 libxcursor1 libxxf86vm1 libxi6 libxtst6 libxrender1 > /dev/null
           LIBGL_ALWAYS_SOFTWARE=1 timeout 3000 xvfb-run -a -s "-screen 0 854x480x24" gradle arena -Parena.seed=$S -Parena.seconds=900 -Parena.variant=${{ matrix.variant }} "-Parena.jvm=$J" --no-daemon --stacktrace > arena.log 2>&1 || true

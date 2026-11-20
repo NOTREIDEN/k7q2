@@ -49,6 +49,8 @@ public final class Settings {
     public double appleHitHp = 16.0;
     /** In a fight with a mob in reach: jump (critical blows on the way down) and do not sprint (no knockback far away). */
     public boolean fightJump = true;
+    /** The bow at a mob shooting from where it cannot be got to on foot (up a step, across water). */
+    public boolean bowMobs = true;
     /** Something eaten as soon as the food bar is short of full (plain food first, else a golden apple). */
     public boolean foodFull = true;
 
@@ -86,6 +88,11 @@ public final class Settings {
         + "\n"
         + "# si: en la pelea, con un mob al alcance, salta (los golpes al caer son criticos) y no sprinta (no los empuja lejos).\n"
         + "pelea_saltando=si\n";
+
+    /** The lines of the settings added after MORE4. */
+    static final String MORE5 = ""
+        + "# si: con arco y flechas, le tira con el arco a un mob que le tira flechas desde donde no se llega caminando.\n"
+        + "arco_a_mobs=si\n";
 
     /** The lines of the settings added after MORE2. */
     static final String MORE3 = ""
@@ -126,7 +133,7 @@ public final class Settings {
         + "\n"
         + "# si: anota lo que ve y hace en config/chestai/registro.txt (para revisar problemas). no: nada.\n"
         + "registro=si\n"
-        + "\n" + MORE + "\n" + MORE2 + "\n" + MORE3 + "\n" + MORE4;
+        + "\n" + MORE + "\n" + MORE2 + "\n" + MORE3 + "\n" + MORE4 + "\n" + MORE5;
 
     public static Settings parse(Properties p) {
         Settings s = new Settings();
@@ -171,6 +178,7 @@ public final class Settings {
         s.fightJump = yes(System.getProperty("chestai.fight.jump", p.getProperty("pelea_saltando")), true);
         s.foodFull = yes(p.getProperty("comida_llena"), true);
         s.bow = yes(p.getProperty("arco_punch"), true);
+        s.bowMobs = yes(System.getProperty("chestai.bow.mobs", p.getProperty("arco_a_mobs")), true);
         s.search = yes(p.getProperty("buscar_cofres"), true);
         s.searchRadius = number(p.getProperty("buscar_radio"), 160.0);
         s.map = yes(p.getProperty("mapa"), true);
@@ -226,7 +234,8 @@ public final class Settings {
         }
         String add = (old.getProperty("pocion_vida") == null ? "\n" + MORE : "") + (old.getProperty("pegar") == null ? "\n" + MORE2 : "")
             + (old.getProperty("comida_llena") == null ? "\n" + MORE3 : "")
-            + (old.getProperty("pelea_saltando") == null ? "\n" + MORE4 : "");
+            + (old.getProperty("pelea_saltando") == null ? "\n" + MORE4 : "")
+            + (old.getProperty("arco_a_mobs") == null ? "\n" + MORE5 : "");
         if (add.length() > 0) {
             OutputStream out = new FileOutputStream(f, true);
             try {

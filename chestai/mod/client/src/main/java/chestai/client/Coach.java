@@ -105,6 +105,8 @@ final class Coach {
     private int evadeDir = 1;
     private long evadeNext, coverAt = -1000;
     private int[] cover;
+    /** Drawing the bow at a shooter that cannot be got to, since when, and when the last arrow went. */
+    private long shootFrom = -1, shootTick = -1000, lastShot = -1000;
     private final double[] lifeAgo = new double[40];
     private boolean lifeSet;
     private long retreatUntil = -1, retreatSpotAt = -10000;
@@ -821,6 +823,83 @@ final class Coach {
         }
     }
 
+    /**
+     * The pitch for an arrow from the eyes, fully drawn (3 blocks a tick, 1% drag, 0.05 down), to
+     * come down on (hx across, dy up) from here: the flattest that does, or NaN.
+     */
+    private static double arrowPitch(double hx, double dy) {
+        // Over this range the height where the arrow gets to hx only rises as the bow points up:
+        // the nearest is the one.
+        double best = Double.NaN, bm = 0.6;
+        for (double p = -40.0; p <= 30.0; p += 0.25) {
+            double pr = Math.toRadians(p), vx = Math.cos(pr) * 3.0, vy = -Math.sin(pr) * 3.0, x = 0.0, y = -0.1;
+            for (int i = 0; i < 60 && x < hx; i++) {
+                double nx = x + vx, ny = y + vy;
+                if (nx >= hx) {
+                    double yAt = y + (ny - y) * (hx - x) / (nx - x);
+                    double miss = Math.abs(yAt - dy);
+                    if (miss < bm) {
+                        bm = miss;
+                        best = p;
+                    }
+                }
+                x = nx;
+                y = ny;
+                vx *= 0.99;
+                vy = vy * 0.99 - 0.05;
+            }
+        }
+        return best;
+    }
+
+    /**
+     * An arrow at the one shooting, when it cannot be got to on foot and is in sight: the bow out,
+     * drawn a second, aimed for the drop and let go. True while at it.
+     */
+    private boolean shootBack(Frame f, Pilot pilot, int[] a, Layout lay) {
+        Frame.Mob m = shooter;
+        boolean can = s.bowMobs && m != null && heal == HEAL_NONE && lay.real[Pilot.BOW] >= 0 && lay.arrows > 0 && !swim && !inWater(f)
+            && f.tick - lastShot > 10;
+        double hx = can ? hd(m.x, m.z, f.x, f.z) : 0.0;
+        double ty = can ? m.y + Math.max(m.h, 1.0) * 0.6 : 0.0;
+        can = can && hx > 4.0 && hx < 30.0 && Math.abs(ty - eyeY(f)) < 12.0
+            && planner.see(f.x, eyeY(f), f.z, m.x, ty, m.z, Integer.MIN_VALUE, 0, 0);
+        if (!can) {
+            return false;
+        }
+        if (f.tick - shootTick > 1) {
+            shootFrom = f.tick;
+        }
+        if (f.tick - shootFrom > 80) {
+            // Four seconds and never on it: a rest before the next try.
+            lastShot = f.tick;
+            return false;
+        }
+        shootTick = f.tick;
+        // Where it will be when the arrow gets there (about a tick for every three blocks).
+        double lead = hx / 3.0;
+        double ax = m.x + m.mx * lead, az = m.z + m.mz * lead;
+        double p = arrowPitch(hd(ax, az, f.x, f.z), ty - eyeY(f));
+        if (p != p) {
+            shootTick = -1000;
+            return false;
+        }
+        aim(ax, ty, az);
+        pitchAbs = p;
+        if (pilot.slot != Pilot.BOW) {
+            a[8] = 1 + Pilot.BOW;
+        } else if (!pilot.using || pilot.useTicks < 20) {
+            a[7] = 1;
+        } else if (Math.abs(yawTo(f, ax, az)) < 1.5 && Math.abs(f.pitch - p) < 1.5) {
+            // Full draw and on it: let go.
+            a[7] = 0;
+            lastShot = f.tick;
+        } else {
+            a[7] = 1;
+        }
+        return true;
+    }
+
     /** At a dead end on the way to chest k with no pearl to throw: another chest for a minute. */
     private void giveUp(Memory.Known k, long t) {
         if (deadEndNow && t - noPearlAt < 40) {
@@ -1349,8 +1428,11 @@ final class Coach {
                 k.skipUntil = t + 1200;
                 guardSince = -1;
             }
-            int[] cv = shooter != null ? cover(f, k.cx(), k.cz(), t) : null;
-            if (cv != null) {
+            boolean shot = shooter != null && shootBack(f, pilot, a, lay);
+            int[] cv = shooter != null && !shot ? cover(f, k.cx(), k.cz(), t) : null;
+            if (shot) {
+                coverOn = false;
+            } else if (cv != null) {
                 coverOn = true;
                 if (hd(cv[0] + 0.5, cv[2] + 0.5, f.x, f.z) > 0.6) {
                     go(f, cv[0] + 0.5, cv[1], cv[2] + 0.5, 0.4);
@@ -1363,6 +1445,9 @@ final class Coach {
                 aim(k.cx(), eyeY(f), k.cz());
             }
             evade = shooter != null && cv == null;
+            if (shot) {
+                evade = true;
+            }
         } else {
             // 4. Chests.
             int g = chooseGoal(f, mem);
@@ -1416,6 +1501,10 @@ final class Coach {
                     mode = TRAVEL;
                     go(f, k.cx(), k.y, k.cz(), 2.0);
                     giveUp(k, t);
+                } else if (shooter != null && ds < 8.0 && shootBack(f, pilot, a, lay)) {
+                    // An arrow back at one shooting from where it cannot be got to.
+                    mode = WAIT;
+                    evade = true;
                 } else if (shooter != null && ds < 8.0 && (cv = cover(f, standX, standZ, t)) != null) {
                     // Arrows from one that cannot be got at: the wait out of its sight, behind something.
                     mode = WAIT;
@@ -1451,7 +1540,7 @@ final class Coach {
                 wanderAt = -10000;
             }
         }
-        if (!boosting && heal == HEAL_NONE && !pilot.using && pilot.slot != Pilot.SWORD && lay.real[Pilot.SWORD] >= 0) {
+        if (!boosting && t != shootTick && heal == HEAL_NONE && !pilot.using && pilot.slot != Pilot.SWORD && lay.real[Pilot.SWORD] >= 0) {
             a[8] = 1 + Pilot.SWORD;
         }
         trapped(f);
