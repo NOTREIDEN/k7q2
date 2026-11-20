@@ -1483,7 +1483,7 @@ final class Coach {
                     if (claimSince < 0) {
                         claimSince = t;
                     }
-                    if (k.guessed && k.claimTicks > 60 && claimClicks > 20) {
+                    if (k.guessed && k.claimTicks > 60 && (claimClicks > 20 || k.claimTicks > 200)) {
                         // No hologram to say it was claimed: clicked on a while, taken as done (the next
                         // wave as far off as its hologram said last time).
                         mem.claimedGuess(k, t);

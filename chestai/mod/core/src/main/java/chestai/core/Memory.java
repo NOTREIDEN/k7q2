@@ -134,14 +134,17 @@ public final class Memory {
         lastHp = hp;
     }
 
-    /** The known chest within r blocks across (and six up or down) of this point, the nearest, or null. */
-    private Known chestNear(double x, double y, double z, double r) {
+    /**
+     * The known chest within r blocks across (and dy up or down) of this point, the nearest, or null.
+     * Only one known to be a farm chest (a hologram said so) unless the server shows none.
+     */
+    private Known chestNear(double x, double y, double z, double r, double dy, boolean anyChest) {
         Known best = null;
         double bd = r * r;
         for (Known k : chests) {
             double dx = k.cx() - x, dz = k.cz() - z;
             double d = dx * dx + dz * dz;
-            if (Math.abs(k.y - y) <= 6.0 && d <= bd) {
+            if ((anyChest || (k.seen && k.holoTick > -100000)) && Math.abs(k.y - y) <= dy && d <= bd) {
                 bd = d;
                 best = k;
             }
@@ -167,9 +170,10 @@ public final class Memory {
             Known k = null;
             double dp = Math.hypot(m.x - f.x, m.z - f.z);
             if (seen == null && dp < SPAWN_SEEN_R) {
-                k = chestNear(m.x, m.y, m.z, SPAWN_R);
+                // (Any chest found about, with no hologram read anywhere for five minutes.)
+                k = chestNear(m.x, m.y, m.z, SPAWN_R, 4.0, t - holoWorkAt > 6000);
             } else {
-                Known a = chestNear(m.x, m.y, m.z, 12.0);
+                Known a = chestNear(m.x, m.y, m.z, 12.0, 6.0, false);
                 if (a != null && a.seen && a.state == Frame.ACTIVE && t - a.holoTick < 40) {
                     k = a;
                 }
@@ -226,6 +230,9 @@ public final class Memory {
                     k.tick = t;
                     k.guessed = true;
                 }
+            } else if (k.guessed && k.state == Frame.CLAIMABLE && t - k.tick > 1200) {
+                // A minute and not clicked (out of reach): taken as claimed, not gone back to forever.
+                claimedGuess(k, t);
             } else if (k.waveAt >= 0) {
                 // Its wave's mobs all dead: with no hologram to say so, the chest is clicked to claim it.
                 k.waveAt = -1;
