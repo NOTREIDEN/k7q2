@@ -23,6 +23,9 @@ final class Planner {
     private final World w;
     private final MapStore map;
     private final Map<Long, Byte> cache = new HashMap<Long, Byte>();
+    /** Spots the player got stuck going to, left out of ways until the tick kept for each. */
+    private final Map<Long, Long> bans = new HashMap<Long, Long>();
+    private long now;
 
     Planner(World w, MapStore map) {
         this.w = w;
@@ -32,6 +35,24 @@ final class Planner {
     /** Forget the blocks read for the last way (they may have changed). */
     void clear() {
         cache.clear();
+    }
+
+    /** The tick it is, for the spots left out. */
+    void now(long tick) {
+        now = tick;
+    }
+
+    /** Leaves the spot (x, y, z) out of ways until the tick {@code until}. */
+    void ban(int x, int y, int z, long until) {
+        bans.put(key(x, y, z), until);
+        if (bans.size() > 200) {
+            java.util.Iterator<Map.Entry<Long, Long>> it = bans.entrySet().iterator();
+            while (it.hasNext()) {
+                if (it.next().getValue() <= now) {
+                    it.remove();
+                }
+            }
+        }
     }
 
     private static long key(int x, int y, int z) {
@@ -76,6 +97,12 @@ final class Planner {
 
     /** A player can be at this block: room for the body, and ground or water to keep it there. */
     boolean stand(int x, int y, int z) {
+        if (!bans.isEmpty()) {
+            Long until = bans.get(key(x, y, z));
+            if (until != null && until > now) {
+                return false;
+            }
+        }
         if (!open(x, y, z) || !open(x, y + 1, z)) {
             return false;
         }
@@ -226,11 +253,21 @@ final class Planner {
     }
 
     /**
-     * Whether a straight walk on the ground from the player to the block
-     * (x, y, z) goes without a wall, a hole deeper than three or a step up
-     * of more than one block.
+     * Whether a straight walk on the ground from the player to (tx, tz) goes
+     * without a wall, a hole deeper than three or a step up of more than one
+     * block, for the whole width of the body (a corner it would brush against
+     * stops it as a wall does).
      */
     boolean straight(double px, double py, double pz, double tx, double tz) {
+        double dx = tx - px, dz = tz - pz, len = Math.sqrt(dx * dx + dz * dz);
+        if (len < 0.01) {
+            return true;
+        }
+        double ox = -dz / len * 0.28, oz = dx / len * 0.28;
+        return line(px, py, pz, tx, tz) && line(px + ox, py, pz + oz, tx + ox, tz + oz) && line(px - ox, py, pz - oz, tx - ox, tz - oz);
+    }
+
+    private boolean line(double px, double py, double pz, double tx, double tz) {
         double dx = tx - px, dz = tz - pz;
         double len = Math.sqrt(dx * dx + dz * dz);
         int steps = (int) Math.ceil(len / 0.5);

@@ -80,6 +80,9 @@ final class Coach {
     private long pathAt = -1000;
     private double lastX, lastZ;
     private long movedAt;
+    /** Where and when the player got stuck last, and until when it steps back to the middle of its block. */
+    private double stuckX = 1e9, stuckZ = 1e9;
+    private long stuckAt = -10000, unstickUntil = -1;
 
     Coach(Settings s, Planner planner) {
         this.s = s;
@@ -317,9 +320,29 @@ final class Coach {
             movedAt = f.tick;
         }
         boolean stuck = f.tick - movedAt > 30;
+        planner.now(f.tick);
         if (stuck) {
-            path = null;
             movedAt = f.tick;
+            if (path != null && f.tick - stuckAt < 300 && hd(stuckX, stuckZ, f.x, f.z) < 2.0) {
+                // Stuck again at the same place: the next spot of the way is left out for a while.
+                int[] n = path.get(Math.min(path.size() - 1, pi + 1));
+                planner.ban(n[0], n[1], n[2], f.tick + 300);
+            }
+            stuckX = f.x;
+            stuckZ = f.z;
+            stuckAt = f.tick;
+            path = null;
+            unstickUntil = f.tick + 10;
+        }
+        if (f.tick < unstickUntil) {
+            // Off the wall it is pressed against: to the middle of its block first.
+            double cx = Math.floor(f.x) + 0.5, cz = Math.floor(f.z) + 0.5;
+            if (hd(cx, cz, f.x, f.z) > 0.12) {
+                aim(cx, eyeY(f) - 0.4, cz);
+                jumpUp = swim;
+                return;
+            }
+            unstickUntil = -1;
         }
         if (d < 7.0 && planner.straight(f.x, f.y, f.z, gx, gz)) {
             path = null;
@@ -487,7 +510,9 @@ final class Coach {
                 mode = FIGHT;
                 target = tgt.id;
                 // Low on the body: the name a server keeps over a mob's head can be in the way higher up.
-                double ax = tgt.x + tgt.mx * 2.0, az = tgt.z + tgt.mz * 2.0, ay = tgt.y + Math.min(tgt.h, 2.6) * 0.45;
+                // On a horse: the rider, not the horse.
+                double ax = tgt.x + tgt.mx * 2.0, az = tgt.z + tgt.mz * 2.0,
+                    ay = tgt.kind == Frame.HORSEMAN ? tgt.y + 2.0 : tgt.y + Math.min(tgt.h, 2.6) * 0.45;
                 aim(ax, ay, az);
                 if (s.hit && heal == HEAL_NONE && !pilot.using && Math.abs(yawTo(f, ax, az)) < 25.0 && Math.abs(pitchTo(f, ax, ay, az)) < 35.0) {
                     a[6] = 1;

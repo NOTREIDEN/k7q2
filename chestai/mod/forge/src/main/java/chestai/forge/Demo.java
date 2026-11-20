@@ -211,7 +211,7 @@ final class Demo {
     private int deaths, offs, waitOn, stuck, moving, side, arrows, pots, potsHigh, apples, applesFull;
     private int lastPots = -1, lastApples = -1, lastArrows = -1;
     private float lastHp = 20.0F, eatHp = 20.0F, minHp = 99.0F;
-    private boolean wasEating, shotHit;
+    private boolean wasEating, wasDrawing, shotHit;
     private int shotAt = -1, boostHits;
     private double shotTop;
 
@@ -305,12 +305,15 @@ final class Demo {
                 applesFull += lastApples - a;
             }
         }
-        if (lastArrows >= 0 && ar < lastArrows) {
-            arrows += lastArrows - ar;
+        // The kit's bow has Infinity: a shot is a draw let go.
+        boolean drawing = me.isUsingItem() && me.getItemInUse() != null && me.getItemInUse().getItem() == net.minecraft.init.Items.bow;
+        if (wasDrawing && !drawing) {
+            arrows++;
             shotAt = ticks;
             shotTop = 0.0;
             shotHit = false;
         }
+        wasDrawing = drawing;
         lastPots = p;
         lastApples = a;
         lastArrows = ar;
