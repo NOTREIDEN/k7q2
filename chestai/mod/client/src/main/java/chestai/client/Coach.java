@@ -74,6 +74,8 @@ final class Coach {
      * there, until health is back (or for a while, when nothing can bring it back), then on again.
      */
     private static final boolean RETREAT_ON = !"false".equals(System.getProperty("chestai.retreat"));
+    /** As up to the last round: back at 14 (17) with the absorption counted, apples eaten while still chased. */
+    private static final boolean RETREAT_OLD = Boolean.getBoolean("chestai.retreat.old");
     /**
      * Mobs gone for that the player got no nearer to in eight seconds (up on a cliff, down a pit,
      * across water it cannot get out of): left alone for half a minute unless they come in reach.
@@ -1056,13 +1058,16 @@ final class Coach {
             recent += t - h <= 60 ? 1 : 0;
         }
         pressed = ADAPT && recent >= 3;
-        boolean appleNeed = !potNeed && !eating && haveApple && appleGap
+        // Getting away with a mob right behind: away first (eating slows the walk to a crawl), the
+        // apple when there is a step between, or at once when very low.
+        boolean fleeing = !RETREAT_OLD && t < retreatUntil && nearest < 4.5 && hp + f.absorption > 5.0;
+        boolean appleNeed = !potNeed && !eating && haveApple && appleGap && !fleeing
             && ((mem.sinceHurt < 60 && (s.appleOnHit && spare && !ownArrow ? hp <= s.appleHitHp : hp <= s.appleHp && f.absorption < 0.5f && f.regenLeft == 0))
                 || (hp <= s.potHp && !havePot));
         // Food as soon as the bar is short: plain food first; an apple (4 of food) when 4 are missing,
         // or when the bar is so low the player can no longer sprint. Not with a claim at hand, nor with
         // a mob at the sword while the bar still lets the player sprint for long.
-        boolean foodNeed = s.foodFull && !potNeed && !appleNeed && !eating && f.food < 20 && !claimNear
+        boolean foodNeed = s.foodFull && !potNeed && !appleNeed && !eating && f.food < 20 && !claimNear && !fleeing
             && (nearest > 3.5 || f.food <= 14)
             && (haveFood || (haveApple && (f.food <= 6 || (f.food <= 16 && appleGap))));
         if (drawing && (potNeed || appleNeed || foodNeed || !cand.isEmpty())) {
@@ -1115,9 +1120,9 @@ final class Coach {
         if (RETREAT_ON && t >= retreatUntil && threat) {
             double exit = 0.0;
             if (!havePot && !haveApple && life <= 11.0) {
-                exit = 17.0;
+                exit = RETREAT_OLD ? 17.0 : 18.0;
             } else if (life <= 6.0 || (!havePot && life <= 12.0 && lifeBefore - life >= 6.0)) {
-                exit = 14.0;
+                exit = RETREAT_OLD ? 14.0 : 16.0;
             }
             if (exit > 0.0) {
                 retreatExit = exit;
@@ -1125,7 +1130,8 @@ final class Coach {
                 retreatSpot = null;
             }
         }
-        if (t < retreatUntil && life >= retreatExit) {
+        if (t < retreatUntil && (RETREAT_OLD ? life : hp) >= retreatExit) {
+            // Back by health, not by an apple's absorption: that is gone at the first blows.
             retreatUntil = -1;
         }
         boolean retreating = t < retreatUntil;
