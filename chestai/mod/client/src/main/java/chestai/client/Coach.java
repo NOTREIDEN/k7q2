@@ -58,6 +58,16 @@ final class Coach {
     private static final int BOOST_DRAW = Integer.getInteger("chestai.boost.draw", 5);
     /** In a fight with a mob in reach: jump (blows on the way down are critical), and walk (no sprint knockback). */
     private boolean fightJump, fightWalk;
+    /**
+     * When the last hits came (not its own arrow), and whether they come often (three in three
+     * seconds: an area blow, arrows one after another): then on the ground and sprinting, as
+     * knockback carries a player in the air far and one on the ground stops soon, and back into
+     * the group at once.
+     */
+    private final long[] hits = {-1000, -1000, -1000, -1000, -1000, -1000, -1000, -1000};
+    private int hitN;
+    private boolean pressed;
+    private static final boolean ADAPT = !"false".equals(System.getProperty("chestai.fight.adapt"));
 
     private final Random rnd = new Random();
     private final Settings s;
@@ -164,6 +174,9 @@ final class Coach {
         }
         if (boosting) {
             b.append("+arco");
+        }
+        if (pressed && (mode == FIGHT || mode == APPROACH)) {
+            b.append("+presion");
         }
         if (hasGoal) {
             b.append(String.format(java.util.Locale.ROOT, " meta=(%d,%d,%d %s)", goalX, goalY, goalZ, goalWhy));
@@ -705,6 +718,14 @@ final class Coach {
         // With apples to spare: one as soon as a hit takes health down to appleHitHp (the absorption
         // full again). With few: only low, with no absorption left. Never all of them on arrows: then
         // there would be none for hunger and the player would starve.
+        if (mem.sinceHurt == 0 && !ownArrow) {
+            hits[hitN++ % hits.length] = t;
+        }
+        int recent = 0;
+        for (long h : hits) {
+            recent += t - h <= 60 ? 1 : 0;
+        }
+        pressed = ADAPT && recent >= 3;
         boolean appleNeed = !potNeed && !eating && haveApple && appleGap
             && ((mem.sinceHurt < 60 && (s.appleOnHit && spare && !ownArrow ? hp <= s.appleHitHp : hp <= s.appleHp && f.absorption < 0.5f && f.regenLeft == 0))
                 || (hp <= s.potHp && !havePot));
@@ -840,8 +861,8 @@ final class Coach {
                         a[6] = 1;
                     }
                 }
-                fightJump = s.fightJump && f.onGround && !inWater(f);
-                fightWalk = s.fightJump && !Boolean.getBoolean("chestai.fight.sprint");
+                fightJump = s.fightJump && !pressed && f.onGround && !inWater(f);
+                fightWalk = s.fightJump && !pressed && !Boolean.getBoolean("chestai.fight.sprint");
                 if (hd(gc[0], gc[2], f.x, f.z) > 1.8 && hd(tgt.x, tgt.z, f.x, f.z) > 1.2 && !ledge(f)) {
                     move = true;
                     jumpUp = (f.collidedH && f.onGround) || inWater(f);

@@ -23,9 +23,9 @@ jobs:
       fail-fast: false
       matrix:
         seed: [11, 22, 33, 44, 55, 66, 77, 88, 101, 202, 303, 404, 505, 606, 707, 808]
-        # base: as the mod plays (in a fight with a mob in reach it jumps and does not sprint).
-        # sprint: the same jumping, but sprinting into the blows.
-        variant: [base, sprint]
+        # base: as the mod plays (with a mob in reach it jumps and does not sprint, but hit
+        # often it stays on the ground and sprints). fixed: jumping and walking even when hit often.
+        variant: [base, fixed]
     runs-on: ubuntu-latest
     timeout-minutes: 60
     defaults:
@@ -48,7 +48,7 @@ jobs:
       - name: Play seed ${{ matrix.seed }} (${{ matrix.variant }})
         run: |
           J=""
-          if [ "${{ matrix.variant }}" = "sprint" ]; then J="-Dchestai.fight.sprint=true"; fi
+          if [ "${{ matrix.variant }}" = "fixed" ]; then J="-Dchestai.fight.adapt=false"; fi
           sudo apt-get update -q
           sudo apt-get install -y -q xvfb x11-xserver-utils libgl1-mesa-dri libglx-mesa0 libxrandr2 libxcursor1 libxxf86vm1 libxi6 libxtst6 libxrender1 > /dev/null
           LIBGL_ALWAYS_SOFTWARE=1 timeout 3000 xvfb-run -a -s "-screen 0 854x480x24" gradle arena -Parena.seed=${{ matrix.seed }} -Parena.seconds=900 -Parena.variant=${{ matrix.variant }} "-Parena.jvm=$J" --no-daemon --stacktrace > arena.log 2>&1 || true
@@ -102,7 +102,7 @@ jobs:
               print("a wave killed in %.1f s on average, claimed %.1f s after, next wave %.1f s after a claim" % (avg(rs, "clearS"), avg(rs, "claimWaitS"), avg(rs, "betweenS")))
               print("stuck %.0f s, walking not facing the way %.1f%% of moving ticks" % (tot("stuck"), 100.0 * sum(float(r["side"]) * float(r["moving"]) for r in rs) / max(tot("moving"), 1)))
               print("arrows %d (boosts that carried %d), potions %d (%d over 16 hp), apples %d (%d at full health), steak %d, lowest health %.1f" % (tot("arrows"), tot("boosts"), tot("pots"), tot("potsHigh"), tot("apples"), tot("applesFull"), tot("steak"), min(float(r["minHp"]) for r in rs)))
-              print("food bar short %.0f s, lowest food %d; mob arrows that hit %d (%.0f damage), snipers killed %d" % (tot("foodLowS"), min(int(r.get("minFood", 20)) for r in rs), tot("projHits"), tot("projDmg"), tot("sniperKills")))
+              print("food bar short %.0f s, lowest food %d; mob arrows that hit %d (%.0f damage), area blows taken %d, snipers killed %d" % (tot("foodLowS"), min(int(r.get("minFood", 20)) for r in rs), tot("projHits"), tot("projDmg"), tot("aoeHits"), tot("sniperKills")))
               h = [0, 0, 0, 0]
               for r in rs:
                   parts = r.get("hits", "-").split("/")

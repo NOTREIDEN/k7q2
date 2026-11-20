@@ -79,6 +79,8 @@ final class Demo {
         final List<EntityLiving> mobs = new ArrayList<EntityLiving>();
         /** Mobs of the wave with a bow that keep back and shoot, and where each stands. */
         final java.util.Map<EntityLiving, double[]> archers = new java.util.HashMap<EntityLiving, double[]>();
+        /** Mobs of the wave that hurt all round them every second (an area blow, with its knockback). */
+        final java.util.Set<EntityLiving> aoe = new java.util.HashSet<EntityLiving>();
         String shown = "";
     }
 
@@ -91,7 +93,7 @@ final class Demo {
     private final java.util.Map<EntitySkeleton, double[]> sniperAt = new java.util.HashMap<EntitySkeleton, double[]>();
     private int sniperBack = -1, sniperKills;
     /** A wave's mobs all dead: how long it took, the claim after it, and from a claim to the next wave. */
-    private volatile int clears, clearTicks, claimWaits, claimWaitTicks, betweens, betweenTicks, projHits;
+    private volatile int clears, clearTicks, claimWaits, claimWaitTicks, betweens, betweenTicks, projHits, aoeHits;
     private volatile long lastClaimAt = -1;
     private volatile float projDamage;
     /** Seeds with plain food in the kit, with one chest in a pool of water. */
@@ -377,11 +379,11 @@ final class Demo {
         String hits = mod.session() != null ? mod.session().hitLine() : "-";
         String line = String.format(Locale.ROOT,
             "seed=%d variant=%s exp=%b secs=%d claims=%d resets=%d deaths=%d offs=%d first=%.1f stuck=%.1f moving=%d side=%.3f arrows=%d boosts=%d pots=%d potsHigh=%d apples=%d applesFull=%d minHp=%.1f known=%d chests=%d obstacles=%d"
-                + " clears=%d clearS=%.1f claimWaitS=%.1f betweenS=%.1f steak=%d foodLowS=%.0f minFood=%d projHits=%d projDmg=%.0f sniperKills=%d pool=%b hits=%s",
+                + " clears=%d clearS=%.1f claimWaitS=%.1f betweenS=%.1f steak=%d foodLowS=%.0f minFood=%d projHits=%d projDmg=%.0f aoeHits=%d sniperKills=%d pool=%b hits=%s",
             SEED, System.getProperty("chestai.arena.variant", "base"), exp, ticks / 20, claims, resets, deaths, offs, firstClaim < 0 ? -1.0 : firstClaim / 20.0, stuck / 20.0, moving,
             moving == 0 ? 0.0 : (double) side / moving, arrows, boostHits, pots, potsHigh, apples, applesFull, minHp, known, chests.size(), obstacles,
             clears, clears == 0 ? -1.0 : clearTicks / 20.0 / clears, claimWaits == 0 ? -1.0 : claimWaitTicks / 20.0 / claimWaits,
-            betweens == 0 ? -1.0 : betweenTicks / 20.0 / betweens, steak, foodLow / 20.0, minFood, projHits, projDamage, sniperKills, POOL, hits);
+            betweens == 0 ? -1.0 : betweenTicks / 20.0 / betweens, steak, foodLow / 20.0, minFood, projHits, projDamage, aoeHits, sniperKills, POOL, hits);
         System.out.println("ARENA " + line);
         StringBuilder modes = new StringBuilder();
         for (java.util.Map.Entry<String, Integer> e : modeTicks.entrySet()) {
@@ -791,7 +793,14 @@ final class Demo {
                     if (m.isDead || m.getHealth() <= 0) {
                         c.mobs.remove(i);
                         c.archers.remove(m);
-                    } else if (home != null) {
+                        c.aoe.remove(m);
+                        continue;
+                    }
+                    if (c.aoe.contains(m) && (w.getTotalWorldTime() + i * 3) % 20 == 0 && m.getDistanceToEntity(p) < 5.0F) {
+                        p.attackEntityFrom(net.minecraft.util.DamageSource.causeMobDamage(m), 2.0F);
+                        aoeHits++;
+                    }
+                    if (home != null) {
                         if (Math.hypot(m.posX - home[0], m.posZ - home[2]) > 4.0) {
                             m.setPositionAndUpdate(home[0], home[1], home[2]);
                         }
@@ -831,6 +840,7 @@ final class Demo {
                     }
                     c.mobs.clear();
                     c.archers.clear();
+                    c.aoe.clear();
                     c.state = COOLDOWN;
                     c.timer = 20 * 8;
                     resets++;
@@ -968,6 +978,12 @@ final class Demo {
                 sk.setCurrentItemOrArmor(2, new net.minecraft.item.ItemStack(net.minecraft.init.Items.iron_leggings));
                 sk.setCurrentItemOrArmor(1, new net.minecraft.item.ItemStack(net.minecraft.init.Items.iron_boots));
                 m = sk;
+            } else if (ARENA && i == 4) {
+                // A brute that hurts everything within five blocks every second.
+                EntityZombie zo = new EntityZombie(w);
+                zo.setCurrentItemOrArmor(4, new net.minecraft.item.ItemStack(net.minecraft.init.Items.skull, 1, 2));
+                m = zo;
+                c.aoe.add(m);
             } else {
                 net.minecraft.entity.passive.EntityWolf wo = new net.minecraft.entity.passive.EntityWolf(w);
                 wo.setAngry(true);
