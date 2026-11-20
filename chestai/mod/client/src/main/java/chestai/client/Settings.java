@@ -31,7 +31,7 @@ public final class Settings {
     /** Mobs (by entity name, lower case) to leave alone. */
     public final List<String> ignore = new ArrayList<String>();
     /** Health (of 20) at which a splash potion is thrown, and at which a golden apple is eaten. */
-    public double potHp = 10.0, appleHp = 14.0;
+    public double potHp = 10.0, appleHp = 12.0;
     /** Seconds at least between two golden apples. */
     public double appleWaitS = 8.0;
     /** Punch arrows shot up to travel far. */
@@ -50,7 +50,7 @@ public final class Settings {
         + "pocion_vida=10\n"
         + "\n"
         + "# Vida (de 20) a la que come una manzana dorada, solo si le estan pegando y no le queda efecto de otra.\n"
-        + "manzana_vida=14\n"
+        + "manzana_vida=12\n"
         + "\n"
         + "# Segundos minimos entre dos manzanas doradas.\n"
         + "manzana_espera=8\n"
@@ -136,7 +136,7 @@ public final class Settings {
         t = p.getProperty("eleccion");
         s.draw = t == null || !t.trim().toLowerCase(Locale.ROOT).startsWith("mejor");
         s.potHp = Math.min(number(p.getProperty("pocion_vida"), 10.0), 20.0);
-        s.appleHp = Math.min(number(p.getProperty("manzana_vida"), 14.0), 20.0);
+        s.appleHp = Math.min(number(p.getProperty("manzana_vida"), 12.0), 20.0);
         s.appleWaitS = number(p.getProperty("manzana_espera"), 8.0);
         s.bow = yes(p.getProperty("arco_punch"), true);
         s.search = yes(p.getProperty("buscar_cofres"), true);

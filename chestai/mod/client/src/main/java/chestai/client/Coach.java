@@ -47,6 +47,10 @@ final class Coach {
     private static final double PAIR_R = 22.0;
     /** Ticks between two potions. */
     private static final int POT_GAP = 22;
+    /** The Punch boost: from this far, the view this high, the bow drawn this many ticks. */
+    private static final double BOOST_D = Double.parseDouble(System.getProperty("chestai.boost.d", "22")),
+        BOOST_PITCH = Double.parseDouble(System.getProperty("chestai.boost.pitch", "-45"));
+    private static final int BOOST_DRAW = Integer.getInteger("chestai.boost.draw", 5);
 
     private final Random rnd = new Random();
     private final Settings s;
@@ -372,22 +376,22 @@ final class Coach {
 
     /** The view clear up and ahead for an arrow shot up, and open ground ahead for the boost. */
     private boolean boostRoom(Frame f) {
-        if (path == null || pi + 12 >= path.size()) {
+        if (path == null) {
             return false;
         }
-        int[] far = path.get(Math.min(path.size() - 1, pi + 16));
-        if (hd(far[0] + 0.5, far[2] + 0.5, f.x, f.z) < 11.0 || !planner.straight(f.x, f.y, f.z, far[0] + 0.5, far[2] + 0.5)) {
+        int[] end = path.get(path.size() - 1);
+        int[] ahead = path.get(Math.min(path.size() - 1, pi + 8));
+        if (hd(end[0] + 0.5, end[2] + 0.5, f.x, f.z) < 18.0 || hd(ahead[0] + 0.5, ahead[2] + 0.5, f.x, f.z) < 5.0
+                || !planner.straight(f.x, f.y, f.z, ahead[0] + 0.5, ahead[2] + 0.5)) {
             return false;
         }
         double yr = Math.toRadians(f.yaw);
         double dx = -Math.sin(yr), dz = Math.cos(yr);
         int y0 = (int) Math.floor(f.y + 0.01);
-        for (int i = 0; i <= 5; i++) {
+        for (int i = 0; i <= 4; i++) {
             int bx = (int) Math.floor(f.x + dx * i), bz = (int) Math.floor(f.z + dz * i);
-            for (int up = 2; up <= 2 + i; up++) {
-                if (!planner.open(bx, y0 + up, bz)) {
-                    return false;
-                }
+            if (!planner.open(bx, y0 + 2, bz) || !planner.open(bx, y0 + 3, bz)) {
+                return false;
             }
         }
         return true;
@@ -438,7 +442,7 @@ final class Coach {
             && ((hp <= s.potHp && (mem.sinceHurt < 100 || close > 0)) || hp <= s.potHp * 0.6);
         boolean appleNeed = !potNeed && !eating && haveApple && t - lastApple > Math.round(s.appleWaitS * 20.0)
             && f.absorption < 0.5f && f.regenLeft == 0
-            && ((hp <= s.appleHp && (mem.sinceHurt < 100 || close >= 2)) || (hp <= s.potHp && !havePot));
+            && ((hp <= s.appleHp && mem.sinceHurt < 60) || (hp <= s.potHp && !havePot));
         if (drawing && (potNeed || appleNeed || !cand.isEmpty())) {
             // The bow is let go: something matters more.
             boosting = false;
@@ -471,7 +475,8 @@ final class Coach {
                 if (r > REACH) {
                     continue;
                 }
-                double sc = r + Math.abs(yawTo(f, m.x, m.z)) / 30.0 + (m.hurtTime > 0 ? 1.0 : 0.0) + (m.id == target ? -0.8 : 0.0);
+                // One just hit takes no harm for half a second: another one meanwhile.
+                double sc = r + Math.abs(yawTo(f, m.x, m.z)) / 30.0 + (m.hurtTime > 2 ? 2.0 : 0.0) + (m.id == target && m.hurtTime <= 2 ? -0.8 : 0.0);
                 if (sc < bs) {
                     bs = sc;
                     tgt = m;
@@ -550,7 +555,7 @@ final class Coach {
                 return;
             }
         } else {
-            if (!can || dist < 25.0 || f.tick - lastBoost < 60 || !f.onGround || !aimSet || Math.abs(yawTo(f, tx, tz)) > 10.0 || !boostRoom(f)) {
+            if (!can || dist < BOOST_D || f.tick - lastBoost < 50 || !f.onGround || !aimSet || Math.abs(yawTo(f, tx, tz)) > 15.0 || !boostRoom(f)) {
                 return;
             }
             boosting = true;
@@ -559,17 +564,17 @@ final class Coach {
         if (pilot.slot != Pilot.BOW) {
             a[8] = 1 + Pilot.BOW;
         } else if (!pilot.using) {
-            if (f.pitch > -40.0f) {
-                pitchAbs = -45.0;
+            if (f.pitch > BOOST_PITCH + 5.0) {
+                pitchAbs = BOOST_PITCH;
             } else {
                 a[7] = 1;
             }
             if (pitchAbs != pitchAbs) {
-                pitchAbs = -45.0;
+                pitchAbs = BOOST_PITCH;
             }
         } else {
-            pitchAbs = -45.0;
-            if (pilot.useTicks < 5) {
+            pitchAbs = BOOST_PITCH;
+            if (pilot.useTicks < BOOST_DRAW) {
                 a[7] = 1;
             } else {
                 // Let go: the arrow is off.

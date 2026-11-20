@@ -211,7 +211,24 @@ final class Demo {
     private int deaths, offs, waitOn, stuck, moving, side, arrows, pots, potsHigh, apples, applesFull;
     private int lastPots = -1, lastApples = -1, lastArrows = -1;
     private float lastHp = 20.0F, eatHp = 20.0F, minHp = 99.0F;
-    private boolean wasEating;
+    private boolean wasEating, shotHit;
+    private int shotAt = -1, boostHits;
+    private double shotTop;
+
+    /** The blocks by the player's feet and head, and ahead of them, for the log. */
+    private static String around(Minecraft mc, EntityPlayerSP me) {
+        StringBuilder b = new StringBuilder();
+        double yr = Math.toRadians(me.rotationYaw);
+        int x = (int) Math.floor(me.posX), y = (int) Math.floor(me.posY + 0.01), z = (int) Math.floor(me.posZ);
+        int ax = (int) Math.floor(me.posX - Math.sin(yr)), az = (int) Math.floor(me.posZ + Math.cos(yr));
+        int[][] at = {{x, y - 1, z}, {x, y, z}, {x, y + 1, z}, {ax, y, az}, {ax, y + 1, az}, {ax, y + 2, az}};
+        String[] what = {"under", "feet", "head", "ahead", "aheadUp", "aheadUp2"};
+        for (int i = 0; i < at.length; i++) {
+            net.minecraft.block.Block bl = mc.theWorld.getBlockState(new BlockPos(at[i][0], at[i][1], at[i][2])).getBlock();
+            b.append(what[i]).append('=').append(net.minecraft.block.Block.blockRegistry.getNameForObject(bl).toString().replace("minecraft:", "")).append(' ');
+        }
+        return b.toString();
+    }
     private final double[] ringX = new double[40], ringZ = new double[40];
 
     private static int count(EntityPlayerSP me, String item) {
@@ -251,7 +268,24 @@ final class Demo {
         ringZ[i] = me.posZ;
         if (ticks > ringX.length && mod.on() && mc.gameSettings.keyBindForward.isKeyDown()
                 && Math.hypot(me.posX - ox, me.posZ - oz) < 1.5 && !mobNear(mc, me, 5.0)) {
-            stuck++;
+            if (stuck++ % 40 == 0) {
+                System.out.println(String.format(Locale.ROOT, "ARENA stuck t=%d pos=%.2f,%.2f,%.2f yaw=%.0f ground=%b water=%b around %s",
+                    ticks, me.posX, me.posY, me.posZ, me.rotationYaw, me.onGround, me.isInWater(), around(mc, me)));
+            }
+        }
+        if (ticks % 20 == 0) {
+            System.out.println(String.format(Locale.ROOT, "ARENA t=%d pos=%.1f,%.1f,%.1f yaw=%.0f pitch=%.0f hp=%.1f fwd=%b sprint=%b on=%b %s",
+                ticks, me.posX, me.posY, me.posZ, me.rotationYaw, me.rotationPitch, me.getHealth(), mc.gameSettings.keyBindForward.isKeyDown(),
+                me.isSprinting(), mod.on(), mod.session() == null ? "-" : mod.session().coachLine()));
+        }
+        if (shotAt >= 0) {
+            shotTop = Math.max(shotTop, Math.sqrt(dx * dx + dz * dz));
+            shotHit |= me.hurtTime > 0;
+            if (ticks - shotAt >= 40) {
+                System.out.println(String.format(Locale.ROOT, "ARENA shot t=%d hit=%b fastest=%.2f", shotAt, shotHit, shotTop));
+                boostHits += shotHit && shotTop > 0.6 ? 1 : 0;
+                shotAt = -1;
+            }
         }
         boolean eating = me.isUsingItem() && me.getItemInUse() != null && me.getItemInUse().getItem() == net.minecraft.init.Items.golden_apple;
         if (eating && !wasEating) {
@@ -273,6 +307,9 @@ final class Demo {
         }
         if (lastArrows >= 0 && ar < lastArrows) {
             arrows += lastArrows - ar;
+            shotAt = ticks;
+            shotTop = 0.0;
+            shotHit = false;
         }
         lastPots = p;
         lastApples = a;
@@ -289,9 +326,9 @@ final class Demo {
             mod.flip(mc);
         }
         String line = String.format(Locale.ROOT,
-            "seed=%d exp=%b secs=%d claims=%d resets=%d deaths=%d offs=%d first=%.1f stuck=%.1f moving=%d side=%.3f arrows=%d pots=%d potsHigh=%d apples=%d applesFull=%d minHp=%.1f known=%d chests=%d obstacles=%d",
+            "seed=%d exp=%b secs=%d claims=%d resets=%d deaths=%d offs=%d first=%.1f stuck=%.1f moving=%d side=%.3f arrows=%d boosts=%d pots=%d potsHigh=%d apples=%d applesFull=%d minHp=%.1f known=%d chests=%d obstacles=%d",
             SEED, exp, ticks / 20, claims, resets, deaths, offs, firstClaim < 0 ? -1.0 : firstClaim / 20.0, stuck / 20.0, moving,
-            moving == 0 ? 0.0 : (double) side / moving, arrows, pots, potsHigh, apples, applesFull, minHp, known, chests.size(), obstacles);
+            moving == 0 ? 0.0 : (double) side / moving, arrows, boostHits, pots, potsHigh, apples, applesFull, minHp, known, chests.size(), obstacles);
         System.out.println("ARENA " + line);
         java.io.OutputStream out = new java.io.FileOutputStream(new java.io.File(mc.mcDataDir, "arena.txt"));
         try {
@@ -584,6 +621,10 @@ final class Demo {
                 name = "§eNext Wave: §f0 seconds";
                 if (p.getDistance(cx, c.pos.getY(), cz) <= 12.0) {
                     spawn(w, c);
+                    if (ARENA) {
+                        System.out.println(String.format(Locale.ROOT, "ARENA wave at chest %d, player %.1f away", chests.indexOf(c) + 1,
+                            p.getDistance(cx, c.pos.getY(), cz)));
+                    }
                     c.state = ACTIVE;
                     c.waveTicks = exp ? 20 * 60 : 200;
                     c.started = w.getTotalWorldTime();
@@ -601,6 +642,13 @@ final class Demo {
                 if (c.mobs.isEmpty()) {
                     c.state = CLAIMABLE;
                 } else if (--c.waveTicks <= 0) {
+                    if (ARENA) {
+                        StringBuilder left = new StringBuilder();
+                        for (EntityLiving m : c.mobs) {
+                            left.append(String.format(Locale.ROOT, " %s:%.0fhp@%.1f", m.getClass().getSimpleName().replace("Entity", ""), m.getHealth(), m.getDistanceToEntity(p)));
+                        }
+                        System.out.println("ARENA reset of chest " + (chests.indexOf(c) + 1) + ", left" + left);
+                    }
                     for (EntityArmorStand t : c.tags.values()) {
                         t.setDead();
                     }
@@ -663,6 +711,9 @@ final class Demo {
                     c.state = COOLDOWN;
                     c.timer = 20 * (ARENA ? 30 + (int) (p.worldObj.rand.nextInt(31)) : 40);
                     claims++;
+                    if (ARENA) {
+                        System.out.println("ARENA claim of chest " + (chests.indexOf(c) + 1));
+                    }
                     double secs = (p.worldObj.getTotalWorldTime() - c.started) / 20.0;
                     p.addChatMessage(new ChatComponentText(String.format(Locale.ROOT,
                         "§aCofre reclamado §f(%d) §7%.1f s desde que salieron los mobs", claims, secs)));

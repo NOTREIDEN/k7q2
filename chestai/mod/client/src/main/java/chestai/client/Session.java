@@ -82,6 +82,11 @@ public final class Session {
         return mem == null ? 0 : mem.chests.size();
     }
 
+    /** What the coach is doing, for a test's log. */
+    public String coachLine() {
+        return coach == null ? "-" : coach.describe();
+    }
+
     /** The most mobs of waves seen at once. */
     public int mostMobs() {
         return mostMobs;
