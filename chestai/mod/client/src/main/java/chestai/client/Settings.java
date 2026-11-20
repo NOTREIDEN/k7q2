@@ -79,7 +79,12 @@ public final class Settings {
     /** The lines of the settings added after MORE. */
     static final String MORE2 = ""
         + "# si: hace click a los mobs. no: solo se mueve hacia ellos y los apunta, sin pegar.\n"
-        + "pegar=no\n";
+        + "pegar=si\n";
+
+    /** The settings' version: at 2 the hitting is on by default. */
+    static final String VERSION = ""
+        + "# Version de los ajustes (no tocar).\n"
+        + "ajustes_version=2\n";
 
     /** The lines of the settings added after MORE3. */
     static final String MORE4 = ""
@@ -133,7 +138,7 @@ public final class Settings {
         + "\n"
         + "# si: anota lo que ve y hace en config/chestai/registro.txt (para revisar problemas). no: nada.\n"
         + "registro=si\n"
-        + "\n" + MORE + "\n" + MORE2 + "\n" + MORE3 + "\n" + MORE4 + "\n" + MORE5;
+        + "\n" + MORE + "\n" + MORE2 + "\n" + MORE3 + "\n" + MORE4 + "\n" + MORE5 + "\n" + VERSION;
 
     public static Settings parse(Properties p) {
         Settings s = new Settings();
@@ -183,7 +188,7 @@ public final class Settings {
         s.searchRadius = number(p.getProperty("buscar_radio"), 160.0);
         s.map = yes(p.getProperty("mapa"), true);
         // -Dchestai.pegar=si, for the self test and the arena, where nothing else hits.
-        s.hit = yes(System.getProperty("chestai.pegar", p.getProperty("pegar")), false);
+        s.hit = yes(System.getProperty("chestai.pegar", p.getProperty("pegar")), true);
         t = p.getProperty("ignorar");
         if (t != null) {
             for (String n : t.split(",")) {
@@ -231,6 +236,35 @@ public final class Settings {
             old.load(new InputStreamReader(in0, "UTF-8"));
         } finally {
             in0.close();
+        }
+        if (old.getProperty("ajustes_version") == null) {
+            // A file from before hitting was on by default: its pegar=no was the old default, set to si once.
+            byte[] b = new byte[(int) f.length()];
+            InputStream in1 = new FileInputStream(f);
+            try {
+                int n = 0;
+                while (n < b.length) {
+                    int r = in1.read(b, n, b.length - n);
+                    if (r < 0) {
+                        break;
+                    }
+                    n += r;
+                }
+            } finally {
+                in1.close();
+            }
+            String text = new String(b, "UTF-8").replaceAll("(?m)^([ \\t]*pegar[ \\t]*[=:][ \\t]*)no[ \\t]*$", "$1si");
+            if (!text.endsWith("\n")) {
+                text += "\n";
+            }
+            text += "\n" + VERSION;
+            OutputStream out1 = new FileOutputStream(f);
+            try {
+                out1.write(text.getBytes("UTF-8"));
+            } finally {
+                out1.close();
+            }
+            old.load(new InputStreamReader(new java.io.ByteArrayInputStream(text.getBytes("UTF-8")), "UTF-8"));
         }
         String add = (old.getProperty("pocion_vida") == null ? "\n" + MORE : "") + (old.getProperty("pegar") == null ? "\n" + MORE2 : "")
             + (old.getProperty("comida_llena") == null ? "\n" + MORE3 : "")
