@@ -243,7 +243,7 @@ final class Planner {
      * Whether standing at (x, y, z) has a drop of four or more right beside it (a pit, a cliff's
      * edge): a knock or a slip there is a fall into somewhere hard to get out of.
      */
-    private boolean brink(int x, int y, int z) {
+    boolean brink(int x, int y, int z) {
         long k = key(x, y, z);
         Boolean b = brinks.get(k);
         if (b != null) {

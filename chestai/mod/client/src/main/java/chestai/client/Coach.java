@@ -86,7 +86,12 @@ final class Coach {
      */
     private final java.util.Map<Integer, Long> unhit = new java.util.HashMap<Integer, Long>();
     private int hitTgt = -1;
-    private long hitSeen;
+    private long hitSeen, hitVis;
+    /**
+     * In a fight on the rim of a drop of four or more (a pit, a cliff): a step to the nearest spot
+     * off it, keeping the view on the mob, so a knock does not throw the player in. NaN when not.
+     */
+    private double rimX = Double.NaN, rimZ;
     private double apprBest = 1e9;
     private long apprAt = -1000, apprLast = -1000;
     /** Mobs whose arrows (or fireballs, snowballs) came at the player, and when last. */
@@ -782,6 +787,38 @@ final class Coach {
         return new double[] {near, when};
     }
 
+    /** The nearest spot two blocks or less off a rim the player stands on, into rimX and rimZ (NaN if not on one). */
+    private void rim(Frame f) {
+        rimX = Double.NaN;
+        if (!f.onGround || inWater(f)) {
+            return;
+        }
+        int fx = (int) Math.floor(f.x), fy = (int) Math.floor(f.y + 0.01), fz = (int) Math.floor(f.z);
+        if (!planner.brink(fx, fy, fz)) {
+            return;
+        }
+        double best = 1e9;
+        for (int dx = -2; dx <= 2; dx++) {
+            for (int dz = -2; dz <= 2; dz++) {
+                if (dx == 0 && dz == 0) {
+                    continue;
+                }
+                for (int dy : new int[] {0, 1, -1}) {
+                    int x = fx + dx, y = fy + dy, z = fz + dz;
+                    if (planner.stand(x, y, z) && !planner.brink(x, y, z)) {
+                        double d = dx * dx + dz * dz + Math.abs(dy);
+                        if (d < best) {
+                            best = d;
+                            rimX = x + 0.5;
+                            rimZ = z + 0.5;
+                        }
+                        break;
+                    }
+                }
+            }
+        }
+    }
+
     /** At a dead end on the way to chest k with no pearl to throw: another chest for a minute. */
     private void giveUp(Memory.Known k, long t) {
         if (deadEndNow && t - noPearlAt < 40) {
@@ -935,6 +972,7 @@ final class Coach {
         fightJump = false;
         fightWalk = false;
         claimHop = false;
+        rimX = Double.NaN;
         double hp = f.hp;
 
         int lock = waveLock(f, mem);
@@ -1215,11 +1253,16 @@ final class Coach {
                 if (tgt.id != hitTgt) {
                     hitTgt = tgt.id;
                     hitSeen = t;
+                    hitVis = t;
                 }
                 if (tgt.hurtTime > 0 || (!s.hit && tgtY == tgtY)) {
                     hitSeen = t;
                 }
-                if (t - hitSeen > 140) {
+                if (tgtY == tgtY) {
+                    hitVis = t;
+                }
+                // Seven seconds without a hurt; four when not once in sight of a click either.
+                if (t - hitSeen > 140 || (t - hitSeen > 80 && t - hitVis > 80)) {
                     if (unhit.size() > 64) {
                         unhit.values().removeIf(u -> u <= t);
                     }
@@ -1244,6 +1287,7 @@ final class Coach {
                         a[6] = 1;
                     }
                 }
+                rim(f);
                 // Shot at: sprinting and strafing, not hopping on the spot.
                 fightJump = s.fightJump && !pressed && shooter == null && f.onGround && !inWater(f);
                 fightWalk = s.fightJump && !pressed && shooter == null && !Boolean.getBoolean("chestai.fight.sprint");
@@ -1624,6 +1668,17 @@ final class Coach {
             if (f.tick < tapUntil && sideSafe(f, tapDir)) {
                 k.strafe = tapDir;
             }
+        }
+        if (mode == FIGHT && rimX == rimX && heal != HEAL_POTION) {
+            // Off the rim, the view left on the mob: the keys toward the spot as seen from where it looks.
+            double yr = Math.toRadians(f.yaw);
+            double dx = rimX - f.x, dz = rimZ - f.z, len = Math.max(Math.sqrt(dx * dx + dz * dz), 1e-6);
+            double ahead = (-Math.sin(yr) * dx + Math.cos(yr) * dz) / len, left = (Math.cos(yr) * dx + Math.sin(yr) * dz) / len;
+            k.forward = ahead > 0.35 ? 1 : ahead < -0.35 ? -1 : 0;
+            k.strafe = left > 0.35 ? 1 : left < -0.35 ? -1 : 0;
+            k.sprint = k.forward > 0;
+            k.jump = false;
+            return;
         }
         if (f.tick < dodgeUntil && heal != HEAL_POTION && !(mode == ESCAPE && pearlThrown) && sideSafe(f, dodgeDir)) {
             // Out of the way of an arrow.
