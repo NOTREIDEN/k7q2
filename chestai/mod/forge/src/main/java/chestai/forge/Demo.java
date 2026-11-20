@@ -134,7 +134,8 @@ final class Demo {
                 return;
             }
             ticks = 0;
-            if (!ARENA) {
+            if (!ARENA || Boolean.getBoolean("chestai.arena.video")) {
+                // Seen from behind, for a video.
                 mc.gameSettings.thirdPersonView = 1;
             }
             mod.flip(mc);

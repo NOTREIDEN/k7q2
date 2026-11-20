@@ -1,0 +1,67 @@
+name: chestai-video
+
+# A video of the Chest AI mod playing the arena (see Demo) on one natural
+# world, seen from behind the player, put with its measures on the branch
+# "chestai-video". It starts on a push to the Chest AI branch whose commit
+# message has "[chestai-video]".
+on:
+  push:
+    branches: [claude/project-thread-v5n15f]
+
+permissions:
+  contents: write
+
+concurrency:
+  group: chestai-video-${{ contains(github.event.head_commit.message, '[chestai-video]') && 'rec' || github.run_id }}
+  cancel-in-progress: true
+
+jobs:
+  record:
+    if: contains(github.event.head_commit.message, '[chestai-video]')
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    defaults:
+      run:
+        working-directory: chestai/mod
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: |
+            8
+            17
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: "8.8"
+      - name: Play and record
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y -q xvfb ffmpeg x11-xserver-utils libgl1-mesa-dri libglx-mesa0 libxrandr2 libxcursor1 libxxf86vm1 libxi6 libxtst6 libxrender1 > /dev/null
+          Xvfb :99 -screen 0 854x480x24 > /dev/null 2>&1 &
+          export DISPLAY=:99
+          sleep 2
+          LIBGL_ALWAYS_SOFTWARE=1 timeout 1800 gradle arena -Parena.seed=505 -Parena.seconds=210 -Parena.video=true --no-daemon > arena.log 2>&1 &
+          G=$!
+          for i in $(seq 1 900); do grep -q "DEMO agent on" arena.log && break; sleep 1; done
+          ffmpeg -loglevel error -y -f x11grab -video_size 854x480 -framerate 20 -i :99 -t 240 -c:v libx264 -preset veryfast -crf 27 -pix_fmt yuv420p video.mp4 &
+          F=$!
+          wait $G || true
+          sleep 1
+          kill -INT $F 2>/dev/null || true
+          wait $F || true
+          grep -v -e '^\s*at ' -e Authentication -e JsonSyntax -e BEGIN_OBJECT arena.log | grep -e ARENA -e Exception | sed 's/^.*\]: //' | grep -v "ARENA t=" | head -n 300
+          ls -la video.mp4 run/arena.txt
+          cat run/arena.txt
+      - name: Put the video on the branch chestai-video
+        run: |
+          W=/tmp/chestai-video-pub
+          rm -rf "$W" && mkdir -p "$W" && cp video.mp4 "$W/arena.mp4" && cp run/arena.txt "$W/arena.txt"
+          cd "$W"
+          git init -q
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git checkout -q --orphan chestai-video
+          git add -A
+          git commit -q -m "Chest AI arena video of ${GITHUB_SHA::8}"
+          git push -qf "https://x-access-token:${{ github.token }}@github.com/${{ github.repository }}" HEAD:refs/heads/chestai-video

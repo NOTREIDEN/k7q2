@@ -110,7 +110,8 @@ tasks.register<JavaExec>("arena") {
     jvmArgs(run.vmArgs)
     jvmArgs("-Dchestai.demo=true", "-Dchestai.arena=true", "-Dchestai.pegar=si",
         "-Dchestai.arena.seed=" + (project.findProperty("arena.seed") ?: "1"),
-        "-Dchestai.demo.seconds=" + (project.findProperty("arena.seconds") ?: "300"))
+        "-Dchestai.demo.seconds=" + (project.findProperty("arena.seconds") ?: "300"),
+        "-Dchestai.arena.video=" + (project.findProperty("arena.video") ?: "false"))
     args(run.programArgs)
     workingDir = file(run.runDir)
     environment(run.envVariables)
