@@ -67,6 +67,13 @@ public final class Session {
     private double ping;
     private File chestFile;
     private int mostMobs;
+    private MapStore map;
+    private Planner planner;
+    /** Chests of the loaded chunks not shown to be farm chests yet, and how long the player has been by each. */
+    private final java.util.Map<Long, Integer> candidates = new java.util.HashMap<Long, Integer>();
+    /** Chests that were looked at and are no farm chests. */
+    private final java.util.Set<Long> notFarm = new java.util.HashSet<Long>();
+    private File notFarmFile;
 
     /** Farm chests the agent knows of. */
     public int chestsKnown() {
@@ -118,11 +125,113 @@ public final class Session {
         return pilot != null;
     }
 
-    private File chestFile() {
+    private String serverName() {
         ServerData sd = mc.getCurrentServerData();
-        String name = sd == null ? "local" : sd.serverIP.toLowerCase(Locale.ROOT).replaceAll("[^a-z0-9.-]", "_");
+        return sd == null ? "local" : sd.serverIP.toLowerCase(Locale.ROOT).replaceAll("[^a-z0-9.-]", "_");
+    }
+
+    private File chestFile() {
         // v2: the first version also took the names over mobs for chests, so its lists are left aside.
-        return new File(dir, "cofres2-" + name + ".txt");
+        return new File(dir, "cofres2-" + serverName() + ".txt");
+    }
+
+    private static long blockKey(int x, int y, int z) {
+        return new net.minecraft.util.BlockPos(x, y, z).toLong();
+    }
+
+    private void loadNotFarm() {
+        if (!notFarmFile.isFile()) {
+            return;
+        }
+        try {
+            BufferedReader r = new BufferedReader(new FileReader(notFarmFile));
+            try {
+                String line;
+                while ((line = r.readLine()) != null) {
+                    String[] t = line.trim().split("\\s+");
+                    if (t.length == 3) {
+                        notFarm.add(blockKey(Integer.parseInt(t[0]), Integer.parseInt(t[1]), Integer.parseInt(t[2])));
+                    }
+                }
+            } finally {
+                r.close();
+            }
+        } catch (IOException e) {
+            e.printStackTrace();
+        } catch (NumberFormatException e) {
+            e.printStackTrace();
+        }
+    }
+
+    private void saveNotFarm() {
+        try {
+            dir.mkdirs();
+            PrintWriter w = new PrintWriter(new FileWriter(notFarmFile));
+            try {
+                for (long k : notFarm) {
+                    net.minecraft.util.BlockPos p = net.minecraft.util.BlockPos.fromLong(k);
+                    w.println(p.getX() + " " + p.getY() + " " + p.getZ());
+                }
+            } finally {
+                w.close();
+            }
+        } catch (IOException e) {
+            e.printStackTrace();
+        }
+    }
+
+    /**
+     * The chests of the loaded chunks (as far as the server sends them)
+     * within the search radius that are not known yet: possible farm
+     * chests, gone to when there is nothing better, until a look at them
+     * shows a farm hologram or none.
+     */
+    private void searchChests(Frame f) {
+        for (Object o : new java.util.ArrayList<Object>(world.loadedTileEntityList)) {
+            if (!(o instanceof net.minecraft.tileentity.TileEntityChest)) {
+                continue;
+            }
+            net.minecraft.util.BlockPos p = ((net.minecraft.tileentity.TileEntity) o).getPos();
+            double dx = p.getX() + 0.5 - f.x, dz = p.getZ() + 0.5 - f.z;
+            long k = p.toLong();
+            if (dx * dx + dz * dz > settings.searchRadius * settings.searchRadius || notFarm.contains(k)
+                || mem.near(p.getX(), p.getY(), p.getZ(), 2.5) >= 0) {
+                continue;
+            }
+            mem.chest(p.getX(), p.getY(), p.getZ());
+            candidates.put(k, 0);
+        }
+    }
+
+    /** A possible farm chest the player has stood by for three seconds without seeing a farm hologram: none. */
+    private void checkCandidates(Frame f) {
+        java.util.Iterator<java.util.Map.Entry<Long, Integer>> it = candidates.entrySet().iterator();
+        boolean changed = false;
+        while (it.hasNext()) {
+            java.util.Map.Entry<Long, Integer> e = it.next();
+            net.minecraft.util.BlockPos p = net.minecraft.util.BlockPos.fromLong(e.getKey());
+            int ci = mem.near(p.getX(), p.getY(), p.getZ(), 0.5);
+            if (ci < 0 || mem.chests.get(ci).seen) {
+                // Gone, or a farm chest after all.
+                it.remove();
+                continue;
+            }
+            double dx = p.getX() + 0.5 - f.x, dz = p.getZ() + 0.5 - f.z;
+            if (dx * dx + dz * dz < 10.0 * 10.0 && Math.abs(p.getY() - f.y) < 8.0) {
+                e.setValue(e.getValue() + 1);
+                if (e.getValue() > 60) {
+                    notFarm.add(e.getKey());
+                    mem.chests.remove(ci);
+                    it.remove();
+                    changed = true;
+                    log("CHESTAI cofre sin holograma de oleada, descartado: " + p.getX() + " " + p.getY() + " " + p.getZ());
+                }
+            }
+        }
+        if (changed) {
+            saveNotFarm();
+            saved = -1;
+        }
     }
 
     private void loadChests() {
@@ -133,10 +242,23 @@ public final class Session {
             BufferedReader r = new BufferedReader(new FileReader(chestFile));
             try {
                 String line;
+                long nowMs = System.currentTimeMillis();
                 while ((line = r.readLine()) != null) {
                     String[] t = line.trim().split("\\s+");
-                    if (t.length == 3 && mem.near(Integer.parseInt(t[0]), Integer.parseInt(t[1]), Integer.parseInt(t[2]), 2.5) < 0) {
-                        mem.chest(Integer.parseInt(t[0]), Integer.parseInt(t[1]), Integer.parseInt(t[2]));
+                    if (t.length >= 3 && mem.near(Integer.parseInt(t[0]), Integer.parseInt(t[1]), Integer.parseInt(t[2]), 2.5) < 0) {
+                        int ci = mem.chest(Integer.parseInt(t[0]), Integer.parseInt(t[1]), Integer.parseInt(t[2]));
+                        if (t.length >= 6) {
+                            // What its hologram said last, and when: a wave timer still running counts on.
+                            int state = Integer.parseInt(t[3]), secs = Integer.parseInt(t[4]);
+                            double ago = (nowMs - Long.parseLong(t[5])) / 1000.0;
+                            Memory.Known k = mem.chests.get(ci);
+                            if (state == chestai.core.Frame.COOLDOWN && ago >= 0 && secs - ago > 5.0) {
+                                k.seen = true;
+                                k.state = state;
+                                k.secs = (int) Math.round(secs - ago);
+                                k.tick = 0;
+                            }
+                        }
                     }
                 }
             } finally {
@@ -150,15 +272,23 @@ public final class Session {
     }
 
     private void saveChests() {
-        if (mem.chests.size() == saved) {
-            return;
-        }
         try {
             dir.mkdirs();
             PrintWriter w = new PrintWriter(new FileWriter(chestFile));
+            long nowMs = System.currentTimeMillis();
             try {
                 for (Memory.Known k : mem.chests) {
-                    w.println(k.x + " " + k.y + " " + k.z);
+                    if (candidates.containsKey(blockKey(k.x, k.y, k.z))) {
+                        // Not known to be a farm chest yet.
+                        continue;
+                    }
+                    if (k.seen) {
+                        // Where it is, what its hologram said last (state, seconds to the wave) and when, in ms.
+                        int secs = k.state == chestai.core.Frame.COOLDOWN ? (int) Math.round(mem.estSecs(mem.chests.indexOf(k), tick)) : k.secs;
+                        w.println(k.x + " " + k.y + " " + k.z + " " + k.state + " " + secs + " " + nowMs);
+                    } else {
+                        w.println(k.x + " " + k.y + " " + k.z);
+                    }
                 }
             } finally {
                 w.close();
@@ -181,10 +311,16 @@ public final class Session {
         chestFile = chestFile();
         loadChests();
         saved = mem.chests.size();
+        candidates.clear();
+        notFarm.clear();
+        notFarmFile = new File(dir, "nocofres-" + serverName() + ".txt");
+        loadNotFarm();
+        map = s.map ? new MapStore(new File(dir, "mapa-" + serverName())) : null;
+        planner = new Planner(world, map);
         double cps = s.cpsMin + draws.nextDouble() * (s.cpsMax - s.cpsMin);
         pilot = new Pilot(cps);
         hands = new Hands(mc);
-        coach = new Coach();
+        coach = new Coach(s, planner);
         Layout lay = Layout.of(me.inventory);
         if (lay.real[Pilot.SWORD] >= 0) {
             me.inventory.currentItem = lay.real[Pilot.SWORD];
@@ -234,6 +370,9 @@ public final class Session {
             mc.mouseHelper = mouse;
         }
         saveChests();
+        if (map != null) {
+            map.save();
+        }
         if (logOut != null) {
             logOut.close();
             logOut = null;
@@ -278,34 +417,36 @@ public final class Session {
         mostMobs = Math.max(mostMobs, f.mobs.size());
         mem.update(f, first);
         first = false;
-        if (mem.chests.isEmpty()) {
-            // No chest known: nothing to go for, so the keys stay still
-            // instead of the network wandering about with an empty map.
-            // Mobs at hand are still fought.
-            int[] idle = {1, 1, 0, 0, 7, 5, 0, 0, 0};
-            coach.before(f, mem, pilot, idle);
-            if (coach.mode == Coach.FIGHT) {
-                Layout l2 = lay;
-                Pilot.Keys k2 = pilot.step(idle, 0, 1, 0, 0, l2.real[Pilot.GAPPLE] >= 0 ? l2.gapples : 0, f.pickMob >= 0, f.pickChest >= 0);
-                coach.after(f, k2);
-                hands.press(k2, l2);
-            } else {
-                hands.release();
-            }
-            if (tick == 1 || tick % 600 == 0) {
-                return "Chest AI: no veo ningun cofre de farmeo, espero quieto." + Reader.diag(mc, settings)
-                    + "\nSi el texto del holograma es otro, ponelo en texto_claim de ajustes.txt.";
-            }
-            return null;
+        if (map != null && tick % 2 == 0) {
+            map.tick(world, f.x, f.z, Math.max(2, Math.min(mc.gameSettings.renderDistanceChunks, 16)), tick);
         }
-        float[] o = obs.build(f, mem, new WorldGrid(world));
-        int[] a = net.act(o, draws, !settings.draw);
+        if (settings.search && (tick == 1 || tick % 40 == 0)) {
+            searchChests(f);
+        }
+        checkCandidates(f);
+        String note = null;
+        boolean noFarm = true;
+        for (Memory.Known k : mem.chests) {
+            noFarm &= !k.seen;
+        }
+        if (noFarm && (tick == 1 || tick % 600 == 0)) {
+            note = (mem.chests.isEmpty() ? "Chest AI: no veo ningun cofre de farmeo, espero quieto." : "Chest AI: no vi hologramas de oleada todavia, reviso los cofres cercanos.")
+                + Reader.diag(mc, settings) + "\nSi el texto del holograma es otro, ponelo en texto_claim de ajustes.txt.";
+        }
+        int[] a;
+        if (mem.chests.isEmpty()) {
+            a = new int[] {1, 1, 0, 0, 7, 5, 0, 0, 0};
+        } else {
+            float[] o = obs.build(f, mem, new WorldGrid(world));
+            a = net.act(o, draws, !settings.draw);
+        }
         int[] fromNet = a.clone();
-        coach.before(f, mem, pilot, a);
+        coach.before(f, mem, pilot, a, lay);
         if ((DEBUG || settings.log) && tick % 10 == 0) {
             StringBuilder b = new StringBuilder();
-            b.append(String.format(java.util.Locale.ROOT, "CHESTAI t=%d pos=%.1f,%.1f,%.1f yaw=%.0f hp=%.1f mobs=%d holos=%d known=%d net=%s modo=%d |",
-                tick, f.x, f.y, f.z, f.yaw, f.hp, f.mobs.size(), f.holos.size(), mem.chests.size(), java.util.Arrays.toString(fromNet), coach.mode));
+            b.append(String.format(java.util.Locale.ROOT, "CHESTAI t=%d pos=%.1f,%.1f,%.1f yaw=%.0f pitch=%.0f hp=%.1f abs=%.1f mobs=%d holos=%d known=%d posibles=%d mapa=%d modo=%s |",
+                tick, f.x, f.y, f.z, f.yaw, f.pitch, f.hp, f.absorption, f.mobs.size(), f.holos.size(), mem.chests.size(), candidates.size(),
+                map == null ? 0 : map.scanned(), coach.describe()));
             for (chestai.core.Memory.Known k : mem.chests) {
                 b.append(String.format(java.util.Locale.ROOT, " (%d,%d,%d s%d %ds)", k.x, k.y, k.z, k.state, k.secs));
             }
@@ -369,6 +510,9 @@ public final class Session {
         if (tick % 200 == 0) {
             saveChests();
         }
-        return null;
+        if (map != null && tick % 600 == 0) {
+            map.save();
+        }
+        return note;
     }
 }

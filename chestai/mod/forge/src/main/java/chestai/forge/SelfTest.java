@@ -22,11 +22,13 @@ import net.minecraft.world.WorldType;
  * chest and the mobs, moved and swung. Then the game shuts down.
  */
 final class SelfTest {
-    private static final int TICKS = 600, PATIENCE = 20 * 300;
+    private static final int TICKS = 900, PATIENCE = 20 * 300;
 
     private final ChestAi mod;
     private int state, waited, ticks, swings;
     private double fromX, fromZ, far;
+    private int potsAt, applesAt, cx, cy, cz;
+    private float lowest = 99f;
 
     SelfTest(ChestAi mod) {
         this.mod = mod;
@@ -70,7 +72,11 @@ final class SelfTest {
             MinecraftServer s = mc.getIntegratedServer();
             s.setDifficultyForAllWorlds(EnumDifficulty.EASY);
             String n = me.getName();
-            int x = (int) Math.floor(me.posX) + 8, y = (int) Math.floor(me.posY), z = (int) Math.floor(me.posZ) + 3;
+            // The chest behind a wall: the way there goes round it.
+            int x = (int) Math.floor(me.posX) + 14, y = (int) Math.floor(me.posY), z = (int) Math.floor(me.posZ) + 2;
+            cx = x;
+            cy = y;
+            cz = z;
             run(s, "gamerule doMobSpawning false");
             run(s, "gamerule doDaylightCycle false");
             run(s, "time set 6000");
@@ -82,10 +88,12 @@ final class SelfTest {
             run(s, "give " + n + " arrow 64");
             run(s, "give " + n + " diamond_chestplate");
             run(s, "effect " + n + " 1 600 2");
+            int wx = (int) Math.floor(me.posX) + 5, wz = (int) Math.floor(me.posZ);
+            run(s, "fill " + wx + " " + y + " " + (wz - 5) + " " + (wx + 1) + " " + (y + 2) + " " + (wz + 5) + " stone");
             run(s, "setblock " + x + " " + y + " " + z + " chest");
             run(s, "summon ArmorStand " + (x + 0.5) + " " + (y + 1.2) + " " + (z + 0.5) + " {CustomName:\"§cKill the mobs!\",CustomNameVisible:1,Invisible:1,NoGravity:1}");
             for (int i = 0; i < 4; i++) {
-                run(s, "summon Zombie " + (x + 2 + i) + " " + y + " " + (z - 2 + i) + " {Attributes:[{Name:generic.maxHealth,Base:30}],Health:30}");
+                run(s, "summon Zombie " + (x + 2 + i) + " " + y + " " + (z - 2 + i) + " {Attributes:[{Name:generic.maxHealth,Base:30},{Name:generic.followRange,Base:6}],Health:30}");
             }
             run(s, "summon SnowMan " + (x - 3) + " " + y + " " + (z + 3));
             fromX = me.posX;
@@ -97,6 +105,8 @@ final class SelfTest {
                 return;
             }
             ticks = 0;
+            potsAt = count(me, "potion");
+            applesAt = count(me, "golden_apple");
             mod.flip(mc);
             if (!mod.on()) {
                 end(mc, "FAILED: the agent did not take the keys");
@@ -111,15 +121,40 @@ final class SelfTest {
             }
             swings += me.isSwingInProgress && me.swingProgressInt == 0 ? 1 : 0;
             far = Math.max(far, Math.hypot(me.posX - fromX, me.posZ - fromZ));
+            if (ticks == 300) {
+                // Low on health all at once: a potion has to come.
+                run(mc.getIntegratedServer(), "effect " + me.getName() + " 7 1 1");
+            }
+            if (ticks > 300) {
+                lowest = Math.min(lowest, me.getHealth());
+            }
             if (++ticks < TICKS) {
                 return;
             }
             int chests = mod.session().chestsKnown(), mobs = mod.session().mostMobs();
+            int pots = potsAt - count(me, "potion"), apples = applesAt - count(me, "golden_apple");
+            double toChest = Math.hypot(me.posX - (cx + 0.5), me.posZ - (cz + 0.5));
+            int alive = 0;
+            for (Object o : mc.getIntegratedServer().worldServerForDimension(0).loadedEntityList) {
+                if (o instanceof net.minecraft.entity.monster.EntityZombie && ((net.minecraft.entity.EntityLivingBase) o).isEntityAlive()) {
+                    alive++;
+                }
+            }
             mod.flip(mc);
-            boolean ok = !mod.on() && chests >= 1 && mobs >= 3 && (far > 1.0 || swings > 0);
-            end(mc, String.format(Locale.ROOT, "%s: %d ticks with the agent at the keys, %d chest(s) known, up to %d mobs seen, got %.1f blocks away from the start, swung %d times",
-                ok ? "ok" : "FAILED", ticks, chests, mobs, far, swings));
+            boolean ok = !mod.on() && chests >= 1 && mobs >= 3 && far > 6.0 && swings > 0 && pots >= 1 && apples <= 3 && me.getHealth() > 0;
+            end(mc, String.format(Locale.ROOT, "%s: %d ticks with the agent at the keys, %d chest(s) known, up to %d mobs seen, got %.1f blocks away from the start (%.1f from the chest behind the wall at the end), swung %d times, %d of 4 zombies left, %d potion(s) and %d apple(s) used, lowest health %.1f",
+                ok ? "ok" : "FAILED", ticks, chests, mobs, far, toChest, swings, alive, pots, apples, lowest));
         }
+    }
+
+    private static int count(EntityPlayerSP me, String item) {
+        int n = 0;
+        for (net.minecraft.item.ItemStack st : me.inventory.mainInventory) {
+            if (st != null && net.minecraft.item.Item.itemRegistry.getNameForObject(st.getItem()).toString().equals("minecraft:" + item)) {
+                n += st.stackSize;
+            }
+        }
+        return n;
     }
 
     private void end(Minecraft mc, String line) throws IOException {

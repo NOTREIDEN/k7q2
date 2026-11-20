@@ -30,6 +30,39 @@ public final class Settings {
     public boolean log = true;
     /** Mobs (by entity name, lower case) to leave alone. */
     public final List<String> ignore = new ArrayList<String>();
+    /** Health (of 20) at which a splash potion is thrown, and at which a golden apple is eaten. */
+    public double potHp = 10.0, appleHp = 14.0;
+    /** Seconds at least between two golden apples. */
+    public double appleWaitS = 8.0;
+    /** Punch arrows shot up to travel far. */
+    public boolean bow = true;
+    /** Chests of the loaded chunks taken as possible farm chests until a look shows they are not. */
+    public boolean search = true;
+    public double searchRadius = 160.0;
+    /** The blocks of every chunk seen kept on disk, for planning ways. */
+    public boolean map = true;
+
+    /** The lines of the newer settings, added to a file written by an older version. */
+    static final String MORE = ""
+        + "# Vida (de 20) a la que tira una pocion de curacion a los pies.\n"
+        + "pocion_vida=10\n"
+        + "\n"
+        + "# Vida (de 20) a la que come una manzana dorada, solo si le estan pegando y no le queda efecto de otra.\n"
+        + "manzana_vida=14\n"
+        + "\n"
+        + "# Segundos minimos entre dos manzanas doradas.\n"
+        + "manzana_espera=8\n"
+        + "\n"
+        + "# si: para ir lejos en campo abierto se tira una flecha con Punch para arriba que lo empuja.\n"
+        + "arco_punch=si\n"
+        + "\n"
+        + "# si: los cofres de los chunks cargados (hasta buscar_radio bloques) se toman como posibles cofres de farmeo\n"
+        + "# hasta que se acerca y ve que no tienen holograma de oleada.\n"
+        + "buscar_cofres=si\n"
+        + "buscar_radio=160\n"
+        + "\n"
+        + "# si: guarda los bloques de cada chunk que ve en config/chestai/mapa-<servidor>/ para planear caminos.\n"
+        + "mapa=si\n";
 
     public static final String FIRST = ""
         + "# Chest AI: ajustes. Se leen cada vez que se prende el bot.\n"
@@ -59,7 +92,8 @@ public final class Settings {
         + "ignorar=bat\n"
         + "\n"
         + "# si: anota lo que ve y hace en config/chestai/registro.txt (para revisar problemas). no: nada.\n"
-        + "registro=si\n";
+        + "registro=si\n"
+        + "\n" + MORE;
 
     public static Settings parse(Properties p) {
         Settings s = new Settings();
@@ -94,6 +128,13 @@ public final class Settings {
         }
         t = p.getProperty("eleccion");
         s.draw = t == null || !t.trim().toLowerCase(Locale.ROOT).startsWith("mejor");
+        s.potHp = Math.min(number(p.getProperty("pocion_vida"), 10.0), 20.0);
+        s.appleHp = Math.min(number(p.getProperty("manzana_vida"), 14.0), 20.0);
+        s.appleWaitS = number(p.getProperty("manzana_espera"), 8.0);
+        s.bow = yes(p.getProperty("arco_punch"), true);
+        s.search = yes(p.getProperty("buscar_cofres"), true);
+        s.searchRadius = number(p.getProperty("buscar_radio"), 160.0);
+        s.map = yes(p.getProperty("mapa"), true);
         t = p.getProperty("ignorar");
         if (t != null) {
             for (String n : t.split(",")) {
@@ -103,6 +144,10 @@ public final class Settings {
             }
         }
         return s;
+    }
+
+    private static boolean yes(String v, boolean dflt) {
+        return v == null || v.trim().length() == 0 ? dflt : !v.trim().toLowerCase(Locale.ROOT).startsWith("n");
     }
 
     private static double number(String v, double dflt) {
@@ -126,6 +171,22 @@ public final class Settings {
             OutputStream out = new FileOutputStream(f);
             try {
                 out.write(FIRST.getBytes("UTF-8"));
+            } finally {
+                out.close();
+            }
+        }
+        // A file of an older version: the newer settings added at its end.
+        Properties old = new Properties();
+        InputStream in0 = new FileInputStream(f);
+        try {
+            old.load(new InputStreamReader(in0, "UTF-8"));
+        } finally {
+            in0.close();
+        }
+        if (old.getProperty("pocion_vida") == null) {
+            OutputStream out = new FileOutputStream(f, true);
+            try {
+                out.write(("\n" + MORE).getBytes("UTF-8"));
             } finally {
                 out.close();
             }

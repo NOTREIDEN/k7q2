@@ -42,8 +42,10 @@ jobs:
         run: gradle build --no-daemon
       - name: Self test in a Forge client
         run: |
-          sudo apt-get install -y -q xvfb > /dev/null
-          xvfb-run -a gradle selftest --no-daemon || true
+          sudo apt-get update -q
+          sudo apt-get install -y -q xvfb x11-xserver-utils libgl1-mesa-dri libglx-mesa0 libxrandr2 libxcursor1 libxxf86vm1 libxi6 libxtst6 libxrender1 > /dev/null
+          LIBGL_ALWAYS_SOFTWARE=1 timeout 1500 xvfb-run -a -s "-screen 0 854x480x24" gradle selftest --no-daemon --stacktrace > runclient.log 2>&1 || true
+          grep -v -e '^\s*at ' -e '^\s*\.\.\. [0-9]* more' runclient.log | grep -e SELFTEST -e CHESTAI -e Exception -e ERROR | tail -n 120
           cat run/selftest.txt
           grep -q '^ok' run/selftest.txt
       - name: The self test's play log
