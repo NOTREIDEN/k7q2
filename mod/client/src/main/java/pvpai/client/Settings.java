@@ -53,13 +53,43 @@ public final class Settings {
      * trained with the health hidden in every duel) or once the server is
      * seen to hide it (oculta_auto). hpGuess: 0 off, 1 always, 2 auto;
      * oppShown: 0 off, 1 auto, 2 always; oppShownHealth (vida_rival_valor):
-     * the value, below zero (propia) its own health. Default oculta_auto
-     * with 10: what kept the networks trained seeing the health (w1310)
-     * from dropping on minemen.club in the simulator.
+     * the value, below zero (propia) its own health. hpGuessScale
+     * (vida_rival_golpe): what the guess takes a hit seen to cost, in plain
+     * hits (pvpai.core.Agent#hpGuessScale). Default auto with 1.3: in long
+     * duels on a minemen-like server against a network that sees the
+     * health, the one that won the most of those tried in the simulator
+     * (10 shown in its place made the agent hold back, 1 made it die).
      */
-    public int hpGuess = 0;
-    public int oppShown = 1;
+    public int hpGuess = 2;
+    public int oppShown = 0;
     public float oppShownHealth = 10.0f;
+    public float hpGuessScale = 1.3f;
+
+    /** The lines on the opponent's health, last in the file. */
+    static final String RIVAL = ""
+        + "# La vida del rival que mira el bot. auto: si el servidor la esconde (minemen manda siempre 1), la\n"
+        + "# estima con los golpes que le da y las pociones que le curan; si la manda, la de verdad. real: siempre\n"
+        + "# la que manda el servidor. estimada: la estima siempre. oculta_auto: si el servidor la esconde, mira\n"
+        + "# vida_rival_valor en su lugar. oculta: siempre vida_rival_valor, en todo servidor (para una red\n"
+        + "# entrenada sin ver la vida del rival). vida_rival_valor: un numero, o propia (la vida del bot).\n"
+        + "# vida_rival_golpe: cuanto cree la estimacion que le saca cada golpe, en golpes comunes (mas alto:\n"
+        + "# lo cree mas bajo de vida y pelea mas agresivo).\n"
+        + "vida_rival=auto\n"
+        + "vida_rival_valor=10\n"
+        + "vida_rival_golpe=1.3\n";
+
+    /**
+     * The same lines as the jars of 2026-11-19 wrote them: a file that
+     * still holds them untouched gets the new ones in their place.
+     */
+    static final String RIVAL_BEFORE = ""
+        + "# La vida del rival que mira el bot. oculta_auto: si el servidor la esconde (minemen manda siempre 1),\n"
+        + "# el bot mira vida_rival_valor en su lugar; si la manda, la de verdad. real: siempre la que manda el\n"
+        + "# servidor (apaga lo anterior). auto: la estima (golpes que le da y pociones que le curan) si el servidor\n"
+        + "# la esconde; estimada: la estima siempre. oculta: siempre vida_rival_valor, en todo servidor (para una\n"
+        + "# red entrenada sin ver la vida del rival). vida_rival_valor: un numero, o propia (la vida del bot).\n"
+        + "vida_rival=oculta_auto\n"
+        + "vida_rival_valor=10\n";
 
     /** The file a player finds the first time, in the player's language. */
     public static final String FIRST = ""
@@ -93,13 +123,7 @@ public final class Settings {
         + "# Soltar el bloqueo en el giro de una pocion tirada con giro, para que el clic no se pierda.\n"
         + "soltar_bloqueo=no\n"
         + "\n"
-        + "# La vida del rival que mira el bot. oculta_auto: si el servidor la esconde (minemen manda siempre 1),\n"
-        + "# el bot mira vida_rival_valor en su lugar; si la manda, la de verdad. real: siempre la que manda el\n"
-        + "# servidor (apaga lo anterior). auto: la estima (golpes que le da y pociones que le curan) si el servidor\n"
-        + "# la esconde; estimada: la estima siempre. oculta: siempre vida_rival_valor, en todo servidor (para una\n"
-        + "# red entrenada sin ver la vida del rival). vida_rival_valor: un numero, o propia (la vida del bot).\n"
-        + "vida_rival=oculta_auto\n"
-        + "vida_rival_valor=10\n";
+        + RIVAL;
 
     /** Read from what a file holds; what cannot be read keeps its default. */
     public static Settings parse(Properties p) {
@@ -171,6 +195,10 @@ public final class Settings {
                 }
             }
         }
+        v = numbers(p.getProperty("vida_rival_golpe"), " ");
+        if (v != null && v.length == 1 && v[0] > 0.0 && v[0] <= 5.0) {
+            s.hpGuessScale = (float) v[0];
+        }
         v = numbers(p.getProperty("arena"), " ");
         if (v != null && v.length == 3 && v[2] >= 1.0) {
             s.arenaSet = true;
@@ -210,18 +238,23 @@ public final class Settings {
         return r;
     }
 
-    /** Read a file; one that is not there is written first, with the defaults. */
+    /**
+     * Read a file; one that is not there is written first, with the
+     * defaults. One that holds the lines on the opponent's health as an
+     * earlier jar wrote them, untouched, gets the new ones in their place;
+     * one with none gets them at the end.
+     */
     public static Settings load(File f) throws IOException {
         if (!f.exists()) {
             File dir = f.getParentFile();
             if (dir != null) {
                 dir.mkdirs();
             }
-            OutputStream out = new FileOutputStream(f);
-            try {
-                out.write(FIRST.getBytes("UTF-8"));
-            } finally {
-                out.close();
+            write(f, FIRST);
+        } else {
+            String text = upgrade(read(f));
+            if (text != null) {
+                write(f, text);
             }
         }
         Properties p = new Properties();
@@ -232,5 +265,39 @@ public final class Settings {
             in.close();
         }
         return parse(p);
+    }
+
+    /** What a file should hold instead (see #load), or null if it is fine as it is. */
+    static String upgrade(String text) {
+        if (text.contains(RIVAL_BEFORE)) {
+            return text.replace(RIVAL_BEFORE, RIVAL);
+        }
+        if (!text.contains("vida_rival")) {
+            return text + (text.isEmpty() || text.endsWith("\n") ? "\n" : "\n\n") + RIVAL;
+        }
+        return null;
+    }
+
+    private static String read(File f) throws IOException {
+        InputStream in = new FileInputStream(f);
+        try {
+            java.io.ByteArrayOutputStream b = new java.io.ByteArrayOutputStream();
+            byte[] buf = new byte[4096];
+            for (int n; (n = in.read(buf)) > 0; ) {
+                b.write(buf, 0, n);
+            }
+            return new String(b.toByteArray(), "UTF-8");
+        } finally {
+            in.close();
+        }
+    }
+
+    private static void write(File f, String text) throws IOException {
+        OutputStream out = new FileOutputStream(f);
+        try {
+            out.write(text.getBytes("UTF-8"));
+        } finally {
+            out.close();
+        }
     }
 }

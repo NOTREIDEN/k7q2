@@ -207,13 +207,15 @@ public final class Bot implements Wire.Tap {
      * 1 always, 2 once the server is seen to hide it; only in duels where
      * hits cost health) or a value in its place (pvpai.core.Agent#oppShown;
      * 0 off, 1 once the server is seen to hide it, 2 always; below zero its
-     * own health).
+     * own health); and what the guess takes a hit seen to cost, in plain
+     * hits (pvpai.core.Agent#hpGuessScale).
      */
-    public void rivalHealth(int guess, int shown, float value) {
+    public void rivalHealth(int guess, int shown, float value, float scale) {
         if (agent != null) {
             agent.hpGuess = guess > 0 && duel.realHealth;
             agent.hpGuessAuto = guess == 2;
             agent.hpGuessHit = duel.hitHealth;
+            agent.hpGuessScale = scale;
             agent.oppShown = shown > 0;
             agent.oppShownAuto = shown == 1;
             agent.oppShownHealth = value;
