@@ -236,6 +236,32 @@ final class Planner {
      * the first one the start. Null if there is none that gets closer.
      */
     List<int[]> plan(double px, double py, double pz, double gx, double gy, double gz, double tol) {
+        return plan(px, py, pz, gx, gy, gz, tol, MAX_NODES);
+    }
+
+    /**
+     * Whether standing at (x, y, z) has a drop of four or more right beside it (a pit, a cliff's
+     * edge): a knock or a slip there is a fall into somewhere hard to get out of.
+     */
+    private boolean brink(int x, int y, int z) {
+        long k = key(x, y, z);
+        Boolean b = brinks.get(k);
+        if (b != null) {
+            return b;
+        }
+        boolean out = false;
+        for (int i = 0; i < 4 && !out; i++) {
+            int nx = x + DIRS[i][0], nz = z + DIRS[i][1];
+            out = open(nx, y, nz) && open(nx, y - 1, nz) && open(nx, y - 2, nz) && open(nx, y - 3, nz) && !water(nx, y - 1, nz) && !water(nx, y - 2, nz);
+        }
+        brinks.put(k, out);
+        return out;
+    }
+
+    private final Map<Long, Boolean> brinks = new HashMap<Long, Boolean>();
+
+    List<int[]> plan(double px, double py, double pz, double gx, double gy, double gz, double tol, int budget) {
+        brinks.clear();
         int[] s = startAt(px, py, pz);
         Map<Long, Node> nodes = new HashMap<Long, Node>();
         PriorityQueue<Node> open = new PriorityQueue<Node>();
@@ -247,7 +273,7 @@ final class Planner {
         double bestH = start.f;
         Node goal = null;
         int opened = 0;
-        while (!open.isEmpty() && opened < MAX_NODES) {
+        while (!open.isEmpty() && opened < budget) {
             Node n = open.poll();
             if (n.closed) {
                 continue;
@@ -299,6 +325,10 @@ final class Planner {
                     continue;
                 }
                 if (water(nx, ny, nz) || inWater) {
+                    cost += 1.5;
+                }
+                if (brink(nx, ny, nz)) {
+                    // Along the edge of a drop only if there is no other way.
                     cost += 1.5;
                 }
                 add(nodes, open, n, nx, ny, nz, cost, gx, gy, gz);

@@ -144,6 +144,14 @@ final class Coach {
     private int harmNoMob;
     /** Ways that end short of their goal, the player stuck at their end: out by an ender pearl. */
     private boolean partial;
+    /**
+     * At the end of a way that stops short (a wall two or three high, a cliff) since when: a second
+     * there and a wider search for a way up one block at a time; none, a pearl up there at once;
+     * none of those either, the goal is left for another.
+     */
+    private long endSince = -1, widePlanAt = -10000, pearlTryAt = -10000, noPearlAt = -10000;
+    private boolean deadEndNow;
+    private static final boolean DEAD_END = !"false".equals(System.getProperty("chestai.deadend"));
     private int deadEnds;
     private long deadAt = -10000, pearlAt = -10000, pearlUntil = -1;
     private double pearlYaw, pearlPitch;
@@ -455,6 +463,38 @@ final class Coach {
             pgy = gy;
             pgz = gz;
         }
+        int[] endN = path == null ? null : path.get(path.size() - 1);
+        boolean atEnd = partial && (endN == null || hd(endN[0] + 0.5, endN[2] + 0.5, f.x, f.z) < 1.6);
+        boolean away = hd(gx, gz, f.x, f.z) > tol + 2.5 || gy - f.y > 2.0;
+        if (atEnd && away) {
+            if (endSince < 0) {
+                endSince = f.tick;
+            }
+        } else {
+            endSince = -1;
+        }
+        deadEndNow = DEAD_END && endSince >= 0 && f.tick - endSince >= 20;
+        if (deadEndNow && mode != FIGHT) {
+            if (f.tick - widePlanAt > 200) {
+                // Once in a while a search three times as wide: a way round or up a step at a time.
+                widePlanAt = f.tick;
+                planner.clear();
+                List<int[]> wide = planner.plan(f.x, f.y, f.z, gx, gy, gz, tol, Planner.MAX_NODES * 3);
+                if (wide != null && planner.reached) {
+                    path = wide;
+                    partial = false;
+                    pi = 0;
+                    pathAt = f.tick;
+                    endSince = -1;
+                    deadEndNow = false;
+                }
+            }
+            if (deadEndNow && mode != APPROACH) {
+                // No way up on foot: a pearl (after mobs, none: those are left alone instead).
+                deadEnds = 2;
+                deadAt = f.tick;
+            }
+        }
         if (path == null) {
             aim(gx, eyeY(f) - 0.4, gz);
             jumpUp = (f.collidedH && f.onGround) || swim;
@@ -738,6 +778,17 @@ final class Coach {
             }
         }
         return new double[] {near, when};
+    }
+
+    /** At a dead end on the way to chest k with no pearl to throw: another chest for a minute. */
+    private void giveUp(Memory.Known k, long t) {
+        if (deadEndNow && t - noPearlAt < 40) {
+            k.skipUntil = t + 1200;
+            hasGoal = false;
+            goalAt = -1000;
+            endSince = -1;
+            deadEndNow = false;
+        }
     }
 
     /** How far the nearest mob is from this spot, across. */
@@ -1061,14 +1112,18 @@ final class Coach {
         }
         boolean pearlOk = lay.real[Pilot.PEARL] >= 0 && lay.pearls > 0 && f.pearlCdLeft == 0 && heal == HEAL_NONE
             && hp + f.absorption >= 12.0f && !pilot.using;
-        if (pearlUntil < t && deadEnds >= 2 && pearlOk && t - pearlAt > 300) {
-            double[] shot = pearlShot(f);
+        if (pearlUntil < t && deadEnds >= 2 && t - pearlTryAt >= 40) {
+            pearlTryAt = t;
+            double[] shot = pearlOk && t - pearlAt > 160 ? pearlShot(f) : null;
             deadEnds = 0;
             if (shot != null) {
                 pearlYaw = shot[0];
                 pearlPitch = shot[1];
                 pearlUntil = t + 50;
                 pearlThrown = false;
+            } else {
+                // No pearl, or none that lands nearer: the goal is given up for now (below).
+                noPearlAt = t;
             }
         }
         if (pearlUntil >= t && heal == HEAL_NONE) {
@@ -1218,6 +1273,16 @@ final class Coach {
                 }
                 go(f, gc[0], gc[1], gc[2], 1.5);
                 aim(tx, gc[1] + 1.0, tz);
+                if (deadEndNow) {
+                    // The way to them stops short (up a cliff, down a pit): left alone now, not in eight seconds.
+                    for (Frame.Mob m : focus) {
+                        if (hd(m.x, m.z, gc[0], gc[2]) < 5.0) {
+                            unreach.put(m.id, t + 600);
+                        }
+                    }
+                    endSince = -1;
+                    deadEndNow = false;
+                }
             }
         } else if (lock >= 0) {
             // The wave's mobs are out of sight for now: back to its chest and wait there.
@@ -1289,6 +1354,7 @@ final class Coach {
                 } else if (k.seen && k.state == Frame.CLAIMABLE) {
                     mode = TRAVEL;
                     go(f, k.cx(), k.y, k.cz(), 2.0);
+                    giveUp(k, t);
                 } else if (shooter != null && ds < 8.0 && (cv = cover(f, standX, standZ, t)) != null) {
                     // Arrows from one that cannot be got at: the wait out of its sight, behind something.
                     mode = WAIT;
@@ -1305,6 +1371,7 @@ final class Coach {
                 } else {
                     mode = k.seen ? TRAVEL : EXPLORE;
                     go(f, standX, k.y, standZ, 1.5);
+                    giveUp(k, t);
                     boost(f, pilot, a, lay, dc);
                 }
             }
@@ -1319,6 +1386,9 @@ final class Coach {
             }
             mode = EXPLORE;
             go(f, wanderX, f.y, wanderZ, 2.0);
+            if (deadEndNow && t - noPearlAt < 40) {
+                wanderAt = -10000;
+            }
         }
         if (!boosting && heal == HEAL_NONE && !pilot.using && pilot.slot != Pilot.SWORD && lay.real[Pilot.SWORD] >= 0) {
             a[8] = 1 + Pilot.SWORD;
@@ -1356,7 +1426,7 @@ final class Coach {
             trapAt = t;
             return;
         }
-        if (t - trapAt > 240 && (hd(objX, objZ, f.x, f.z) > 5.0 || objY - f.y > 2.5)) {
+        if (t - trapAt > (DEAD_END ? 100 : 240) && (hd(objX, objZ, f.x, f.z) > 5.0 || objY - f.y > 2.5)) {
             trapAt = t;
             deadEnds = 2;
             pgx = objX;
