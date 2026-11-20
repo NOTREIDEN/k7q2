@@ -1,0 +1,64 @@
+name: chestai-mod
+
+# Builds the Chest AI mod (chestai/mod), lets it play in a Forge client for
+# its self test and puts the jar on the branch "chestai-mod". It starts on a
+# push to the Chest AI branch whose commit message has "[chestai-mod]".
+on:
+  push:
+    branches: [claude/project-thread-v5n15f]
+
+permissions:
+  contents: write
+
+concurrency:
+  group: chestai-mod
+  cancel-in-progress: true
+
+jobs:
+  build:
+    if: contains(github.event.head_commit.message, '[chestai-mod]')
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    defaults:
+      run:
+        working-directory: chestai/mod
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: |
+            8
+            17
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: "8.8"
+      - name: Checks of the game-free core
+        run: |
+          mkdir -p /tmp/core
+          javac -d /tmp/core $(find core/src -name '*.java')
+          java -cp /tmp/core chestai.core.HoloCheck
+      - name: Build
+        run: gradle build --no-daemon
+      - name: Self test in a Forge client
+        run: |
+          sudo apt-get install -y -q xvfb > /dev/null
+          xvfb-run -a gradle selftest --no-daemon || true
+          cat run/selftest.txt
+          grep -q '^ok' run/selftest.txt
+      - name: The self test's play log
+        if: always()
+        run: tail -n 60 run/config/chestai/registro.txt || true
+      - name: Put the jar on the branch chestai-mod
+        run: |
+          J=$(ls build/libs/chestai*.jar | grep -v -e dev -e sources | head -n 1)
+          W=/tmp/chestai-mod-pub
+          rm -rf "$W" && mkdir -p "$W" && cp "$J" "$W/chestai-1.8.9.jar" && cp run/selftest.txt "$W/selftest.txt"
+          cd "$W"
+          git init -q
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git checkout -q --orphan chestai-mod
+          git add -A
+          git commit -q -m "Chest AI mod of ${GITHUB_SHA::8}"
+          git push -qf "https://x-access-token:${{ github.token }}@github.com/${{ github.repository }}" HEAD:refs/heads/chestai-mod
