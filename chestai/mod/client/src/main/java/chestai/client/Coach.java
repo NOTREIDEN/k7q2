@@ -107,6 +107,9 @@ final class Coach {
     private int[] cover;
     /** Drawing the bow at a shooter that cannot be got to, since when, and when the last arrow went. */
     private long shootFrom = -1, shootTick = -1000, lastShot = -1000;
+    /** A potion, an apple or food wanted this tick, and the nearest mob: no bow then (it would hold the hand). */
+    private boolean healWanted;
+    private double nearestMob = 1e9;
     private final double[] lifeAgo = new double[40];
     private boolean lifeSet;
     private long retreatUntil = -1, retreatSpotAt = -10000;
@@ -858,8 +861,10 @@ final class Coach {
      */
     private boolean shootBack(Frame f, Pilot pilot, int[] a, Layout lay) {
         Frame.Mob m = shooter;
-        boolean can = s.bowMobs && m != null && heal == HEAL_NONE && lay.real[Pilot.BOW] >= 0 && lay.arrows > 0 && !swim && !inWater(f)
-            && f.tick - lastShot > 10;
+        // Never with healing wanted (a drawn bow keeps the hand from the apple and the potion), low,
+        // or with a mob close by.
+        boolean can = s.bowMobs && m != null && heal == HEAL_NONE && !healWanted && f.hp + f.absorption > 12.0f && nearestMob > 5.0
+            && lay.real[Pilot.BOW] >= 0 && lay.arrows > 0 && !swim && !inWater(f) && f.tick - lastShot > 10;
         double hx = can ? hd(m.x, m.z, f.x, f.z) : 0.0;
         double ty = can ? m.y + Math.max(m.h, 1.0) * 0.6 : 0.0;
         can = can && hx > 4.0 && hx < 30.0 && Math.abs(ty - eyeY(f)) < 12.0
@@ -1149,6 +1154,8 @@ final class Coach {
         boolean foodNeed = s.foodFull && !potNeed && !appleNeed && !eating && f.food < 20 && !claimNear && !fleeing
             && (nearest > 3.5 || f.food <= 14)
             && (haveFood || (haveApple && (f.food <= 6 || (f.food <= 16 && appleGap))));
+        healWanted = potNeed || appleNeed || foodNeed;
+        nearestMob = nearest;
         if (drawing && (potNeed || appleNeed || foodNeed || !cand.isEmpty())) {
             // The bow is let go: something matters more.
             boosting = false;
@@ -1198,10 +1205,18 @@ final class Coach {
         boolean regen = f.food >= 18 || haveFood || haveApple;
         if (RETREAT_ON && t >= retreatUntil && threat) {
             double exit = 0.0;
-            if (!havePot && !haveApple && life <= 11.0) {
-                exit = RETREAT_OLD ? 17.0 : 18.0;
-            } else if (life <= 6.0 || (!havePot && life <= 12.0 && lifeBefore - life >= 6.0)) {
-                exit = RETREAT_OLD ? 14.0 : 16.0;
+            if (RETREAT_OLD) {
+                if (!havePot && !haveApple && life <= 11.0) {
+                    exit = 17.0;
+                } else if (life <= 6.0 || (!havePot && life <= 12.0 && lifeBefore - life >= 6.0)) {
+                    exit = 14.0;
+                }
+            } else if (!havePot && !haveApple && life <= 14.0) {
+                // Nothing left to heal with: out sooner, back only nearly full.
+                exit = 18.0;
+            } else if (life <= 7.0 || (life <= 13.0 && lifeBefore - life >= 6.0)) {
+                // Very low, or six gone in two seconds (an area blow, arrows, all at once).
+                exit = 16.0;
             }
             if (exit > 0.0) {
                 retreatExit = exit;
@@ -1419,7 +1434,8 @@ final class Coach {
             // The wave's mobs are out of sight for now: back to its chest and wait there.
             mode = GUARD;
             Memory.Known k = mem.chests.get(lock);
-            if (lastMode != GUARD || guardSince < 0) {
+            if (lastMode != GUARD || guardSince < 0 || t - shootTick <= 2) {
+                // (Not while its archer is being shot at.)
                 guardSince = t;
             }
             if (t - guardSince > 400 || (deadEndNow && t - noPearlAt < 40)) {
