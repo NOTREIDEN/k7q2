@@ -148,16 +148,42 @@ public final class Policy {
     }
 
     /**
+     * How firmly the choices follow the preferences: each control's are
+     * divided by this before the draw. 1 as in training; below one the
+     * likeliest choices come more often; 0 always the likeliest.
+     */
+    public float temperature = 1.0f;
+
+    /**
      * One tick: take the observation in and draw a choice for each control
-     * by its preferences, as in training.
+     * by its preferences, as in training (at {@link #temperature}).
      */
     public int[] act(float[] obs, Random rng) {
         float[][] lg = logits(obs);
         int[] a = new int[lg.length];
         for (int i = 0; i < lg.length; i++) {
-            a[i] = draw(lg[i], rng);
+            a[i] = temperature == 1.0f ? draw(lg[i], rng) : draw(lg[i], temperature, rng);
         }
         return a;
+    }
+
+    /** A choice drawn with the preferences divided by t; at t 0 or below the likeliest (the first of equals). */
+    static int draw(float[] lg, float t, Random rng) {
+        if (t <= 0.0f) {
+            rng.nextDouble();
+            int best = 0;
+            for (int i = 1; i < lg.length; i++) {
+                if (lg[i] > lg[best]) {
+                    best = i;
+                }
+            }
+            return best;
+        }
+        float[] s = new float[lg.length];
+        for (int i = 0; i < lg.length; i++) {
+            s[i] = lg[i] / t;
+        }
+        return draw(s, rng);
     }
 
     /** A choice drawn with chances in proportion to exp(preference). */

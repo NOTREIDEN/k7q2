@@ -64,6 +64,20 @@ public final class Settings {
     public int oppShown = 0;
     public float oppShownHealth = 10.0f;
     public float hpGuessScale = 1.3f;
+    /**
+     * How firmly the agent follows its preferences (temperatura,
+     * pvpai.core.Policy#temperature): 1 as in training, 0 always the
+     * likeliest choice. Default 0.7: in long minemen-like duels against
+     * the 23:40 network and the shipped one, it won 5 points more than 1
+     * in the simulator.
+     */
+    public float temperature = 0.7f;
+
+    /** The line on the temperature, before those on the opponent's health. */
+    static final String TEMPERATURE = ""
+        + "# Que tan fijo elige el bot: 1 como en el entrenamiento; mas bajo, elige mas seguido lo que mas le\n"
+        + "# conviene (0: siempre eso).\n"
+        + "temperatura=0.7\n";
 
     /** The lines on the opponent's health, last in the file. */
     static final String RIVAL = ""
@@ -122,6 +136,8 @@ public final class Settings {
         + "\n"
         + "# Soltar el bloqueo en el giro de una pocion tirada con giro, para que el clic no se pierda.\n"
         + "soltar_bloqueo=no\n"
+        + "\n"
+        + TEMPERATURE
         + "\n"
         + RIVAL;
 
@@ -195,6 +211,10 @@ public final class Settings {
                 }
             }
         }
+        v = numbers(p.getProperty("temperatura"), " ");
+        if (v != null && v.length == 1 && v[0] >= 0.0 && v[0] <= 2.0) {
+            s.temperature = (float) v[0];
+        }
         v = numbers(p.getProperty("vida_rival_golpe"), " ");
         if (v != null && v.length == 1 && v[0] > 0.0 && v[0] <= 5.0) {
             s.hpGuessScale = (float) v[0];
@@ -242,7 +262,8 @@ public final class Settings {
      * Read a file; one that is not there is written first, with the
      * defaults. One that holds the lines on the opponent's health as an
      * earlier jar wrote them, untouched, gets the new ones in their place;
-     * one with none gets them at the end.
+     * lines a file lacks (the temperature, the opponent's health) are added,
+     * before those on the opponent's health or at the end.
      */
     public static Settings load(File f) throws IOException {
         if (!f.exists()) {
@@ -269,13 +290,23 @@ public final class Settings {
 
     /** What a file should hold instead (see #load), or null if it is fine as it is. */
     static String upgrade(String text) {
-        if (text.contains(RIVAL_BEFORE)) {
-            return text.replace(RIVAL_BEFORE, RIVAL);
+        String t = text;
+        if (t.contains(RIVAL_BEFORE)) {
+            t = t.replace(RIVAL_BEFORE, RIVAL);
         }
-        if (!text.contains("vida_rival")) {
-            return text + (text.isEmpty() || text.endsWith("\n") ? "\n" : "\n\n") + RIVAL;
+        if (!t.contains("temperatura")) {
+            int at = t.indexOf(RIVAL);
+            t = at >= 0 ? t.substring(0, at) + TEMPERATURE + "\n" + t.substring(at) : end(t) + TEMPERATURE;
         }
-        return null;
+        if (!t.contains("vida_rival")) {
+            t = end(t) + RIVAL;
+        }
+        return t.equals(text) ? null : t;
+    }
+
+    /** The text with a blank line after it, to add lines at the end. */
+    private static String end(String t) {
+        return t.isEmpty() ? t : t.endsWith("\n\n") ? t : t.endsWith("\n") ? t + "\n" : t + "\n\n";
     }
 
     private static String read(File f) throws IOException {

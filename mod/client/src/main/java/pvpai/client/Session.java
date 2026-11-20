@@ -137,6 +137,7 @@ public final class Session implements Wire.Tap {
         double cps = s.cpsMin + draws.nextDouble() * (s.cpsMax - s.cpsMin);
 
         policy.reset();
+        policy.temperature = s.temperature;
         bot = new Bot(mc, other, d, ping, otherPing, cps, new Bot.Chooser() {
             public int[] choose(float[] obs) {
                 return policy.act(obs, draws);
