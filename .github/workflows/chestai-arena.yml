@@ -23,9 +23,9 @@ jobs:
       fail-fast: false
       matrix:
         seed: [11, 22, 33, 44, 55, 66, 77, 88, 101, 202, 303, 404, 505, 606, 707, 808]
-        # base: as the mod plays. olddeadend: the same waiting at the end of a way that stops short
-        # (twelve seconds before a pearl, no wider search, no giving the goal up).
-        variant: [base, olddeadend]
+        # base: as the mod plays. newmaps: the same on other maps (the seed plus 1000: the same
+        # kind of waves, other ground), to see that it holds away from the maps it was tuned on.
+        variant: [base, newmaps]
     runs-on: ubuntu-latest
     timeout-minutes: 60
     defaults:
@@ -48,10 +48,11 @@ jobs:
       - name: Play seed ${{ matrix.seed }} (${{ matrix.variant }})
         run: |
           J=""
-          if [ "${{ matrix.variant }}" = "olddeadend" ]; then J="-Dchestai.deadend=false"; fi
+          S=${{ matrix.seed }}
+          if [ "${{ matrix.variant }}" = "newmaps" ]; then S=$((S + 1000)); fi
           sudo apt-get update -q
           sudo apt-get install -y -q xvfb x11-xserver-utils libgl1-mesa-dri libglx-mesa0 libxrandr2 libxcursor1 libxxf86vm1 libxi6 libxtst6 libxrender1 > /dev/null
-          LIBGL_ALWAYS_SOFTWARE=1 timeout 3000 xvfb-run -a -s "-screen 0 854x480x24" gradle arena -Parena.seed=${{ matrix.seed }} -Parena.seconds=900 -Parena.variant=${{ matrix.variant }} "-Parena.jvm=$J" --no-daemon --stacktrace > arena.log 2>&1 || true
+          LIBGL_ALWAYS_SOFTWARE=1 timeout 3000 xvfb-run -a -s "-screen 0 854x480x24" gradle arena -Parena.seed=$S -Parena.seconds=900 -Parena.variant=${{ matrix.variant }} "-Parena.jvm=$J" --no-daemon --stacktrace > arena.log 2>&1 || true
           grep -v -e '^\s*at ' -e '^\s*\.\.\. [0-9]* more' -e Authentication -e JsonSyntax -e BEGIN_OBJECT arena.log | grep -e ARENA -e Exception -e ERROR -e 'error:' | sed 's/^.*\]: //' | head -n 2000
           mkdir -p out
           cp run/arena.txt out/ 2>/dev/null || echo "seed=${{ matrix.seed }} FAILED" > out/arena.txt

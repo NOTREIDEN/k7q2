@@ -151,6 +151,8 @@ final class Coach {
      */
     private long endSince = -1, widePlanAt = -10000, pearlTryAt = -10000, noPearlAt = -10000;
     private boolean deadEndNow;
+    /** Guarding a wave none of whose mobs can be fought, since when: after twenty seconds that wave is left for a minute. */
+    private long guardSince = -1;
     private static final boolean DEAD_END = !"false".equals(System.getProperty("chestai.deadend"));
     private int deadEnds;
     private long deadAt = -10000, pearlAt = -10000, pearlUntil = -1;
@@ -380,7 +382,7 @@ final class Coach {
         for (int i = 0; i < mem.chests.size(); i++) {
             Memory.Known k = mem.chests.get(i);
             double d = hd(k.cx(), k.cz(), f.x, f.z);
-            if (!k.seen || k.state != Frame.ACTIVE || f.tick - k.tick >= 200 || d >= LOCK_R) {
+            if (!k.seen || k.state != Frame.ACTIVE || f.tick - k.tick >= 200 || d >= LOCK_R || f.tick < k.skipUntil) {
                 continue;
             }
             boolean sooner = lock < 0 || k.activeSeenAt < first - 20;
@@ -1288,6 +1290,15 @@ final class Coach {
             // The wave's mobs are out of sight for now: back to its chest and wait there.
             mode = GUARD;
             Memory.Known k = mem.chests.get(lock);
+            if (lastMode != GUARD || guardSince < 0) {
+                guardSince = t;
+            }
+            if (t - guardSince > 400 || (deadEndNow && t - noPearlAt < 40)) {
+                // Its mobs out of reach or out of sight all this while (or its chest cannot be got to):
+                // other chests for a minute, then back.
+                k.skipUntil = t + 1200;
+                guardSince = -1;
+            }
             int[] cv = shooter != null ? cover(f, k.cx(), k.cz(), t) : null;
             if (cv != null) {
                 coverOn = true;
