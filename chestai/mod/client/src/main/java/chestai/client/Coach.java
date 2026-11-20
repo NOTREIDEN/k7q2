@@ -79,10 +79,19 @@ final class Coach {
      * across water it cannot get out of): left alone for half a minute unless they come in reach.
      */
     private final java.util.Map<Integer, Long> unreach = new java.util.HashMap<Integer, Long>();
+    /**
+     * Mobs in reach that no blow reaches (under leaves, behind a block, in a hole below): seven
+     * seconds the target without a hurt (clicking) or out of a click's sight (not clicking, another
+     * module hitting): left alone for half a minute, reach or not.
+     */
+    private final java.util.Map<Integer, Long> unhit = new java.util.HashMap<Integer, Long>();
+    private int hitTgt = -1;
+    private long hitSeen;
     private double apprBest = 1e9;
     private long apprAt = -1000, apprLast = -1000;
     /** Mobs whose arrows (or fireballs, snowballs) came at the player, and when last. */
     private final java.util.Map<Integer, Long> shotAt = new java.util.HashMap<Integer, Long>();
+    private static final boolean SHOOTERS = !"false".equals(System.getProperty("chestai.shooters"));
     /** A mob shooting at the player now (the nearest), and whether it is fought; strafing meanwhile. */
     private Frame.Mob shooter;
     private boolean evade, coverOn;
@@ -652,8 +661,9 @@ final class Coach {
         Memory.Known k = mem.chests.get(lock);
         List<Frame.Mob> own = new ArrayList<Frame.Mob>();
         for (Frame.Mob m : f.mobs) {
-            Long gone = unreach.get(m.id);
-            if (hd(m.x, m.z, k.cx(), k.cz()) < 12.0 && Math.abs(m.y - k.y) <= 8.0 && (gone == null || gone <= t || reach(f, m) <= REACH + 1.0)) {
+            Long gone = unreach.get(m.id), nohit = unhit.get(m.id);
+            if (hd(m.x, m.z, k.cx(), k.cz()) < 12.0 && Math.abs(m.y - k.y) <= 8.0 && (gone == null || gone <= t || reach(f, m) <= REACH)
+                    && (nohit == null || nohit <= t)) {
                 own.add(m);
             }
         }
@@ -884,8 +894,8 @@ final class Coach {
             if (d < 8.0) {
                 close++;
             }
-            Long gone = unreach.get(m.id);
-            if (gone != null && gone > t && reach(f, m) > REACH + 1.0) {
+            Long gone = unreach.get(m.id), nohit = unhit.get(m.id);
+            if ((gone != null && gone > t && reach(f, m) > REACH) || (nohit != null && nohit > t)) {
                 continue;
             }
             if (d <= engage && Math.abs(m.y - f.y) <= 8.0) {
@@ -894,7 +904,7 @@ final class Coach {
         }
         // Who is shooting at the player: a projectile of a mob's that comes within two blocks.
         for (Frame.Proj p : f.projs) {
-            if (p.owner >= 0 && (p.kind == Frame.ARROW || p.kind == Frame.SNOWBALL)) {
+            if (SHOOTERS && p.owner >= 0 && (p.kind == Frame.ARROW || p.kind == Frame.SNOWBALL)) {
                 double[] c = closest(f, p);
                 if (c[0] < 2.0 && c[1] >= 0 && c[1] <= 25) {
                     shotAt.put(p.owner, t);
@@ -917,8 +927,8 @@ final class Coach {
             }
         }
         if (shooter != null && sd <= 20.0 && Math.abs(shooter.y - f.y) <= 8.0 && !cand.contains(shooter)) {
-            Long gone = unreach.get(shooter.id);
-            if (gone == null || gone <= t) {
+            Long gone = unreach.get(shooter.id), nohit = unhit.get(shooter.id);
+            if ((gone == null || gone <= t) && (nohit == null || nohit <= t)) {
                 // One shooting from out there is gone for too, not only the ones close by.
                 cand.add(shooter);
             }
@@ -1145,6 +1155,20 @@ final class Coach {
             if (tgt != null) {
                 mode = FIGHT;
                 target = tgt.id;
+                if (tgt.id != hitTgt) {
+                    hitTgt = tgt.id;
+                    hitSeen = t;
+                }
+                if (tgt.hurtTime > 0 || (!s.hit && tgtY == tgtY)) {
+                    hitSeen = t;
+                }
+                if (t - hitSeen > 140) {
+                    if (unhit.size() > 64) {
+                        unhit.values().removeIf(u -> u <= t);
+                    }
+                    unhit.put(tgt.id, t + 600);
+                    hitTgt = -1;
+                }
                 // Low on the body (the name a server keeps over a mob's head can be in the way higher up),
                 // higher where grass or a block is in the way. On a horse: the rider, not the horse.
                 double ax = tgt.x + tgt.mx * 2.0, az = tgt.z + tgt.mz * 2.0,

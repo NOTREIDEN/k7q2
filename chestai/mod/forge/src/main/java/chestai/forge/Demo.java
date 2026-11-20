@@ -75,6 +75,8 @@ final class Demo {
         EntityArmorStand holo, holo2;
         final java.util.Map<EntityLiving, EntityArmorStand> tags = new java.util.HashMap<EntityLiving, EntityArmorStand>();
         int state = READY, timer, waveTicks;
+        /** Where its mobs are put back when they stray (a spot with ground by the chest). */
+        double[] leash;
         long started, clearedAt;
         final List<EntityLiving> mobs = new ArrayList<EntityLiving>();
         /** Mobs of the wave with a bow that keep back and shoot, and where each stands. */
@@ -864,7 +866,10 @@ final class Demo {
                         }
                     } else if (Math.hypot(m.posX - cx, m.posZ - cz) > 5.5) {
                         Entity top = m.ridingEntity != null ? m.ridingEntity : m;
-                        top.setPositionAndUpdate(cx + 1.5, c.pos.getY(), cz + 1.5);
+                        if (c.leash == null) {
+                            c.leash = place(w, c, cx + 1.5, cz + 1.5);
+                        }
+                        top.setPositionAndUpdate(c.leash[0], c.leash[1], c.leash[2]);
                     }
                 }
                 if (c.mobs.isEmpty()) {
@@ -965,12 +970,32 @@ final class Demo {
     }
 
     /** Where a mob of the wave stands: on the ground by the chest, not in it. */
-    private static int mobY(WorldServer w, Chest c, double x, double z) {
+    /**
+     * Where a mob of chest c can stand near (x, z): the nearest column within four blocks with ground
+     * (or water) at most two blocks above or below the chest, not the chest's own; not up a tree, on
+     * a roof or inside a hill, where it could be neither reached nor hit. As before if there is none.
+     */
+    private static double[] place(WorldServer w, Chest c, double x, double z) {
+        int cy = c.pos.getY(), x0 = (int) Math.floor(x), z0 = (int) Math.floor(z);
         if (!ARENA) {
-            return c.pos.getY();
+            return new double[] {x, cy, z};
         }
-        int y = top(w, (int) Math.floor(x), (int) Math.floor(z));
-        return Math.abs(y - c.pos.getY()) <= 3 ? y : c.pos.getY() + 1;
+        for (int r = 0; r <= 4; r++) {
+            for (int dx = -r; dx <= r; dx++) {
+                for (int dz = -r; dz <= r; dz++) {
+                    int bx = x0 + dx, bz = z0 + dz;
+                    if (Math.max(Math.abs(dx), Math.abs(dz)) != r || (bx == c.pos.getX() && bz == c.pos.getZ())) {
+                        continue;
+                    }
+                    int y = top(w, bx, bz);
+                    Material under = w.getBlockState(new BlockPos(bx, y - 1, bz)).getBlock().getMaterial();
+                    if (Math.abs(y - cy) <= 2 && (groundLike(under) || under == Material.water)) {
+                        return new double[] {bx + 0.5, y, bz + 0.5};
+                    }
+                }
+            }
+        }
+        return new double[] {x, cy + 1, z};
     }
 
     private void spawn(WorldServer w, Chest c) {
@@ -981,7 +1006,10 @@ final class Demo {
         double cx = c.pos.getX() + 0.5, cz = c.pos.getZ() + 0.5;
         for (int i = 0; i < 5; i++) {
             double a = i * Math.PI * 2 / 5, x = cx + 2.5 * Math.cos(a), z = cz + 2.5 * Math.sin(a);
-            int y = mobY(w, c, x, z);
+            double[] pl = place(w, c, x, z);
+            x = pl[0];
+            z = pl[2];
+            int y = (int) pl[1];
             EntityLiving m;
             if (i == 4) {
                 EntitySkeleton sk = new EntitySkeleton(w);
@@ -1016,14 +1044,20 @@ final class Demo {
         double cx = c.pos.getX() + 0.5, cz = c.pos.getZ() + 0.5;
         for (int i = 0; i < 5; i++) {
             double a = i * Math.PI * 2 / 5, x = cx + 2.5 * Math.cos(a), z = cz + 2.5 * Math.sin(a);
-            int y = mobY(w, c, x, z);
+            double[] pl = place(w, c, x, z);
+            x = pl[0];
+            z = pl[2];
+            int y = (int) pl[1];
             EntityLiving m;
             boolean archer = ARENA && i == 2;
             if (archer) {
                 // The archer keeps back, 7 blocks out, and shoots.
                 x = cx + 7.0 * Math.cos(a);
                 z = cz + 7.0 * Math.sin(a);
-                y = mobY(w, c, x, z);
+                pl = place(w, c, x, z);
+                x = pl[0];
+                z = pl[2];
+                y = (int) pl[1];
             }
             if (i < 3) {
                 EntitySkeleton sk = new EntitySkeleton(w);
