@@ -14,6 +14,8 @@ import net.minecraft.client.gui.inventory.GuiContainer;
 import net.minecraft.client.multiplayer.ServerData;
 import net.minecraft.client.multiplayer.WorldClient;
 import net.minecraft.client.network.NetworkPlayerInfo;
+import net.minecraft.tileentity.TileEntity;
+import net.minecraft.util.BlockPos;
 import net.minecraft.util.MouseHelper;
 import chestai.core.Frame;
 import chestai.core.Memory;
@@ -136,7 +138,7 @@ public final class Session {
     }
 
     private static long blockKey(int x, int y, int z) {
-        return new net.minecraft.util.BlockPos(x, y, z).toLong();
+        return new BlockPos(x, y, z).toLong();
     }
 
     private void loadNotFarm() {
@@ -169,7 +171,7 @@ public final class Session {
             PrintWriter w = new PrintWriter(new FileWriter(notFarmFile));
             try {
                 for (long k : notFarm) {
-                    net.minecraft.util.BlockPos p = net.minecraft.util.BlockPos.fromLong(k);
+                    BlockPos p = BlockPos.fromLong(k);
                     w.println(p.getX() + " " + p.getY() + " " + p.getZ());
                 }
             } finally {
@@ -191,7 +193,7 @@ public final class Session {
             if (!(o instanceof net.minecraft.tileentity.TileEntityChest)) {
                 continue;
             }
-            net.minecraft.util.BlockPos p = ((net.minecraft.tileentity.TileEntity) o).getPos();
+            BlockPos p = ((TileEntity) o).getPos();
             double dx = p.getX() + 0.5 - f.x, dz = p.getZ() + 0.5 - f.z;
             long k = p.toLong();
             if (dx * dx + dz * dz > settings.searchRadius * settings.searchRadius || notFarm.contains(k)
@@ -209,7 +211,7 @@ public final class Session {
         boolean changed = false;
         while (it.hasNext()) {
             java.util.Map.Entry<Long, Integer> e = it.next();
-            net.minecraft.util.BlockPos p = net.minecraft.util.BlockPos.fromLong(e.getKey());
+            BlockPos p = BlockPos.fromLong(e.getKey());
             int ci = mem.near(p.getX(), p.getY(), p.getZ(), 0.5);
             if (ci < 0 || mem.chests.get(ci).seen) {
                 // Gone, or a farm chest after all.

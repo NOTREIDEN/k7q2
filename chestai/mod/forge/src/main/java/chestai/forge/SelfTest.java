@@ -105,6 +105,7 @@ final class SelfTest {
                 return;
             }
             ticks = 0;
+            EntityPlayerSP me = mc.thePlayer;
             potsAt = count(me, "potion");
             applesAt = count(me, "golden_apple");
             mod.flip(mc);
