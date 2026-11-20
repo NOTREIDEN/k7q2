@@ -87,6 +87,12 @@ final class Coach {
     private int[] dry;
     private long escapeUntil = -1, claimSince = -1;
     private int harmNoMob;
+    /** Ways that end short of their goal, the player stuck at their end: out by an ender pearl. */
+    private boolean partial;
+    private int deadEnds;
+    private long deadAt = -10000, pearlAt = -10000, pearlUntil = -1;
+    private double pearlYaw, pearlPitch;
+    private boolean pearlThrown;
 
     Coach(Settings s, Planner planner) {
         this.s = s;
@@ -327,6 +333,11 @@ final class Coach {
         planner.now(f.tick);
         if (stuck) {
             movedAt = f.tick;
+            if (partial) {
+                // Stuck where the way ends short of the goal: a pit, a ravine, a pond with high banks.
+                deadEnds = f.tick - deadAt < 600 ? deadEnds + 1 : 1;
+                deadAt = f.tick;
+            }
             if (path != null && f.tick - stuckAt < 300 && hd(stuckX, stuckZ, f.x, f.z) < 2.0) {
                 // Stuck again at the same place: the next spot of the way is left out for a while.
                 int[] n = path.get(Math.min(path.size() - 1, pi + 1));
@@ -358,6 +369,7 @@ final class Coach {
         if (far || f.tick - pathAt > 40) {
             planner.clear();
             path = planner.plan(f.x, f.y, f.z, gx, gy, gz, tol);
+            partial = path == null || !planner.reached;
             pi = 0;
             pathAt = f.tick;
             pgx = gx;
@@ -399,6 +411,71 @@ final class Coach {
         aim(to[0] + 0.5, Math.max(to[1] + 1.2, eyeY(f) - 0.6), to[2] + 0.5);
         int[] next = path.get(Math.min(last, pi + 1));
         jumpUp = next[1] > Math.floor(f.y + 0.01) || (f.collidedH && f.onGround) || (swim && next[1] >= Math.floor(f.y + 0.01));
+    }
+
+    /**
+     * Where an ender pearl thrown with this yaw and pitch comes down: the
+     * spot it lands in front of, or null if it flies on or hits nothing to
+     * stand on. As the game moves it: 1.5 blocks a tick, 1% drag, 0.03 down.
+     */
+    private int[] pearlLands(Frame f, double yaw, double pitch) {
+        double yr = Math.toRadians(yaw), pr = Math.toRadians(pitch);
+        double x = f.x, y = eyeY(f) - 0.1, z = f.z;
+        double mx = -Math.sin(yr) * Math.cos(pr) * 1.5, my = -Math.sin(pr) * 1.5, mz = Math.cos(yr) * Math.cos(pr) * 1.5;
+        int[] air = null;
+        for (int i = 0; i < 100; i++) {
+            for (int s = 1; s <= 6; s++) {
+                double px = x + mx * s / 6.0, py = y + my * s / 6.0, pz = z + mz * s / 6.0;
+                int bx = (int) Math.floor(px), by = (int) Math.floor(py), bz = (int) Math.floor(pz);
+                if (by < 0 || by > 255) {
+                    return null;
+                }
+                if (planner.open(bx, by, bz)) {
+                    air = new int[] {bx, by, bz};
+                    continue;
+                }
+                if (air == null) {
+                    return null;
+                }
+                // Down on top of something, or against its side with ground under: a spot to stand.
+                for (int dy = 0; dy >= -2; dy--) {
+                    if (planner.stand(air[0], air[1] + dy, air[2])) {
+                        return new int[] {air[0], air[1] + dy, air[2]};
+                    }
+                }
+                return null;
+            }
+            x += mx;
+            y += my;
+            z += mz;
+            mx *= 0.99;
+            my = my * 0.99 - 0.03;
+            mz *= 0.99;
+        }
+        return null;
+    }
+
+    /** {yaw, pitch} of a pearl that lands clearly nearer the goal of the way, out of the hole the player is in, or null. */
+    private double[] pearlShot(Frame f) {
+        planner.clear();
+        double toGoal = Math.toDegrees(Math.atan2(-(pgx - f.x), pgz - f.z));
+        double best = hd(pgx, pgz, f.x, f.z) + 0.3 * Math.abs(pgy - f.y) - 4.0;
+        double[] out = null;
+        int y0 = (int) Math.floor(f.y + 0.01);
+        for (int dyaw = -90; dyaw <= 90; dyaw += 15) {
+            for (int pitch = -75; pitch <= 25; pitch += 2) {
+                int[] l = pearlLands(f, toGoal + dyaw, pitch);
+                if (l == null || hd(l[0] + 0.5, l[2] + 0.5, f.x, f.z) < 3.0 || l[1] < y0 - 1 || planner.water(l[0], l[1], l[2])) {
+                    continue;
+                }
+                double d = hd(l[0] + 0.5, l[2] + 0.5, pgx, pgz) + 0.3 * Math.abs(l[1] - pgy);
+                if (d < best) {
+                    best = d;
+                    out = new double[] {toGoal + dyaw, pitch};
+                }
+            }
+        }
+        return out;
     }
 
     /** The view clear up and ahead for an arrow shot up, and open ground ahead for the boost. */
@@ -513,7 +590,31 @@ final class Coach {
             escapeUntil = t + 60;
             harmNoMob = 0;
         }
-        if (t < escapeUntil && dry != null && heal != HEAL_POTION) {
+        boolean pearlOk = lay.real[Pilot.PEARL] >= 0 && lay.pearls > 0 && f.pearlCdLeft == 0 && heal == HEAL_NONE
+            && hp + f.absorption >= 12.0f && !pilot.using;
+        if (pearlUntil < t && deadEnds >= 2 && pearlOk && t - pearlAt > 300) {
+            double[] shot = pearlShot(f);
+            deadEnds = 0;
+            if (shot != null) {
+                pearlYaw = shot[0];
+                pearlPitch = shot[1];
+                pearlUntil = t + 50;
+                pearlThrown = false;
+            }
+        }
+        if (pearlUntil >= t && heal == HEAL_NONE) {
+            // No way out on foot: an ender pearl to where the goal can be walked to.
+            mode = ESCAPE;
+            boosting = false;
+            if (!pearlThrown) {
+                double yr = Math.toRadians(pearlYaw);
+                aim(f.x - Math.sin(yr) * 30.0, eyeY(f), f.z + Math.cos(yr) * 30.0);
+                pitchAbs = pearlPitch;
+                if (Math.abs(yawTo(f, tx, tz)) < 1.5 && Math.abs(f.pitch - pearlPitch) < 1.5) {
+                    a[8] = 1 + Pilot.PEARL;
+                }
+            }
+        } else if (t < escapeUntil && dry != null && heal != HEAL_POTION) {
             mode = ESCAPE;
             boosting = false;
             if (hd(dry[0] + 0.5, dry[2] + 0.5, f.x, f.z) > 0.8 || Math.abs(dry[1] - f.y) > 1.2) {
@@ -669,6 +770,13 @@ final class Coach {
     void after(Frame f, Pilot.Keys k) {
         if (k.throwIt && k.slot == Pilot.POTION) {
             lastPot = f.tick;
+        }
+        if (k.throwIt && k.slot == Pilot.PEARL && mode == ESCAPE) {
+            // Thrown: still until it lands, then a new way from where the player is.
+            pearlThrown = true;
+            pearlAt = f.tick;
+            pearlUntil = f.tick + 30;
+            path = null;
         }
         k.strafe = 0;
         if (mode == NONE && heal == HEAL_NONE && !boosting) {

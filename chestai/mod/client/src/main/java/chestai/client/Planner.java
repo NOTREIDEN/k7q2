@@ -26,6 +26,8 @@ final class Planner {
     /** Spots the player got stuck going to, left out of ways until the tick kept for each. */
     private final Map<Long, Long> bans = new HashMap<Long, Long>();
     private long now;
+    /** Whether the last way planned gets to the goal (not only as near as it can). */
+    boolean reached;
 
     Planner(World w, MapStore map) {
         this.w = w;
@@ -252,6 +254,7 @@ final class Planner {
                 add(nodes, open, n, n.x, n.y + 1, n.z, 1.0, gx, gy, gz);
             }
         }
+        reached = goal != null;
         Node end = goal != null ? goal : best;
         if (end == start) {
             return null;
