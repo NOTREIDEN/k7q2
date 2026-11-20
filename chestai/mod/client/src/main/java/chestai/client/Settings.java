@@ -45,7 +45,10 @@ public final class Settings {
     public boolean hit = false;
     /** A golden apple when hurt, so the absorption is kept full; with appleKeep or fewer left, only at appleHp. */
     public boolean appleOnHit = true;
-    public int appleKeep = 3;
+    public int appleKeep = 8;
+    public double appleHitHp = 16.0;
+    /** In a fight with a mob in reach: jump (critical blows on the way down) and do not sprint (no knockback far away). */
+    public boolean fightJump = true;
     /** Something eaten as soon as the food bar is short of full (plain food first, else a golden apple). */
     public boolean foodFull = true;
 
@@ -76,12 +79,20 @@ public final class Settings {
         + "# si: hace click a los mobs. no: solo se mueve hacia ellos y los apunta, sin pegar.\n"
         + "pegar=no\n";
 
+    /** The lines of the settings added after MORE3. */
+    static final String MORE4 = ""
+        + "# Vida (de 20) a la que come una manzana cuando le pegan, con manzanas de sobra (mas que manzana_reserva).\n"
+        + "manzana_golpe_vida=16\n"
+        + "\n"
+        + "# si: en la pelea, con un mob al alcance, salta (los golpes al caer son criticos) y no sprinta (no los empuja lejos).\n"
+        + "pelea_saltando=si\n";
+
     /** The lines of the settings added after MORE2. */
     static final String MORE3 = ""
-        + "# si: come una manzana dorada cada vez que le bajan la vida o la absorcion (respetando manzana_espera),\n"
-        + "# para tener la absorcion siempre llena. Con manzana_reserva manzanas o menos, solo a manzana_vida.\n"
+        + "# si: cuando le pegan come una manzana dorada apenas la vida baja a manzana_golpe_vida (respetando\n"
+        + "# manzana_espera), asi la absorcion vuelve a estar llena. Con manzana_reserva manzanas o menos, solo a manzana_vida.\n"
         + "manzana_al_golpe=si\n"
-        + "manzana_reserva=3\n"
+        + "manzana_reserva=8\n"
         + "\n"
         + "# si: come apenas le falta medio muslito de comida (primero comida comun si tiene, si no una manzana dorada).\n"
         + "comida_llena=si\n";
@@ -115,7 +126,7 @@ public final class Settings {
         + "\n"
         + "# si: anota lo que ve y hace en config/chestai/registro.txt (para revisar problemas). no: nada.\n"
         + "registro=si\n"
-        + "\n" + MORE + "\n" + MORE2 + "\n" + MORE3;
+        + "\n" + MORE + "\n" + MORE2 + "\n" + MORE3 + "\n" + MORE4;
 
     public static Settings parse(Properties p) {
         Settings s = new Settings();
@@ -154,7 +165,10 @@ public final class Settings {
         s.appleHp = Math.min(number(p.getProperty("manzana_vida"), 12.0), 20.0);
         s.appleWaitS = number(p.getProperty("manzana_espera"), 8.0);
         s.appleOnHit = yes(p.getProperty("manzana_al_golpe"), true);
-        s.appleKeep = (int) Math.round(number(p.getProperty("manzana_reserva"), 3.0));
+        s.appleKeep = (int) Math.round(number(p.getProperty("manzana_reserva"), 8.0));
+        s.appleHitHp = Math.min(number(p.getProperty("manzana_golpe_vida"), 16.0), 20.0);
+        // -Dchestai.fight.jump=false, for the arena's other way of fighting.
+        s.fightJump = yes(System.getProperty("chestai.fight.jump", p.getProperty("pelea_saltando")), true);
         s.foodFull = yes(p.getProperty("comida_llena"), true);
         s.bow = yes(p.getProperty("arco_punch"), true);
         s.search = yes(p.getProperty("buscar_cofres"), true);
@@ -211,7 +225,8 @@ public final class Settings {
             in0.close();
         }
         String add = (old.getProperty("pocion_vida") == null ? "\n" + MORE : "") + (old.getProperty("pegar") == null ? "\n" + MORE2 : "")
-            + (old.getProperty("comida_llena") == null ? "\n" + MORE3 : "");
+            + (old.getProperty("comida_llena") == null ? "\n" + MORE3 : "")
+            + (old.getProperty("pelea_saltando") == null ? "\n" + MORE4 : "");
         if (add.length() > 0) {
             OutputStream out = new FileOutputStream(f, true);
             try {

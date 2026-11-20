@@ -113,7 +113,7 @@ tasks.register<JavaExec>("arena") {
         "-Dchestai.demo.seconds=" + (project.findProperty("arena.seconds") ?: "300"),
         "-Dchestai.arena.video=" + (project.findProperty("arena.video") ?: "false"),
         "-Dchestai.arena.variant=" + (project.findProperty("arena.variant") ?: "base"))
-    // -Parena.jvm="-Dchestai.fight.jump=true -Dchestai.fight.walk=true": a variant of the play to compare.
+    // -Parena.jvm="-Dchestai.fight.sprint=true": a variant of the play to compare.
     val extra = (project.findProperty("arena.jvm") as String?)?.trim() ?: ""
     if (extra.isNotEmpty()) {
         jvmArgs(extra.split(Regex("\\s+")))

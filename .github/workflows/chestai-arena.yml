@@ -23,8 +23,9 @@ jobs:
       fail-fast: false
       matrix:
         seed: [11, 22, 33, 44, 55, 66, 77, 88, 101, 202, 303, 404, 505, 606, 707, 808]
-        # base: as the mod plays. crit: in a fight with a mob in reach, jumping and not sprinting.
-        variant: [base, crit]
+        # base: as the mod plays (in a fight with a mob in reach it jumps and does not sprint).
+        # sprint: the same jumping, but sprinting into the blows.
+        variant: [base, sprint]
     runs-on: ubuntu-latest
     timeout-minutes: 60
     defaults:
@@ -47,7 +48,7 @@ jobs:
       - name: Play seed ${{ matrix.seed }} (${{ matrix.variant }})
         run: |
           J=""
-          if [ "${{ matrix.variant }}" = "crit" ]; then J="-Dchestai.fight.jump=true -Dchestai.fight.walk=true"; fi
+          if [ "${{ matrix.variant }}" = "sprint" ]; then J="-Dchestai.fight.sprint=true"; fi
           sudo apt-get update -q
           sudo apt-get install -y -q xvfb x11-xserver-utils libgl1-mesa-dri libglx-mesa0 libxrandr2 libxcursor1 libxxf86vm1 libxi6 libxtst6 libxrender1 > /dev/null
           LIBGL_ALWAYS_SOFTWARE=1 timeout 3000 xvfb-run -a -s "-screen 0 854x480x24" gradle arena -Parena.seed=${{ matrix.seed }} -Parena.seconds=900 -Parena.variant=${{ matrix.variant }} "-Parena.jvm=$J" --no-daemon --stacktrace > arena.log 2>&1 || true

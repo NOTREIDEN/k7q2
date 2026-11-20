@@ -110,36 +110,45 @@ final class Planner {
      * counted.
      */
     boolean see(double ax, double ay, double az, double bx, double by, double bz, int sx, int sy, int sz) {
+        // Every block the line goes through, corners too (a walk from block to block along it).
+        int x = (int) Math.floor(ax), y = (int) Math.floor(ay), z = (int) Math.floor(az);
+        int ex = (int) Math.floor(bx), ey = (int) Math.floor(by), ez = (int) Math.floor(bz);
         double dx = bx - ax, dy = by - ay, dz = bz - az;
-        double len = Math.sqrt(dx * dx + dy * dy + dz * dz);
-        int n = Math.max(1, (int) Math.ceil(len / 0.1));
-        for (int i = 1; i < n; i++) {
-            double t = (double) i / n;
-            int x = (int) Math.floor(ax + dx * t), y = (int) Math.floor(ay + dy * t), z = (int) Math.floor(az + dz * t);
+        int stepX = dx > 0 ? 1 : -1, stepY = dy > 0 ? 1 : -1, stepZ = dz > 0 ? 1 : -1;
+        double tdx = dx == 0 ? 1e30 : Math.abs(1.0 / dx), tdy = dy == 0 ? 1e30 : Math.abs(1.0 / dy), tdz = dz == 0 ? 1e30 : Math.abs(1.0 / dz);
+        double tx = dx == 0 ? 1e30 : (dx > 0 ? (x + 1 - ax) : (ax - x)) * tdx;
+        double ty = dy == 0 ? 1e30 : (dy > 0 ? (y + 1 - ay) : (ay - y)) * tdy;
+        double tz = dz == 0 ? 1e30 : (dz > 0 ? (z + 1 - az) : (az - z)) * tdz;
+        for (int n = 0; n < 64; n++) {
+            if (x == ex && y == ey && z == ez) {
+                return true;
+            }
+            if (tx <= ty && tx <= tz) {
+                x += stepX;
+                tx += tdx;
+            } else if (ty <= tz) {
+                y += stepY;
+                ty += tdy;
+            } else {
+                z += stepZ;
+                tz += tdz;
+            }
+            boolean end = x == ex && y == ey && z == ez;
             if (x == sx && y == sy && z == sz) {
+                if (end) {
+                    return true;
+                }
                 continue;
             }
             byte c = cell(x, y, z);
             if (c != MapStore.AIR && c != MapStore.WATER) {
                 return false;
             }
-        }
-        return true;
-    }
-
-    /** A player can be at this block: room for the body, and ground or water to keep it there. */
-    boolean stand(int x, int y, int z) {
-        if (!bans.isEmpty()) {
-            Long until = bans.get(key(x, y, z));
-            if (until != null && until > now) {
-                return false;
+            if (end) {
+                return true;
             }
         }
-        if (!open(x, y, z) || !open(x, y + 1, z)) {
-            return false;
-        }
-        byte below = cell(x, y - 1, z);
-        return below == MapStore.SOLID || below == MapStore.WATER || cell(x, y, z) == MapStore.WATER;
+        return true;
     }
 
     /**
