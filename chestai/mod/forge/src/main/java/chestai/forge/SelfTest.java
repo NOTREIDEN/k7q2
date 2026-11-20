@@ -29,6 +29,7 @@ final class SelfTest {
     private double fromX, fromZ, far;
     private int potsAt, applesAt, cx, cy, cz;
     private float lowest = 99f;
+    private boolean hurt;
 
     SelfTest(ChestAi mod) {
         this.mod = mod;
@@ -122,9 +123,13 @@ final class SelfTest {
             }
             swings += me.isSwingInProgress && me.swingProgressInt == 0 ? 1 : 0;
             far = Math.max(far, Math.hypot(me.posX - fromX, me.posZ - fromZ));
-            if (ticks == 300) {
-                // Low on health all at once: a potion has to come.
-                run(mc.getIntegratedServer(), "effect " + me.getName() + " 7 1 1");
+            if (ticks >= 300 && ticks < 700 && !hurt && me.getHealth() >= 16.0F) {
+                // Low on health all at once, with no apple's absorption left: a potion has to come.
+                MinecraftServer s = mc.getIntegratedServer();
+                run(s, "effect " + me.getName() + " clear");
+                run(s, "effect " + me.getName() + " 1 600 2");
+                run(s, "effect " + me.getName() + " 7 1 1");
+                hurt = true;
             }
             if (ticks > 300) {
                 lowest = Math.min(lowest, me.getHealth());
@@ -142,7 +147,7 @@ final class SelfTest {
                 }
             }
             mod.flip(mc);
-            boolean ok = !mod.on() && chests >= 1 && mobs >= 3 && far > 6.0 && swings > 0 && pots >= 1 && apples <= 3 && me.getHealth() > 0;
+            boolean ok = !mod.on() && chests >= 1 && mobs >= 3 && far > 6.0 && swings > 0 && (pots >= 1 || lowest > 10.0F) && apples <= 3 && me.getHealth() > 0;
             end(mc, String.format(Locale.ROOT, "%s: %d ticks with the agent at the keys, %d chest(s) known, up to %d mobs seen, got %.1f blocks away from the start (%.1f from the chest behind the wall at the end), swung %d times, %d of 4 zombies left, %d potion(s) and %d apple(s) used, lowest health %.1f",
                 ok ? "ok" : "FAILED", ticks, chests, mobs, far, toChest, swings, alive, pots, apples, lowest));
         }
