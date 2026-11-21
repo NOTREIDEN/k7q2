@@ -1807,7 +1807,9 @@ final class Coach {
             } else if (!havePot && !haveApple && life <= 14.0) {
                 // Nothing left to heal with: out sooner, back only nearly full.
                 exit = 18.0;
-            } else if (!havePot && (life <= 7.0 || (life <= 13.0 && lifeBefore - life >= 6.0))) {
+            } else if (!havePot && (life <= 7.0 || (life <= 13.0 && lifeBefore - life >= 6.0) || (Session.SURVIVE && hp <= 8.0))) {
+                // (With -Dchestai.survive, by health itself too: an apple's absorption hid how low it
+                // was, and the retreat came at 2 of 20.)
                 // Apples but no potion, very low or six gone in two seconds: a few steps back to eat one,
                 // and back to the same mobs with the absorption counted. With potions there is no
                 // running away: one is thrown on the spot (potNeed above) and the fight goes on.

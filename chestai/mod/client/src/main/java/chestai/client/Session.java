@@ -77,6 +77,11 @@ public final class Session {
     private Pilot pilot;
     private Hands hands;
     private Refill refill;
+    /** -Dchestai.survive: after a death, the chests where it happened left aside a while; earlier retreat without potions. */
+    static final boolean SURVIVE = Boolean.getBoolean("chestai.survive");
+    private static final long DEATH_SKIP_MS = 180_000;
+    /** Where the player died lately: x, y, z, and when (ms). Kept across restarts of the agent. */
+    private static final java.util.List<double[]> DEATHS = new java.util.ArrayList<double[]>();
     /** The blows through Minecadia's SilentAim; null without it (no fighting then). */
     private VapeCombat combat;
     private final Reader reader = new Reader();
@@ -361,6 +366,22 @@ public final class Session {
         mem = new Memory();
         chestFile = chestFile();
         loadChests();
+        if (SURVIVE) {
+            // A chest the player died at a little while ago (its wave too much for it): left aside
+            // for DEATH_SKIP_MS from the death, not walked back into at once after the respawn.
+            long now = System.currentTimeMillis();
+            for (double[] d : DEATHS) {
+                long left = DEATH_SKIP_MS - (now - (long) d[3]);
+                if (left <= 0) {
+                    continue;
+                }
+                for (Memory.Known k : mem.chests) {
+                    if (Math.hypot(k.cx() - d[0], k.cz() - d[2]) < 14.0 && Math.abs(k.y - d[1]) < 8.0) {
+                        k.skipUntil = Math.max(k.skipUntil, left / 50);
+                    }
+                }
+            }
+        }
         saved = mem.chests.size();
         candidates.clear();
         notFarm.clear();
@@ -477,6 +498,13 @@ public final class Session {
             return "Chest AI apagado: cambio el mundo.";
         }
         if (me.isDead || me.getHealth() <= 0.0F) {
+            if (SURVIVE && me != null) {
+                // Where it died: the chests about there are left aside a while after the respawn.
+                DEATHS.add(new double[] {me.posX, me.posY, me.posZ, System.currentTimeMillis()});
+                if (DEATHS.size() > 16) {
+                    DEATHS.remove(0);
+                }
+            }
             return "Chest AI apagado: el jugador murio.";
         }
         if (mc.currentScreen != null && !(mc.currentScreen instanceof GuiContainer) && !(mc.currentScreen instanceof GuiSilentAim)) {
