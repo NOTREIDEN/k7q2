@@ -532,8 +532,13 @@ public final class Session {
         if (settings.search && (tick == 1 || tick % 40 == 0)) {
             searchChests(f);
         }
+        mem.bosses = settings.bosses;
         mem.update(f, first);
         first = false;
+        for (String bl : mem.notes) {
+            log("CHESTAI t=" + tick + " " + bl);
+        }
+        mem.notes.clear();
         // Raw hologram texts (and what they were read as), each time one changes.
         for (String hl : reader.holoLog) {
             log("CHESTAI t=" + tick + " " + hl);

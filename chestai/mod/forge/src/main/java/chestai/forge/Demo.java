@@ -96,6 +96,19 @@ final class Demo {
     private final List<EntitySkeleton> snipers = new ArrayList<EntitySkeleton>();
     private final java.util.Map<EntitySkeleton, double[]> sniperAt = new java.util.HashMap<EntitySkeleton, double[]>();
     private int sniperBack = -1, sniperKills;
+    /**
+     * With -Dchestai.arena.boss=true (arena only): a world boss, a zombie pigman of 400 health with
+     * Strength, angry at the player and on no leash, put 15 to 30 blocks from the player a minute in and
+     * every BOSS_EVERY ticks after (while none is alive); its kills and the seconds from its coming to
+     * its death go into arena.txt (bossKills, bossS).
+     */
+    private static final boolean BOSS = ARENA && Boolean.getBoolean("chestai.arena.boss");
+    private static final int BOSS_EVERY = Integer.getInteger("chestai.arena.boss.every", 3600), BOSS_FIRST = 1200;
+    private net.minecraft.entity.monster.EntityPigZombie boss;
+    private long bossClock, bossNext = BOSS_FIRST, bossSpawnAt;
+    private volatile int bossKills, bossSpawns;
+    private volatile long bossTicks;
+    private final java.util.Random bossRnd = new java.util.Random(SEED * 131L + 7L);
     /** A wave's mobs all dead: how long it took, the claim after it, and from a claim to the next wave. */
     private volatile int clears, clearTicks, claimWaits, claimWaitTicks, betweens, betweenTicks, projHits, aoeHits;
     private volatile long lastClaimAt = -1;
@@ -388,6 +401,9 @@ final class Demo {
             moving == 0 ? 0.0 : (double) side / moving, arrows, boostHits, pots, potsHigh, apples, applesFull, minHp, known, chests.size(), obstacles,
             clears, clears == 0 ? -1.0 : clearTicks / 20.0 / clears, claimWaits == 0 ? -1.0 : claimWaitTicks / 20.0 / claimWaits,
             betweens == 0 ? -1.0 : betweenTicks / 20.0 / betweens, steak, foodLow / 20.0, minFood, projHits, projDamage, aoeHits, sniperKills, POOL, hits);
+        if (BOSS) {
+            line += String.format(Locale.ROOT, " bossSpawns=%d bossKills=%d bossS=%.1f", bossSpawns, bossKills, bossKills == 0 ? -1.0 : bossTicks / 20.0 / bossKills);
+        }
         System.out.println("ARENA " + line);
         StringBuilder modes = new StringBuilder();
         for (java.util.Map.Entry<String, Integer> e : modeTicks.entrySet()) {
@@ -682,6 +698,58 @@ final class Demo {
         }
     }
 
+    /** The arena's boss: put out on time, kept angry at the player, its death counted. */
+    private void bossTick(WorldServer w, EntityPlayer p) {
+        bossClock++;
+        if (boss != null) {
+            if (boss.isDead || boss.getHealth() <= 0) {
+                if (boss.getHealth() <= 0) {
+                    bossKills++;
+                    bossTicks += bossClock - bossSpawnAt;
+                    System.out.println(String.format(Locale.ROOT, "ARENA boss killed in %.1f s", (bossClock - bossSpawnAt) / 20.0));
+                } else {
+                    System.out.println("ARENA boss gone");
+                }
+                boss = null;
+            } else if (boss.getAttackTarget() != p && boss.getDistanceToEntity(p) < 48.0f) {
+                boss.setRevengeTarget(p);
+                boss.setAttackTarget(p);
+            }
+        }
+        if (boss != null || bossClock < bossNext) {
+            return;
+        }
+        bossNext = bossClock + BOSS_EVERY;
+        for (int tries = 0; tries < 60; tries++) {
+            double a = bossRnd.nextDouble() * Math.PI * 2.0, d = 15.0 + bossRnd.nextDouble() * 15.0;
+            BlockPos at = ground(w, (int) Math.floor(p.posX + Math.cos(a) * d), (int) Math.floor(p.posZ + Math.sin(a) * d));
+            if (at == null || Math.abs(at.getY() - p.posY) > 6 || chestGap(at.getX() + 0.5, at.getZ() + 0.5) < 12.0) {
+                continue;
+            }
+            net.minecraft.entity.monster.EntityPigZombie pz = new net.minecraft.entity.monster.EntityPigZombie(w);
+            pz.setLocationAndAngles(at.getX() + 0.5, at.getY(), at.getZ() + 0.5, 0, 0);
+            pz.getEntityAttribute(SharedMonsterAttributes.maxHealth).setBaseValue(400);
+            pz.getEntityAttribute(SharedMonsterAttributes.followRange).setBaseValue(48);
+            pz.setHealth(400);
+            // Angry at the player for good (a pigman's anger is in its saved data).
+            net.minecraft.nbt.NBTTagCompound tag = new net.minecraft.nbt.NBTTagCompound();
+            pz.writeEntityToNBT(tag);
+            tag.setShort("Anger", (short) 32767);
+            tag.setString("HurtBy", p.getUniqueID().toString());
+            pz.readEntityFromNBT(tag);
+            pz.addPotionEffect(new net.minecraft.potion.PotionEffect(net.minecraft.potion.Potion.damageBoost.id, 1000000, 0));
+            w.spawnEntityInWorld(pz);
+            pz.setRevengeTarget(p);
+            pz.setAttackTarget(p);
+            boss = pz;
+            bossSpawnAt = bossClock;
+            bossSpawns++;
+            System.out.println(String.format(Locale.ROOT, "ARENA boss %d at %d %d %d, %.0f from the player", bossSpawns, at.getX(), at.getY(), at.getZ(),
+                Math.hypot(at.getX() + 0.5 - p.posX, at.getZ() + 0.5 - p.posZ)));
+            return;
+        }
+    }
+
     /** One more arrow from a bow mob at the player, when it is in range and sight: they never stop shooting. */
     private static void shoot(EntitySkeleton sk, EntityPlayer p, double range) {
         if (!sk.isDead && sk.getHealth() > 0 && sk.getDistanceToEntity(p) < range && sk.canEntityBeSeen(p)) {
@@ -786,6 +854,9 @@ final class Demo {
                 }
             }
             keep.addAll(snipers);
+            if (boss != null) {
+                keep.add(boss);
+            }
             for (Object o : new ArrayList<Object>(w.loadedEntityList)) {
                 if (o instanceof net.minecraft.entity.monster.EntitySlime || (ARENA && o instanceof EntityLiving && !keep.contains(o))) {
                     ((Entity) o).setDead();
@@ -818,6 +889,9 @@ final class Demo {
             }
             if (sniperBack >= 0 && --sniperBack < 0) {
                 sniper(w, new java.util.Random(now));
+            }
+            if (BOSS) {
+                bossTick(w, p);
             }
         }
         for (Chest c : chests) {
