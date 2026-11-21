@@ -37,6 +37,13 @@ public final class Memory {
         public long waveAt = -1;
         /** Whether another player fights its wave (its claim is not the agent's), and whether another player stands by it. */
         public boolean contestedWave, reserved;
+        /**
+         * Who was at it first. ours: the player came to it (OWN_R) with no other player by it, and
+         * has not gone far since: it stays the agent's whoever comes after. theirs: another player
+         * was already by it when the player came: left to them until they go.
+         */
+        public boolean ours, theirs;
+        public long awayAt = -1, rivalSeenAt = -100000;
         /** The longest wait to the next wave its hologram has said, for a guess when none shows. */
         public int cdSecs;
         /** Waits at it for a wave on a guess that brought none: each makes the next guess twice as long. */
@@ -71,6 +78,12 @@ public final class Memory {
     private final Map<Integer, Known> waveMob = new HashMap<Integer, Known>();
     /** Mobs first seen near the player with no chest yet to give them to, and where they were then. */
     private final Map<Integer, SpawnSighting> unmatchedSpawns = new HashMap<Integer, SpawnSighting>();
+
+    /** Within this of a chest (and 5 up or down) the player is at it; this far for AWAY_TICKS, it is no longer the agent's. */
+    private static final double OWN_R = 10.0, AWAY_R = 24.0;
+    private static final int AWAY_TICKS = 200;
+    /** Another player gone from a chest this long: it is free again. */
+    private static final int RIVAL_GONE_TICKS = 100;
 
     /** No hologram read for its chest this long: its state is taken from its mobs. */
     public static final int HOLO_STALE = 100;
@@ -143,7 +156,7 @@ public final class Memory {
     /** Take in what this tick showed. The first frame only sets the health to compare with. */
     public void update(Frame f, boolean first) {
         for (Known k : chests) {
-            k.reserved = rivalNearChest(f, k);
+            ownership(f, k);
         }
         for (Frame.Holo h : f.holos) {
             Known k = chests.get(h.chest);
@@ -217,7 +230,10 @@ public final class Memory {
             here.add(m.id);
             Long seen = mobSeen.put(m.id, t);
             // Another player on it (it hit it last, or stands by it): its wave is not the agent's to claim.
-            m.contested = m.hitByOtherPlayer || rivalNear(f, m);
+            // ...unless its chest is the agent's (the player was there first), or it is at the player
+            // and hurting them: that one is always fought back.
+            boolean selfDefence = sinceHurt < 40 && Math.hypot(m.x - f.x, m.z - f.z) < 3.5 && Math.abs(m.y - f.y) < 2.5;
+            m.contested = (m.hitByOtherPlayer || rivalNear(f, m)) && !selfDefence && !ofOurs(m);
             if (waveMob.containsKey(m.id)) {
                 if (m.contested) {
                     waveMob.get(m.id).contestedWave = true;
@@ -251,7 +267,7 @@ public final class Memory {
                     }
                     k.waveAt = sp == null ? t : sp.tick;
                 }
-                k.contestedWave |= m.contested || (sp != null && sp.contested);
+                k.contestedWave |= !k.ours && (m.contested || (sp != null && sp.contested));
                 // A chest with a wave is not left aside before its hologram is read.
                 if (!k.seen) {
                     k.skipUntil = -1;
@@ -261,7 +277,8 @@ public final class Memory {
         // Every mob of a wave another player has is theirs.
         for (Frame.Mob m : f.mobs) {
             Known k = waveMob.get(m.id);
-            m.contested |= k != null && (k.contestedWave || k.reserved);
+            boolean selfDefence = sinceHurt < 40 && Math.hypot(m.x - f.x, m.z - f.z) < 3.5 && Math.abs(m.y - f.y) < 2.5;
+            m.contested |= k != null && (k.contestedWave || k.reserved) && !selfDefence;
         }
         for (Known k : chests) {
             k.waveLeft = 0;
@@ -325,6 +342,55 @@ public final class Memory {
                 }
             }
         }
+    }
+
+    /**
+     * Who the chest is for: the first one at it. The player at it with nobody else by it makes it the
+     * agent's, and then nobody coming later takes it away (the wave is fought and claimed); another
+     * player already by it when the player comes makes it theirs, until they have gone from it.
+     */
+    private void ownership(Frame f, Known k) {
+        boolean rival = rivalNearChest(f, k);
+        if (rival) {
+            k.rivalSeenAt = f.tick;
+        }
+        double d = Math.hypot(k.cx() - f.x, k.cz() - f.z);
+        boolean at = d <= OWN_R && Math.abs(k.y - f.y) <= 5.0;
+        if (k.ours) {
+            if (d > AWAY_R) {
+                if (k.awayAt < 0) {
+                    k.awayAt = f.tick;
+                } else if (f.tick - k.awayAt > AWAY_TICKS) {
+                    k.ours = false;
+                }
+            } else {
+                k.awayAt = -1;
+            }
+        }
+        if (k.theirs && f.tick - k.rivalSeenAt > RIVAL_GONE_TICKS) {
+            k.theirs = false;
+        }
+        if (!k.ours && !k.theirs && at) {
+            if (rival) {
+                k.theirs = true;
+            } else {
+                k.ours = true;
+                k.awayAt = -1;
+                // Whatever another player did at it before is over: the player is the one at it now.
+                k.contestedWave = false;
+            }
+        }
+        k.reserved = !k.ours && (k.theirs || rival);
+    }
+
+    /** The chest this mob belongs to (its wave's, or the nearest within 12 blocks) is the agent's. */
+    private boolean ofOurs(Frame.Mob m) {
+        Known w = waveMob.get(m.id);
+        if (w != null) {
+            return w.ours;
+        }
+        Known n = chestNear(m.x, m.y, m.z, 12.0, 8.0, true);
+        return n != null && n.ours;
     }
 
     /** Another player within 6 blocks of the mob. */
