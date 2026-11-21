@@ -555,6 +555,9 @@ final class Coach {
         int cur = hasGoal ? mem.indexOfChest(goalX, goalY, goalZ) : -1;
         double cc = cur >= 0 ? score(f, mem, cur) : Double.POSITIVE_INFINITY;
         if (cur >= 0 && f.tick - goalAt < GOAL_EVERY && Double.isFinite(cc)) {
+            if (s.multi && pairHold != null) {
+                pairStep(f, mem);
+            }
             return cur;
         }
         int best = -1;
@@ -2324,21 +2327,24 @@ final class Coach {
      * is gone to for its wave when the wave on has the time for the way there and back and its
      * mobs left, and the new one the time for those and its own after (JUGGLE_MARGIN to spare).
      */
-    private static final double JUGGLE_R = 30.0, JUGGLE_DY = 6.0, JUGGLE_EARLY = 1.0, JUGGLE_MARGIN = 2.0;
+    private static final double JUGGLE_R = 30.0, JUGGLE_DY = 6.0, JUGGLE_EARLY = 1.0, JUGGLE_MARGIN = 3.0;
     /**
      * A wave comes with the player within SPAWN_R blocks of its chest (until one is seen come from
      * farther: Memory.spawnR): it is set off from JUGGLE_IN inside that, and two from a spot PAIR_IN inside.
      */
     private static final double SPAWN_R = 12.0, JUGGLE_IN = 1.2, PAIR_IN = 0.8;
     /** Ticks at most off to set a wave off, and none set off again for this long after one given up. */
-    private static final int JUGGLE_MAX_TICKS = 200, JUGGLE_OFF_TICKS = 200;
+    private static final int JUGGLE_MAX_TICKS = 240, JUGGLE_OFF_TICKS = 200;
+    /** Within the reach taken this long (ticks) with the chest ready and no wave: the reach is less (down to JUGGLE_MIN_R blocks). */
+    private static final int JUGGLE_IN_TICKS = 20;
+    private static final double JUGGLE_MIN_R = 6.5;
     /** Walking: blocks a second (a sprint is 5.6), and the way longer than a straight line by this much. */
     private static final double WALK_SPEED = 5.0, WALK_DETOUR = 1.25;
     /** Health (of 20) at least, with potions or apples to spare (more than curas_reserva by this many). */
     private static final double MULTI_HP = 14.0;
     private static final int MULTI_HEALS = 2;
     /** Seconds a kill takes before any wave is won (as KILL_PRIOR_N kills), and the estimate taken this much longer, to be safe. */
-    private static final double KILL_PRIOR_S = 1.8, KILL_SAFE = 1.15;
+    private static final double KILL_PRIOR_S = 1.7, KILL_SAFE = 1.1;
     private static final int KILL_PRIOR_N = 5;
     /** For the arena only: the seconds a kill takes taken as this, whatever is seen (-Dchestai.multi.kill=1.0; 0: as seen). */
     private static final double KILL_FIXED = Double.parseDouble(System.getProperty("chestai.multi.kill", "0"));
@@ -2379,7 +2385,7 @@ final class Coach {
 
     /** Blocks from a chest within which its wave comes: the farthest seen (12 until one is), within reason. */
     private static double spawnR(Memory mem) {
-        return mem.spawnObs > 0 ? clamp(mem.spawnR, 6.0, 16.0) : SPAWN_R;
+        return mem.spawnR > 0 ? clamp(mem.spawnR, 6.0, 16.0) : SPAWN_R;
     }
 
     /** How far from a chest to go to set its wave off: a block and more inside its reach. */
@@ -2474,6 +2480,7 @@ final class Coach {
      * reach of both, when both waves can be fought in their time; else the goal's own.
      */
     private void pair(Frame f, Memory mem, int gi) {
+        pairHold = null;
         Memory.Known g = mem.chests.get(gi);
         if (!freeToSpawn(f, g) || multiBlocked(f) != null) {
             return;
@@ -2515,12 +2522,77 @@ final class Coach {
         standY = pairSpot[1];
         standZ = pairSpot[2] + 0.5;
         goalWhy += "+par";
+        // One ready a while before the other: the wait out of its reach, and in to the spot by both as
+        // the other is about ready, so both come at once (none fought with the other's time running).
+        double stagger = Math.abs(bo - eg), late = Math.max(eg, bo);
+        Memory.Known early = eg <= bo ? g : best, lateK = eg <= bo ? best : g;
+        if (stagger > PAIR_HOLD_MIN && stagger <= PAIR_HOLD && late - walkSecs(hd(pairSpot[0] + 0.5, pairSpot[2] + 0.5, f.x, f.z)) > PAIR_STEP_IN) {
+            int[] h = holdSpot(f, mem, early, lateK);
+            if (h != null) {
+                pairHold = h;
+                pairLate = lateK;
+                pairEarly = early;
+                standX = h[0] + 0.5;
+                standY = h[1];
+                standZ = h[2] + 0.5;
+                goalWhy += "+espera";
+            }
+        }
         String said = at(g) + at(best);
         if (!said.equals(pairSaid)) {
             pairSaid = said;
             note(String.format(java.util.Locale.ROOT, "multi: me paro en (%d,%d,%d) para spawnear %s y %s juntos (%.0fs y %.0fs, %.1fs/mob)",
                 pairSpot[0], pairSpot[1], pairSpot[2], at(g), at(best), eg, bo, ks));
         }
+    }
+
+    /** Waited out of the earlier one's reach (pair): at this spot, for this chest's wave to be about ready; or null. */
+    private int[] pairHold;
+    private Memory.Known pairLate, pairEarly;
+    /** A pair ready this many seconds apart (more than PAIR_HOLD_MIN) is waited for out of reach; in to the spot this long before. */
+    private static final double PAIR_HOLD = 5.0, PAIR_HOLD_MIN = 1.0, PAIR_STEP_IN = 0.6, PAIR_HOLD_OUT = 1.5;
+
+    /** Waiting out of reach (pair): in to the spot by both as the later one is about ready (or the wait is no longer for anything). */
+    private void pairStep(Frame f, Memory mem) {
+        int li = mem.indexOfChest(pairLate.x, pairLate.y, pairLate.z);
+        int ei = mem.indexOfChest(pairEarly.x, pairEarly.y, pairEarly.z);
+        boolean off = li < 0 || ei < 0 || !freeToSpawn(f, pairLate) || !freeToSpawn(f, pairEarly) || multiBlocked(f) != null;
+        if (off || mem.estSecs(li, f.tick) - walkSecs(hd(pairSpot[0] + 0.5, pairSpot[2] + 0.5, f.x, f.z)) <= PAIR_STEP_IN) {
+            pairHold = null;
+            standX = pairSpot[0] + 0.5;
+            standY = pairSpot[1];
+            standZ = pairSpot[2] + 0.5;
+            if (!off) {
+                note(String.format(java.util.Locale.ROOT, "multi: entro a (%d,%d,%d) para spawnear %s y %s juntos", pairSpot[0], pairSpot[1], pairSpot[2],
+                    at(pairEarly), at(pairLate)));
+            }
+        }
+    }
+
+    /**
+     * A spot out of the reach of chest e (PAIR_HOLD_OUT more), toward chest l and near the spot by both, dry,
+     * off any rim; or null.
+     */
+    private int[] holdSpot(Frame f, Memory mem, Memory.Known e, Memory.Known l) {
+        double out = spawnR(mem) + PAIR_HOLD_OUT;
+        double bx = l.cx() - e.cx(), bz = l.cz() - e.cz(), bd = Math.max(Math.hypot(bx, bz), 0.1), base = Math.atan2(bz / bd, bx / bd);
+        int y0 = pairSpot[1];
+        planner.now(f.tick);
+        for (int i = 0; i < 7; i++) {
+            double ang = base + (i == 0 ? 0 : ((i + 1) / 2) * 0.45 * (i % 2 == 0 ? -1 : 1));
+            for (double r = out; r <= out + 3.0; r += 1.0) {
+                int x = (int) Math.floor(e.cx() + Math.cos(ang) * r), z = (int) Math.floor(e.cz() + Math.sin(ang) * r);
+                int y = standY(x, z, y0);
+                if (y == Integer.MIN_VALUE || Math.abs(y - y0) > 3 || planner.water(x, y, z) || planner.water(x, y - 1, z) || planner.brink(x, y, z)) {
+                    continue;
+                }
+                if (spawnDist(x + 0.5, y, z + 0.5, e) < out || hd(x + 0.5, z + 0.5, pairSpot[0] + 0.5, pairSpot[2] + 0.5) > 8.0) {
+                    continue;
+                }
+                return new int[] {x, y, z};
+            }
+        }
+        return null;
     }
 
     /**
@@ -2572,21 +2644,39 @@ final class Coach {
             return "ya no es para spawnear";
         }
         double dab = hd(a.cx(), a.cz(), b.cx(), b.cz());
-        if (dab > JUGGLE_R || Math.abs(a.y - b.y) > JUGGLE_DY) {
+        if (!going && (dab > JUGGLE_R || Math.abs(a.y - b.y) > JUGGLE_DY)) {
             return "lejos";
         }
         for (Memory.Known k : mem.chests) {
-            if (k != a && k.waveLeft > 0 && !k.contestedWave && !k.reserved && k.state == Frame.ACTIVE) {
+            // (One just set off counts before its hologram is read again.)
+            if (k != a && k != b && k.waveLeft > 0 && !k.contestedWave && !k.reserved && (k.state == Frame.ACTIVE || (k.waveAt >= 0 && f.tick - k.waveAt < 100))) {
                 return "ya hay dos oleadas";
             }
         }
         double dpb = spawnDist(f.x, f.y, f.z, b);
+        if (going) {
+            // On the way (decided with JUGGLE_MARGIN to spare): kept to unless a wave would now run out
+            // of time with none to spare at all (the one on is the one finished), or it takes too long.
+            double go = walkSecs(dpb - trigR(mem)), wait = Math.max(0.0, mem.estSecs(bi, f.tick) - go), ks = killSecs(mem);
+            double left = mem.waveSecsLeft(a, f.tick, waveSecs(mem, a));
+            double back = walkSecs(dab - trigR(mem) - 2.0) + 0.5, finishA = a.waveLeft * ks;
+            if (left < go + wait + back + finishA) {
+                return String.format(java.util.Locale.ROOT, "no da el tiempo de %s (%.0fs, %d mobs)", at(a), left, a.waveLeft);
+            }
+            if (wait + back + finishA + walkSecs(dab - trigR(mem)) + waveSize(mem) * ks > waveSecs(mem, b)) {
+                return "no da el tiempo de la segunda";
+            }
+            if (f.tick - jugSince > JUGGLE_MAX_TICKS) {
+                return "tarda demasiado";
+            }
+            return null;
+        }
         if (!going && dpb <= trigR(mem) + 0.5) {
             // Close enough already: it comes by itself.
             return "ya cerca";
         }
         double go = walkSecs(dpb - trigR(mem)), eb = mem.estSecs(bi, f.tick);
-        if (eb > go + (going ? JUGGLE_EARLY + 1.5 : JUGGLE_EARLY)) {
+        if (eb > go + JUGGLE_EARLY) {
             return "todavia no";
         }
         double ks = killSecs(mem), left = mem.waveSecsLeft(a, f.tick, waveSecs(mem, a));
@@ -2598,9 +2688,6 @@ final class Coach {
         // a wave set off from trigR has: the kills seen count that much), and its mobs.
         if (back + finishA + walkSecs(dab - trigR(mem)) + waveSize(mem) * ks + JUGGLE_MARGIN > waveSecs(mem, b)) {
             return "no da el tiempo de la segunda";
-        }
-        if (going && f.tick - jugSince > JUGGLE_MAX_TICKS) {
-            return "tarda demasiado";
         }
         return null;
     }
@@ -2623,8 +2710,17 @@ final class Coach {
                 return false;
             }
             String no = b == null ? "cofre perdido" : juggleNo(f, mem, a, b, bi, true);
-            if (no == null && b.state == Frame.READY && jugInAt >= 0 && t - jugInAt > 40) {
-                no = "no salio la oleada";
+            if (no == null && b.state == Frame.READY && jugInAt >= 0 && t - jugInAt > JUGGLE_IN_TICKS && t - b.holoTick < 20) {
+                // Ready, within the reach taken, and no wave: the reach is less than that. Closer, not given up.
+                double d = spawnDist(f.x, f.y, f.z, b);
+                if (d > JUGGLE_MIN_R) {
+                    mem.spawnR = Math.max(JUGGLE_MIN_R, Math.min(spawnR(mem), d) - 1.0);
+                    mem.spawnFar = -1;
+                    note(String.format(java.util.Locale.ROOT, "multi: no salio la oleada de %s a %.1f bloques: alcance %.1f", at(b), d, spawnR(mem)));
+                    jugInAt = -1;
+                } else {
+                    no = "no salio la oleada";
+                }
             }
             if (no != null) {
                 note("multi: dejo de ir a spawnear " + (b == null ? "" : at(b)) + ": " + no);
