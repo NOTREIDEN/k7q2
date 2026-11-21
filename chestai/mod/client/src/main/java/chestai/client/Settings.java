@@ -60,6 +60,14 @@ public final class Settings {
     public int potsHotbar = 2;
     /** Something eaten as soon as the food bar is short of full (plain food first, else a golden apple). */
     public boolean foodFull = true;
+    /**
+     * Waves of several chests at once (multi_cofre, or -Dchestai.multi, which wins over the file):
+     * standing where two chests spawn together, and setting off the next one's wave while fighting
+     * one when there is time to come back and finish it. Off: one chest at a time, as before.
+     */
+    public boolean multi;
+    /** Seconds a wave has before its chest resets, when its hologram does not show it. */
+    public double waveSecs = 17.0;
 
     /** The lines of the newer settings, added to a file written by an older version. */
     static final String MORE = ""
@@ -123,6 +131,16 @@ public final class Settings {
         + "# faltan a los slots vacios (y una pila de manzanas doradas si no queda ninguna en la barra). 0: nunca.\n"
         + "pociones_barra=2\n";
 
+    /** The lines of the settings added after MORE7. */
+    static final String MORE8 = ""
+        + "# si: junta oleadas de varios cofres. Se para donde dos cofres cercanos spawnean a la vez y, peleando una\n"
+        + "# oleada, va a spawnear el cofre de al lado si le da el tiempo para volver y terminarla antes de que se\n"
+        + "# resetee. No lo hace con poca vida o pocas curas, ni con oleadas largas (de un minuto). no: un cofre a la vez.\n"
+        + "multi_cofre=no\n"
+        + "\n"
+        + "# Segundos que da el servidor para matar una oleada antes de que el cofre se resetee (si el holograma no los muestra).\n"
+        + "oleada_segundos=17\n";
+
     /** The lines of the settings added after MORE2. */
     static final String MORE3 = ""
         + "# si: cuando le pegan come una manzana dorada apenas la vida baja a manzana_golpe_vida (respetando\n"
@@ -162,7 +180,7 @@ public final class Settings {
         + "\n"
         + "# si: anota lo que ve y hace en config/chestai/registro.txt (para revisar problemas). no: nada.\n"
         + "registro=si\n"
-        + "\n" + MORE + "\n" + MORE2 + "\n" + MORE3 + "\n" + MORE4 + "\n" + MORE5 + "\n" + MORE6 + "\n" + MORE7 + "\n" + VERSION;
+        + "\n" + MORE + "\n" + MORE2 + "\n" + MORE3 + "\n" + MORE4 + "\n" + MORE5 + "\n" + MORE6 + "\n" + MORE7 + "\n" + MORE8 + "\n" + VERSION;
 
     public static Settings parse(Properties p) {
         Settings s = new Settings();
@@ -215,6 +233,8 @@ public final class Settings {
         s.search = yes(p.getProperty("buscar_cofres"), true);
         s.searchRadius = number(p.getProperty("buscar_radio"), 160.0);
         s.map = yes(p.getProperty("mapa"), true);
+        s.multi = yes(System.getProperty("chestai.multi", p.getProperty("multi_cofre")), false);
+        s.waveSecs = Math.max(5.0, Math.min(number(p.getProperty("oleada_segundos"), 17.0), 600.0));
         t = p.getProperty("ignorar");
         if (t != null) {
             for (String n : t.split(",")) {
@@ -281,7 +301,8 @@ public final class Settings {
             + (old.getProperty("pelea_saltando") == null ? "\n" + MORE4 : "")
             + (old.getProperty("arco_a_mobs") == null ? "\n" + MORE5 : "")
             + (old.getProperty("sin_curas") == null ? "\n" + MORE6 : "")
-            + (old.getProperty("pociones_entre_manzanas") == null || old.getProperty("pociones_barra") == null ? "\n" + MORE7 : "");
+            + (old.getProperty("pociones_entre_manzanas") == null || old.getProperty("pociones_barra") == null ? "\n" + MORE7 : "")
+            + (old.getProperty("multi_cofre") == null || old.getProperty("oleada_segundos") == null ? "\n" + MORE8 : "");
         if (add.length() > 0) {
             OutputStream out = new FileOutputStream(f, true);
             try {

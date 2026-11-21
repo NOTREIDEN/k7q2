@@ -37,6 +37,8 @@ public final class Frame {
     /** A hologram seen this tick over chest {@code chest} (an index of {@link Memory#chests}). */
     public static final class Holo {
         public int chest, state, secs;
+        /** A running wave's time left as its hologram shows it, or -1 when it shows none. */
+        public int waveSecs = -1;
     }
 
     public long tick;

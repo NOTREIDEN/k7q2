@@ -588,6 +588,11 @@ public final class Session {
         }
         int[] fromNet = a.clone();
         coach.before(f, mem, pilot, a, lay);
+        if (coach.event != null) {
+            // What the coach decided about waves of several chests (multi_cofre).
+            log("CHESTAI t=" + tick + " " + coach.event);
+            coach.event = null;
+        }
         if (coach.outOfHeals() != saidOut) {
             saidOut = coach.outOfHeals();
             String o = saidOut ? "Chest AI: me quedan pocas manzanas doradas y pociones de vida. No empiezo oleadas nuevas para no morir (sin_curas=seguir en ajustes.txt para seguir igual)."

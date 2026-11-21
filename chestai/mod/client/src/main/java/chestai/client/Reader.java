@@ -349,6 +349,7 @@ final class Reader {
             h.chest = ci;
             h.state = st[0];
             h.secs = st[1];
+            h.waveSecs = st.length > 2 ? st[2] : -1;
             f.holos.add(h);
             if (st[0] == Frame.CLAIMABLE && l.contains(hitE) && HoloText.isClaimLabel(hitE.getCustomNameTag(), s.claimText)) {
                 // "Click here to claim" is clicked on the hologram itself, on that line.

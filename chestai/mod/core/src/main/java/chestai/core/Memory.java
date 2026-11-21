@@ -48,6 +48,17 @@ public final class Memory {
         public int cdSecs;
         /** Waits at it for a wave on a guess that brought none: each makes the next guess twice as long. */
         public int idleWaits;
+        /** The time its running wave had left as its hologram last showed it (-1: none shown), and when. */
+        public int waveShown = -1;
+        public long waveShownAt = -1;
+        /** Since when its hologram says it is ready (-1: not ready). */
+        public long readyAt = -1;
+        /** Its wave on was seen come (the player there when it did), so its length can be measured. */
+        public boolean waveFromStart;
+        /** The most mobs its wave on had at once. */
+        public int wavePeak;
+        /** How long its last wave that ran out of time (reset, mobs alive) had been on, in seconds; -1: none seen. */
+        public double resetSecs = -1;
 
         public Known(int x, int y, int z) {
             this.x = x;
@@ -73,6 +84,17 @@ public final class Memory {
     private float lastHp = Float.NaN, lastOwnHp = Float.NaN;
     /** Absorption down by this much in a tick is a blow (absorption going by itself goes by less). */
     private static final float HURT_ABS = 0.3f;
+    /**
+     * What the server is seen to do, for waves of several chests at once: the farthest the player
+     * was from a chest when its wave came (it had been ready a while: the player came within reach
+     * of it), the shortest a wave ran before it reset, how many of each were seen, and the last one.
+     */
+    public double spawnR = -1, resetMin = -1, lastSpawnD, lastResetSecs;
+    public int spawnObs, resetObs;
+    public Known lastSpawnK, lastResetK;
+    /** The most mobs a wave seen from its start had at once; the waves of the agent's won from their start, their mobs, and their time all together. */
+    public int waveSize, clears, clearMobs;
+    public double clearSecs;
     /** When a farm hologram was last read anywhere: whether the server shows them at all. */
     public long holoWorkAt = -100000;
     /** Each mob seen (entity id) and when last; each wave mob and the chest it came from. */
@@ -179,6 +201,37 @@ public final class Memory {
             } else if (k.state != Frame.COOLDOWN || k.guessed || h.secs != k.secs || k.countdownAt < 0) {
                 k.countdownAt = f.tick;
             }
+            if (h.state == Frame.READY && (!k.seen || k.state != Frame.READY)) {
+                k.readyAt = f.tick;
+            } else if (h.state == Frame.COOLDOWN || h.state == Frame.CLAIMABLE) {
+                k.readyAt = -1;
+            }
+            // A wave seen from its start that went back to a countdown with its mobs alive: its time ran out.
+            if (k.seen && !k.guessed && k.state == Frame.ACTIVE && (h.state == Frame.COOLDOWN || h.state == Frame.READY) && k.waveLeft > 0
+                    && k.waveAt >= 0 && k.waveFromStart && !k.contestedWave && !k.reserved) {
+                double secs = (f.tick - waveStart(k)) / 20.0;
+                k.resetSecs = secs;
+                resetMin = resetMin < 0 ? secs : Math.min(resetMin, secs);
+                resetObs++;
+                lastResetK = k;
+                lastResetSecs = secs;
+            }
+            // One of the agent's seen from its start won: how long it took, for how many mobs.
+            if (k.seen && k.state == Frame.ACTIVE && h.state == Frame.CLAIMABLE && k.waveAt >= 0 && k.waveFromStart && k.ours && !k.contestedWave
+                    && k.wavePeak > 0) {
+                clearSecs += (f.tick - waveStart(k)) / 20.0;
+                clearMobs += k.wavePeak;
+                clears++;
+            }
+            if (h.state == Frame.ACTIVE && h.waveSecs >= 0) {
+                if (h.waveSecs != k.waveShown || k.waveShownAt < 0) {
+                    k.waveShownAt = f.tick;
+                }
+                k.waveShown = h.waveSecs;
+            } else {
+                k.waveShown = -1;
+                k.waveShownAt = -1;
+            }
             k.seen = true;
             k.tick = f.tick;
             k.state = h.state;
@@ -271,6 +324,18 @@ public final class Memory {
                         k.contestedWave = false;
                     }
                     k.waveAt = sp == null ? t : sp.tick;
+                    // Come by the player (first seen near it) with the chest ready before: its wave's start.
+                    k.waveFromStart = sp != null && k.readyAt >= 0 && (k.state == Frame.READY || k.state == Frame.ACTIVE);
+                    k.wavePeak = 0;
+                    double d = dist(f.x, f.y, f.z, k);
+                    if (k.waveFromStart && sp.tick == t && t - k.readyAt > 20 && !k.reserved && !rivalWithin(f, k, d + 2.0)) {
+                        // Ready a second or more and only now come (its first mob seen this tick): the player
+                        // just got within reach of it.
+                        spawnR = Math.max(spawnR, d);
+                        spawnObs++;
+                        lastSpawnD = d;
+                        lastSpawnK = k;
+                    }
                 }
                 k.contestedWave |= !k.ours && (m.contested || (sp != null && sp.contested));
                 // A chest with a wave is not left aside before its hologram is read.
@@ -299,6 +364,7 @@ public final class Memory {
                 k.waveLeft++;
                 continue;
             }
+
             // Out of the world: dead (or gone with the wave), as the player is close enough to see it
             // were it alive; far away, kept a while (back from a retreat, it is still to be killed).
             long ago = t - mobSeen.get(e.getKey());
@@ -318,6 +384,14 @@ public final class Memory {
             }
         }
         for (Known k : chests) {
+            if (k.waveAt >= 0 && k.waveLeft > k.wavePeak) {
+                k.wavePeak = k.waveLeft;
+                if (k.waveFromStart) {
+                    waveSize = Math.max(waveSize, k.wavePeak);
+                }
+            }
+        }
+        for (Known k : chests) {
             boolean noHolo = t - k.holoTick > HOLO_STALE;
             if (k.waveLeft > 0) {
                 if (noHolo) {
@@ -333,6 +407,7 @@ public final class Memory {
             } else if (k.waveAt >= 0) {
                 // Its wave's mobs all dead: with no hologram to say so, the chest is clicked to claim it.
                 k.waveAt = -1;
+                k.waveFromStart = false;
                 if (noHolo && k.state == Frame.ACTIVE) {
                     if (k.contestedWave || k.reserved) {
                         // Another player's wave: they claim it, the chest waits for its next one.
@@ -409,6 +484,22 @@ public final class Memory {
         return false;
     }
 
+    /** From the player's feet to the middle of the chest's block at its foot, up and down too. */
+    public static double dist(double x, double y, double z, Known k) {
+        double dx = k.cx() - x, dy = k.y - y, dz = k.cz() - z;
+        return Math.sqrt(dx * dx + dy * dy + dz * dz);
+    }
+
+    /** Another player within r blocks of the chest. */
+    private static boolean rivalWithin(Frame f, Known k, double r) {
+        for (double[] p : f.rivals) {
+            if (dist(p[0], p[1], p[2], k) <= r) {
+                return true;
+            }
+        }
+        return false;
+    }
+
     /** Another player within 12 blocks across (and four up or down) of the chest. */
     private static boolean rivalNearChest(Frame f, Known k) {
         for (double[] r : f.rivals) {
@@ -428,6 +519,31 @@ public final class Memory {
         k.countdownAt = t;
         k.claimTicks = 0;
         k.guessed = true;
+    }
+
+    /**
+     * Seconds the running wave of a chest has left before it resets, by the time it has been on
+     * (from its first mob) against a wave of {@code waveSecs}, or by its hologram when that shows
+     * the time left, whichever is less. {@code waveSecs} when no wave is known to be on.
+     */
+    public double waveSecsLeft(Known k, long now, double waveSecs) {
+        long from = waveStart(k);
+        double left = from >= 0 ? waveSecs - (now - from) / 20.0 : waveSecs;
+        if (k.waveShown >= 0 && k.waveShownAt >= 0 && now - k.waveShownAt < 100) {
+            left = Math.min(left, k.waveShown - (now - k.waveShownAt) / 20.0);
+        }
+        return left;
+    }
+
+    /**
+     * When the chest's running wave began: its first mob, or its hologram turning to a wave when
+     * that came clearly later (a mob of the wave before still counted, out of sight); -1 for none.
+     */
+    public static long waveStart(Known k) {
+        if (k.waveAt >= 0 && !k.guessed && k.state == Frame.ACTIVE && k.activeSeenAt > k.waveAt + 40) {
+            return k.activeSeenAt;
+        }
+        return k.waveAt;
     }
 
     /** Seconds to the next wave as the client works it out. */

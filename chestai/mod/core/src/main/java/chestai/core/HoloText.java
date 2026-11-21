@@ -87,15 +87,16 @@ public final class HoloText {
     }
 
     /**
-     * {state, seconds} of the lines of a hologram (with their colour codes),
-     * or null if they say nothing the agent knows.
+     * {state, seconds, wave seconds left} of the lines of a hologram (with their colour codes),
+     * or null if they say nothing the agent knows. The third is the time a running wave has left
+     * when a line of it shows one ("8 seconds left", "Kill the mobs! 17 seconds"), else -1.
      */
     public static int[] parse(List<String> lines, String claimText, String activeColors) {
         // A wave runs by what a line says, or by a line in a wave's colour that is not about the next
         // wave ("Wave 3" in red over "8 seconds left": the time left of the wave that runs, not a
         // wait). Only a line about the next wave makes its countdown a wait over a wave's colour.
         boolean active = false, colored = false;
-        int secs = -1, nextSecs = -1;
+        int secs = -1, nextSecs = -1, waveLeft = -1;
         String[] claims = claimText.split(",");
         for (String raw : lines) {
             String p = plain(raw).toLowerCase(Locale.ROOT);
@@ -119,15 +120,18 @@ public final class HoloText {
             if (secs < 0) {
                 secs = s;
             }
+            if (!next && s >= 0 && waveLeft < 0) {
+                waveLeft = s;
+            }
         }
         if (active) {
-            return new int[] {Frame.ACTIVE, 0};
+            return new int[] {Frame.ACTIVE, 0, waveLeft};
         }
         if (nextSecs >= 0) {
             return new int[] {nextSecs > 0 ? Frame.COOLDOWN : Frame.READY, nextSecs};
         }
         if (colored) {
-            return new int[] {Frame.ACTIVE, 0};
+            return new int[] {Frame.ACTIVE, 0, waveLeft};
         }
         return secs >= 0 ? new int[] {secs > 0 ? Frame.COOLDOWN : Frame.READY, secs} : null;
     }

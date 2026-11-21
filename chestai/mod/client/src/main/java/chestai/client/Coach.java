@@ -196,6 +196,8 @@ final class Coach {
     private int goalX, goalY, goalZ;
     private boolean hasGoal;
     private double standX, standZ;
+    /** The height of the spot to stand at: the goal's own, or that of the spot by two chests (multi). */
+    private int standY;
     private long goalAt = -1000;
     private String goalWhy = "";
 
@@ -383,6 +385,9 @@ final class Coach {
         if (pressed && (mode == FIGHT || mode == APPROACH)) {
             b.append("+presion");
         }
+        if (juggling) {
+            b.append(String.format(java.util.Locale.ROOT, "+multi(%d,%d,%d)", jugX, jugY, jugZ));
+        }
         if (hasGoal) {
             b.append(String.format(java.util.Locale.ROOT, " meta=(%d,%d,%d %s)", goalX, goalY, goalZ, goalWhy));
         }
@@ -537,6 +542,10 @@ final class Coach {
         goalWhy = why(k, mem.estSecs(best, f.tick));
         standX = k.cx();
         standZ = k.cz();
+        standY = k.y;
+        if (s.multi) {
+            pair(f, mem, best);
+        }
         return best;
     }
 
@@ -1312,6 +1321,7 @@ final class Coach {
         mostHeals = Math.max(mostHeals, heals);
         // (A reserve kept for the wave on and the way out: the deaths came in the wave the last apples went in.)
         outOfHeals = HEAL_STOP && s.healStop && mostHeals > s.healKeep + 1 && heals <= s.healKeep;
+        healsNow = heals;
         long t = f.tick;
         // The chest gone for is no longer to be gone to (another player's now): the goal, the
         // way and a pearl not thrown yet are dropped.
@@ -1369,6 +1379,9 @@ final class Coach {
         double hp = f.hp;
 
         int lock = waveLock(f, mem);
+        if (s.multi) {
+            multiTick(f, mem, lock);
+        }
         List<Frame.Mob> focus = null;
         double engage = lock >= 0 ? WAVE_R : FIGHT_R;
         List<Frame.Mob> cand = new ArrayList<Frame.Mob>();
@@ -1649,6 +1662,8 @@ final class Coach {
                     go(f, f.x + (f.x - nm.x) / d * 12.0, f.y, f.z + (f.z - nm.z) / d * 12.0, 2.0);
                 }
             }
+        } else if (s.multi && lock >= 0 && juggle(f, mem, lock)) {
+            // 3a. Off for a moment from the wave on to set off the next chest's (multi): back after.
         } else if (!(focus = focus(f, mem, lock, cand, t)).isEmpty()) {
             // 3. Mobs: those of the wave that came first, or any about.
             boosting = false;
@@ -1936,7 +1951,7 @@ final class Coach {
                     } else {
                         aim(k.cx(), k.cy() + 0.5, k.cz());
                     }
-                } else if (ds < (lastMode == WAIT ? 3.0 : 2.0) && Math.abs(k.y - f.y) <= 2.5) {
+                } else if (ds < (lastMode == WAIT ? 3.0 : 2.0) && Math.abs(standY - f.y) <= 2.5) {
                     mode = WAIT;
                     evade = shooter != null;
                     aim(k.cx(), k.cy() + 0.5, k.cz());
@@ -1953,7 +1968,7 @@ final class Coach {
                     }
                 } else if (!tryChestPearl(f, k, pearlOk, a)) {
                     mode = k.seen ? TRAVEL : EXPLORE;
-                    go(f, standX, k.y, standZ, 1.5);
+                    go(f, standX, standY, standZ, 1.5);
                     giveUp(k, t);
                     boost(f, pilot, a, lay, dc);
                 }
@@ -1984,6 +1999,390 @@ final class Coach {
         }
         trapped(f);
         dodge(f);
+    }
+
+    // ---- Several chests at once (Settings.multi: multi_cofre=si, -Dchestai.multi=true) ----
+
+    /**
+     * Two chests this close across (and PAIR_DY up or down) whose waves come within PAIR_SOON
+     * seconds of each other, the goal's within PAIR_GOAL_SOON: the wait is at a spot within
+     * reach of both (a wave comes with the player within 12 blocks of its chest), so both
+     * come with no walk between, kept out of their mobs' leash (correa, and PAIR_CLEAR more) where it can be.
+     */
+    private static final double PAIR_R = 22.0, PAIR_DY = 4.0, PAIR_SOON = 8.0, PAIR_GOAL_SOON = 20.0, PAIR_CLEAR = 2.0;
+    /**
+     * While fighting a wave: a chest this close to it (across, and JUGGLE_DY up or down), to be
+     * ready by the time the player gets within reach of it (trigR) (plus JUGGLE_EARLY seconds),
+     * is gone to for its wave when the wave on has the time for the way there and back and its
+     * mobs left, and the new one the time for those and its own after (JUGGLE_MARGIN to spare).
+     */
+    private static final double JUGGLE_R = 30.0, JUGGLE_DY = 6.0, JUGGLE_EARLY = 1.0, JUGGLE_MARGIN = 2.0;
+    /**
+     * A wave comes with the player within SPAWN_R blocks of its chest (until one is seen come from
+     * farther: Memory.spawnR): it is set off from JUGGLE_IN inside that, and two from a spot PAIR_IN inside.
+     */
+    private static final double SPAWN_R = 12.0, JUGGLE_IN = 1.2, PAIR_IN = 0.8;
+    /** Ticks at most off to set a wave off, and none set off again for this long after one given up. */
+    private static final int JUGGLE_MAX_TICKS = 200, JUGGLE_OFF_TICKS = 200;
+    /** Walking: blocks a second (a sprint is 5.6), and the way longer than a straight line by this much. */
+    private static final double WALK_SPEED = 5.0, WALK_DETOUR = 1.25;
+    /** Health (of 20) at least, with potions or apples to spare (more than curas_reserva by this many). */
+    private static final double MULTI_HP = 14.0;
+    private static final int MULTI_HEALS = 2;
+    /** Seconds a kill takes before any wave is won (as KILL_PRIOR_N kills), and the estimate taken this much longer, to be safe. */
+    private static final double KILL_PRIOR_S = 1.8, KILL_SAFE = 1.15;
+    private static final int KILL_PRIOR_N = 5;
+    /** For the arena only: the seconds a kill takes taken as this, whatever is seen (-Dchestai.multi.kill=1.0; 0: as seen). */
+    private static final double KILL_FIXED = Double.parseDouble(System.getProperty("chestai.multi.kill", "0"));
+    /** A wave on this many seconds longer than oleada_segundos (or showing as much left): waves are long, never two at once. */
+    private static final double LONG_WAVE_EXTRA = 4.0;
+
+    /** Heals in the whole inventory as of this tick. */
+    private int healsNow;
+    /** The chest gone to for its wave (multi), since when, and since when within reach of setting it off. */
+    private boolean juggling;
+    private int jugX, jugY, jugZ;
+    private long jugSince, jugInAt = -1, jugOffUntil = -1;
+    private final java.util.Set<String> jugNoSaid = new java.util.HashSet<String>();
+    /** The server's doings already noted (Memory.spawnObs, resetObs). */
+    private int spawnSaid, resetSaid;
+    /** Waves here are long (Expeditions-like): no two at once. */
+    private boolean longWaves;
+    /** The pair of chests waited by as of the last note, and the spot by them. */
+    private String pairSaid = "";
+    private int[] pairSpot;
+    private long pairSpotAt = -1000;
+    private int pairSpotFor;
+    /** What happened this tick for the play log (Session writes it and clears it), or null. */
+    String event;
+
+    private void note(String line) {
+        event = event == null ? line : event + " / " + line;
+    }
+
+    private static String at(Memory.Known k) {
+        return "(" + k.x + "," + k.y + "," + k.z + ")";
+    }
+
+    /** From the player's feet to the chest, up and down too: as the server measures the reach a wave comes within. */
+    private static double spawnDist(double x, double y, double z, Memory.Known k) {
+        return Memory.dist(x, y, z, k);
+    }
+
+    /** Blocks from a chest within which its wave comes: the farthest seen (12 until one is), within reason. */
+    private static double spawnR(Memory mem) {
+        return mem.spawnObs > 0 ? clamp(mem.spawnR, 6.0, 16.0) : SPAWN_R;
+    }
+
+    /** How far from a chest to go to set its wave off: a block and more inside its reach. */
+    private static double trigR(Memory mem) {
+        return spawnR(mem) - JUGGLE_IN;
+    }
+
+    /** Seconds a wave of this chest has: oleada_segundos, or less where one was seen run out sooner. */
+    private double waveSecs(Memory mem, Memory.Known k) {
+        double w = s.waveSecs;
+        if (k.resetSecs > 0) {
+            w = Math.min(w, k.resetSecs);
+        } else if (mem.resetMin > 0) {
+            w = Math.min(w, mem.resetMin);
+        }
+        return w;
+    }
+
+    /** The mobs a wave comes with: the most seen (5 until one is seen from its start). */
+    private static int waveSize(Memory mem) {
+        return mem.waveSize > 0 ? mem.waveSize : 5;
+    }
+
+    /**
+     * Seconds a kill takes: the waves won so far from their start (the way to their mobs too),
+     * over their mobs, with a guess for the first ones, on the safe side.
+     */
+    private static double killSecs(Memory mem) {
+        if (KILL_FIXED > 0.0) {
+            return KILL_FIXED;
+        }
+        return (mem.clearSecs + KILL_PRIOR_S * KILL_PRIOR_N) / (mem.clearMobs + KILL_PRIOR_N) * KILL_SAFE;
+    }
+
+    /** Seconds to walk this far across. */
+    private static double walkSecs(double d) {
+        return Math.max(d, 0.0) / WALK_SPEED * WALK_DETOUR;
+    }
+
+    /** Whether waves here are long, and what the server was seen to do (for the play log). */
+    private void multiTick(Frame f, Memory mem, int lock) {
+        if (lock < 0) {
+            // No wave on to come back to: nothing to set off a second one beside.
+            juggling = false;
+        }
+        for (Memory.Known k : mem.chests) {
+            boolean fresh = k.seen && !k.guessed && k.state == Frame.ACTIVE && f.tick - k.holoTick < 40 && k.waveLeft > 0;
+            // Long by the time it shows left, else by how long it has been on with no reset.
+            long from = Memory.waveStart(k);
+            boolean longOne = k.waveShown >= 0 ? k.waveShown > s.waveSecs + LONG_WAVE_EXTRA
+                : from >= 0 && f.tick - from > (s.waveSecs + LONG_WAVE_EXTRA) * 20.0;
+            if (!longWaves && fresh && k.ours && k.waveFromStart && longOne) {
+                longWaves = true;
+                note(String.format(java.util.Locale.ROOT, "multi: oleadas largas en %s (%s), una a la vez", at(k),
+                    k.waveShown >= 0 ? "muestra " + k.waveShown + "s" : "lleva " + (f.tick - from) / 20 + "s"));
+            }
+        }
+        // What the server was seen to do: how far a wave came from, how long one ran before it reset.
+        if (mem.spawnObs != spawnSaid && mem.lastSpawnK != null) {
+            spawnSaid = mem.spawnObs;
+            note(String.format(java.util.Locale.ROOT, "multi: la oleada de %s salio a %.1f bloques (alcance %.1f)", at(mem.lastSpawnK), mem.lastSpawnD, spawnR(mem)));
+        }
+        if (mem.resetObs != resetSaid && mem.lastResetK != null) {
+            resetSaid = mem.resetObs;
+            note(String.format(java.util.Locale.ROOT, "multi: %s se reseteo a los %.1fs (oleada %.1fs)", at(mem.lastResetK), mem.lastResetSecs,
+                waveSecs(mem, mem.lastResetK)));
+        }
+    }
+
+    /** Why there should be no second wave now (low health or heals, long waves), or null. */
+    private String multiBlocked(Frame f) {
+        if (longWaves) {
+            return "oleadas largas";
+        }
+        if (outOfHeals || healsNow <= s.healKeep + MULTI_HEALS) {
+            return "pocas curas";
+        }
+        if (f.hp < Math.max(MULTI_HP, s.potHp + 4.0)) {
+            return "poca vida";
+        }
+        return null;
+    }
+
+    /** A chest whose wave the player may set off for itself (none another player's, nor set aside), and which has none on. */
+    private static boolean freeToSpawn(Frame f, Memory.Known k) {
+        return k.seen && !k.guessed && !k.reserved && !k.theirs && !k.contestedWave && f.tick >= k.skipUntil && k.waveLeft == 0
+            && (k.state == Frame.READY || k.state == Frame.COOLDOWN);
+    }
+
+    /**
+     * The spot to wait at for the goal: by a second chest whose wave comes about as soon, within
+     * reach of both, when both waves can be fought in their time; else the goal's own.
+     */
+    private void pair(Frame f, Memory mem, int gi) {
+        Memory.Known g = mem.chests.get(gi);
+        if (!freeToSpawn(f, g) || multiBlocked(f) != null) {
+            return;
+        }
+        double eg = mem.estSecs(gi, f.tick);
+        if (eg > PAIR_GOAL_SOON) {
+            return;
+        }
+        double ks = killSecs(mem);
+        Memory.Known best = null;
+        double bd = 1e9, bo = 0.0;
+        for (int j = 0; j < mem.chests.size(); j++) {
+            Memory.Known o = mem.chests.get(j);
+            if (j == gi || !freeToSpawn(f, o)) {
+                continue;
+            }
+            double d = hd(o.cx(), o.cz(), g.cx(), g.cz()), eo = mem.estSecs(j, f.tick), stagger = Math.abs(eo - eg);
+            // Both waves in time: the second one has its own time and the gap between the two.
+            boolean inTime = 2 * waveSize(mem) * ks + walkSecs(d - trigR(mem)) + JUGGLE_MARGIN <= Math.min(waveSecs(mem, g), waveSecs(mem, o)) + stagger;
+            if (d > 2.0 && d <= PAIR_R && Math.abs(o.y - g.y) <= PAIR_DY && stagger <= PAIR_SOON && inTime && d < bd) {
+                bd = d;
+                best = o;
+                bo = eo;
+            }
+        }
+        if (best == null) {
+            return;
+        }
+        int key = g.x * 31 + g.z * 17 + g.y + (best.x * 131 + best.z * 71 + best.y) * 7;
+        if (key != pairSpotFor || f.tick - pairSpotAt > 40) {
+            pairSpot = pairSpot(f, mem, g, best);
+            pairSpotFor = key;
+            pairSpotAt = f.tick;
+        }
+        if (pairSpot == null) {
+            return;
+        }
+        standX = pairSpot[0] + 0.5;
+        standY = pairSpot[1];
+        standZ = pairSpot[2] + 0.5;
+        goalWhy += "+par";
+        String said = at(g) + at(best);
+        if (!said.equals(pairSaid)) {
+            pairSaid = said;
+            note(String.format(java.util.Locale.ROOT, "multi: me paro en (%d,%d,%d) para spawnear %s y %s juntos (%.0fs y %.0fs, %.1fs/mob)",
+                pairSpot[0], pairSpot[1], pairSpot[2], at(g), at(best), eg, bo, ks));
+        }
+    }
+
+    /**
+     * A spot to stand within reach of both chests (PAIR_IN inside it) (feet to chest, up and down too), dry,
+     * off any rim, out of reach of their leashed mobs where there is one, the nearer the better; or null.
+     */
+    private int[] pairSpot(Frame f, Memory mem, Memory.Known a, Memory.Known b) {
+        double r = spawnR(mem) - PAIR_IN, clear = s.leash + PAIR_CLEAR;
+        double mx = (a.cx() + b.cx()) / 2.0, mz = (a.cz() + b.cz()) / 2.0;
+        int y0 = (int) Math.floor((a.y + b.y) / 2.0 + 0.5), x0 = (int) Math.floor(mx), z0 = (int) Math.floor(mz);
+        planner.now(f.tick);
+        int[] best = null;
+        double bs = 1e9;
+        for (int dx = -9; dx <= 9; dx++) {
+            for (int dz = -9; dz <= 9; dz++) {
+                int x = x0 + dx, z = z0 + dz;
+                int y = standY(x, z, y0);
+                if (y == Integer.MIN_VALUE || Math.abs(y - y0) > 3 || planner.water(x, y, z) || planner.water(x, y - 1, z) || planner.brink(x, y, z)) {
+                    continue;
+                }
+                double da = spawnDist(x + 0.5, y, z + 0.5, a), db = spawnDist(x + 0.5, y, z + 0.5, b);
+                if (da > r || db > r) {
+                    continue;
+                }
+                double sc = Math.max(0.0, clear - hd(x + 0.5, z + 0.5, a.cx(), a.cz())) * 2.0
+                    + Math.max(0.0, clear - hd(x + 0.5, z + 0.5, b.cx(), b.cz())) * 2.0
+                    + Math.abs(y - y0) * 0.5 + hd(x + 0.5, z + 0.5, f.x, f.z) * 0.05;
+                if (sc < bs) {
+                    bs = sc;
+                    best = new int[] {x, y, z};
+                }
+            }
+        }
+        return best;
+    }
+
+    /**
+     * Why the player should not go (or keep going) to set off chest b's wave while fighting chest
+     * a's, or null when it should: not when low or out of heals, with long waves, with a second
+     * wave on already, with b another player's, too far, not ready in time, or when either wave
+     * would run out of time (b's mobs and a's left, at the kills seen so far).
+     */
+    private String juggleNo(Frame f, Memory mem, Memory.Known a, Memory.Known b, int bi, boolean going) {
+        String blocked = multiBlocked(f);
+        if (blocked != null) {
+            return blocked;
+        }
+        if (b == a || !freeToSpawn(f, b)) {
+            return "ya no es para spawnear";
+        }
+        double dab = hd(a.cx(), a.cz(), b.cx(), b.cz());
+        if (dab > JUGGLE_R || Math.abs(a.y - b.y) > JUGGLE_DY) {
+            return "lejos";
+        }
+        for (Memory.Known k : mem.chests) {
+            if (k != a && k.waveLeft > 0 && !k.contestedWave && !k.reserved && k.state == Frame.ACTIVE) {
+                return "ya hay dos oleadas";
+            }
+        }
+        double dpb = spawnDist(f.x, f.y, f.z, b);
+        if (!going && dpb <= trigR(mem) + 0.5) {
+            // Close enough already: it comes by itself.
+            return "ya cerca";
+        }
+        double go = walkSecs(dpb - trigR(mem)), eb = mem.estSecs(bi, f.tick);
+        if (eb > go + (going ? JUGGLE_EARLY + 1.5 : JUGGLE_EARLY)) {
+            return "todavia no";
+        }
+        double ks = killSecs(mem), left = mem.waveSecsLeft(a, f.tick, waveSecs(mem, a));
+        double wait = Math.max(0.0, eb - go), back = walkSecs(dab - trigR(mem) - 2.0) + 0.5, finishA = a.waveLeft * ks;
+        if (left < go + wait + back + finishA + JUGGLE_MARGIN) {
+            return String.format(java.util.Locale.ROOT, "no da el tiempo de %s (%.0fs, %d mobs)", at(a), left, a.waveLeft);
+        }
+        // The second wave from when it comes: back here, these finished, over to it (the way past what
+        // a wave set off from trigR has: the kills seen count that much), and its mobs.
+        if (back + finishA + walkSecs(dab - trigR(mem)) + waveSize(mem) * ks + JUGGLE_MARGIN > waveSecs(mem, b)) {
+            return "no da el tiempo de la segunda";
+        }
+        if (going && f.tick - jugSince > JUGGLE_MAX_TICKS) {
+            return "tarda demasiado";
+        }
+        return null;
+    }
+
+    /**
+     * While fighting the wave on (lock): off to the neighbour about to be ready, until within
+     * trigR of it so its wave comes, then back (the wave on is still the one fought
+     * first: it came first). True when this tick is spent on the way there.
+     */
+    private boolean juggle(Frame f, Memory mem, int lock) {
+        long t = f.tick;
+        Memory.Known a = mem.chests.get(lock);
+        int bi = juggling ? mem.indexOfChest(jugX, jugY, jugZ) : -1;
+        if (juggling) {
+            Memory.Known b = bi >= 0 ? mem.chests.get(bi) : null;
+            if (b != null && (b.state == Frame.ACTIVE || b.waveLeft > 0)) {
+                note(String.format(java.util.Locale.ROOT, "multi: spawneado %s en %.1fs, vuelvo a %s: %d mobs, %.0fs", at(b), (t - jugSince) / 20.0,
+                    at(a), a.waveLeft, mem.waveSecsLeft(a, t, waveSecs(mem, a))));
+                juggling = false;
+                return false;
+            }
+            String no = b == null ? "cofre perdido" : juggleNo(f, mem, a, b, bi, true);
+            if (no == null && b.state == Frame.READY && jugInAt >= 0 && t - jugInAt > 40) {
+                no = "no salio la oleada";
+            }
+            if (no != null) {
+                note("multi: dejo de ir a spawnear " + (b == null ? "" : at(b)) + ": " + no);
+                juggling = false;
+                jugOffUntil = t + JUGGLE_OFF_TICKS;
+                return false;
+            }
+        } else {
+            if (t < jugOffUntil) {
+                return false;
+            }
+            double be = 1e9;
+            for (int i = 0; i < mem.chests.size(); i++) {
+                Memory.Known b = mem.chests.get(i);
+                if (i == lock || !freeToSpawn(f, b)) {
+                    continue;
+                }
+                double e = mem.estSecs(i, t);
+                String no = juggleNo(f, mem, a, b, i, false);
+                if (no == null && e < be) {
+                    be = e;
+                    bi = i;
+                } else if (no != null && !no.equals("todavia no") && !no.equals("ya cerca") && !no.equals("lejos") && !no.equals("ya no es para spawnear")
+                    && e <= walkSecs(spawnDist(f.x, f.y, f.z, b) - trigR(mem)) + JUGGLE_EARLY) {
+                    // About ready, and not gone to: why, once for each wave on and chest.
+                    if (jugNoSaid.size() > 64) {
+                        jugNoSaid.clear();
+                    }
+                    if (jugNoSaid.add(at(a) + a.waveAt + at(b))) {
+                        note(String.format(java.util.Locale.ROOT, "multi: no voy a spawnear %s (lista en %.0fs): %s; %s a %.0fs, %d mobs (%.1fs/mob)", at(b), e, no,
+                            at(a), mem.waveSecsLeft(a, t, waveSecs(mem, a)), a.waveLeft, killSecs(mem)));
+                    }
+                }
+            }
+            if (bi < 0) {
+                return false;
+            }
+            Memory.Known b = mem.chests.get(bi);
+            juggling = true;
+            jugX = b.x;
+            jugY = b.y;
+            jugZ = b.z;
+            jugSince = t;
+            jugInAt = -1;
+            note(String.format(java.util.Locale.ROOT, "multi: voy a spawnear %s a %.0f bloques (lista en %.0fs) con %s a %.0fs, %d mobs (%.1fs/mob)", at(b),
+                spawnDist(f.x, f.y, f.z, b), be, at(a), mem.waveSecsLeft(a, t, waveSecs(mem, a)), a.waveLeft, killSecs(mem)));
+        }
+        Memory.Known b = mem.chests.get(bi);
+        mode = TRAVEL;
+        boosting = false;
+        boostFrom = -1;
+        rememberTarget(t);
+        target = -1;
+        evade = shooter != null;
+        if (spawnDist(f.x, f.y, f.z, b) > trigR(mem)) {
+            jugInAt = -1;
+            go(f, b.cx(), b.y, b.cz(), 2.0);
+        } else {
+            // Within reach of it: its wave comes as soon as it is ready (a second at most).
+            if (jugInAt < 0) {
+                jugInAt = t;
+            }
+            path = null;
+            aim(b.cx(), b.cy() + 0.5, b.cz());
+        }
+        return true;
     }
 
     /** Where the player is trying to get to (a way's goal, a group of mobs), and when that was last said. */
