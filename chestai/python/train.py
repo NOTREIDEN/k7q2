@@ -98,14 +98,16 @@ def evaluate_round(policy, args, rnd, samples, best, log, save):
     from evaluate import run
     t = time.time()
     policy.eval()
-    res = {k: run(policy, k, args.eval_episodes, seed=900000 + 17 * j) for j, k in enumerate(EVAL_KINDS)}
+    kinds = [k.strip() for k in args.eval_kinds.split(",") if k.strip()]
+    res = {k: run(policy, k, args.eval_episodes, seed=900000 + 17 * EVAL_KINDS.index(k)) for k in kinds}
     policy.train()
     score = sum(r["claims_per_min"] for r in res.values()) / len(res)
     rep = {"eval_round": rnd, "samples_M": round(samples / 1e6, 2), "score": round(score, 3), "secs": round(time.time() - t), **res}
     print(json.dumps(rep), flush=True)
     log.write(json.dumps(rep) + "\n")
     log.flush()
-    if score > best:
+    # Kept as best only past the last best by a margin (the eval's noise, not luck).
+    if score > best + args.best_margin:
         save(os.path.join(args.out, "best.pt"))
         return score
     return best
@@ -142,6 +144,9 @@ def main():
     ap.add_argument("--ref", default="", help="checkpoint the policy is kept near (KL), e.g. the imitation start")
     ap.add_argument("--ref-coef", type=float, default=0.0, help="weight of KL(reference || policy); halves every --ref-half iterations")
     ap.add_argument("--ref-half", type=float, default=0.0, help="iterations of this run over which the KL weight halves (0: constant)")
+    ap.add_argument("--eval-kinds", default=",".join(EVAL_KINDS), help="kinds of game in the fixed test, comma separated")
+    ap.add_argument("--eval-every", type=int, default=1, help="the fixed test every this many rounds (and at the end)")
+    ap.add_argument("--best-margin", type=float, default=0.0, help="best.pt only when the score beats the best so far by this much")
     ap.add_argument("--eval-episodes", type=int, default=0, help="machine 0 runs the fixed test with this many episodes a kind at each round (0: off)")
     ap.add_argument("--plr", type=float, default=0.0, help="share of episodes replayed from the level buffer (0: off)")
     args = ap.parse_args()
@@ -310,7 +315,7 @@ def main():
             for k, v in stage_params(stage, extra).items():
                 env.set_param(k, v)
             print(f"== round {rnd}: averaged {n} networks, stage {stage}", flush=True)
-            if args.eval_episodes > 0 and args.machine_id == 0:
+            if args.eval_episodes > 0 and args.machine_id == 0 and rnd % max(args.eval_every, 1) == 0:
                 best = evaluate_round(policy, args, rnd, samples, best, log, lambda p: save(p))
             next_round = time.time() + args.round_minutes * 60
     save(os.path.join(args.out, "last.pt"))
