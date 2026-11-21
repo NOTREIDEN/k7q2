@@ -12,10 +12,13 @@ import java.util.regex.Pattern;
  * at zero is a chest that is ready.
  */
 public final class HoloText {
-    private static final Pattern MIN_SEC = Pattern.compile("(\\d+)\\s*(?:minutes?|minutos?|mins?|m)\\b\\s*(?:and\\s*|y\\s*|,\\s*)?(\\d{1,2})\\s*(?:seconds?|segundos?|secs?|segs?|s)\\b", Pattern.CASE_INSENSITIVE);
-    private static final Pattern MIN = Pattern.compile("(\\d+)\\s*(?:minutes?|minutos?|mins?|m)\\b", Pattern.CASE_INSENSITIVE);
-    private static final Pattern SEC = Pattern.compile("(\\d+)\\s*(?:seconds?|segundos?|secs?|segs?|s)\\b", Pattern.CASE_INSENSITIVE);
-    private static final Pattern CLOCK = Pattern.compile("(?:^|\\D)(\\d+):(\\d{1,2})(?:\\D|$)");
+    private static final Pattern MIN_SEC = Pattern.compile("(\\d{1,4})\\s*(?:minutes?|minutos?|mins?|m)\\b\\s*(?:and\\s*|y\\s*|,\\s*)?(\\d{1,2})\\s*(?:seconds?|segundos?|secs?|segs?|s)\\b", Pattern.CASE_INSENSITIVE);
+    private static final Pattern MIN = Pattern.compile("(\\d{1,4})\\s*(?:minutes?|minutos?|mins?|m)\\b", Pattern.CASE_INSENSITIVE);
+    private static final Pattern SEC = Pattern.compile("(\\d{1,5})\\s*(?:seconds?|segundos?|secs?|segs?|s)\\b", Pattern.CASE_INSENSITIVE);
+    private static final Pattern CLOCK = Pattern.compile("(?:^|\\D)(\\d{1,4}):(\\d{1,2})(?:\\D|$)");
+    /** A line about the next wave (its countdown is the one that counts), and a line of a wave that runs (of lowercase text). */
+    private static final Pattern NEXT = Pattern.compile("next wave|pr[o\u00f3]xima oleada|\\brespawns?\\b|\\bspawns? in\\b|reaparece|cooldown");
+    private static final Pattern ACTIVE = Pattern.compile("wave in progress|oleada en curso|kill (?:the )?(?:mobs|creatures|monsters)|mat[a\u00e1].*(?:mobs|criaturas|monstruos)");
 
     private HoloText() {
     }
@@ -23,6 +26,31 @@ public final class HoloText {
     /** The text without colour codes. */
     public static String plain(String s) {
         return s.replaceAll("§.", "").replaceAll("\\s+", " ").trim();
+    }
+
+    /** Whether a line is one of a chest's hologram: the claim line, a wave's, the next wave's or a defeated wave's. */
+    public static boolean isChestStatus(String raw, String claimText) {
+        String p = plain(raw).toLowerCase(Locale.ROOT);
+        if (NEXT.matcher(p).find() || ACTIVE.matcher(p).find() || p.equals("wave defeated") || p.equals("oleada derrotada")) {
+            return true;
+        }
+        return isClaim(p, claimText.split(","));
+    }
+
+    /** Whether a line is the claim line. */
+    public static boolean isClaimLabel(String raw, String claimText) {
+        return isClaim(plain(raw).toLowerCase(Locale.ROOT), claimText.split(","));
+    }
+
+    /** Whether the lowercase plain line {@code p} has one of the claim texts in it. */
+    private static boolean isClaim(String p, String[] claims) {
+        for (String ct : claims) {
+            String t = ct.trim().toLowerCase(Locale.ROOT);
+            if (!t.isEmpty() && p.contains(t)) {
+                return true;
+            }
+        }
+        return false;
     }
 
     static int countdown(String line) {
@@ -63,39 +91,40 @@ public final class HoloText {
      * or null if they say nothing the agent knows.
      */
     public static int[] parse(List<String> lines, String claimText, String activeColors) {
-        boolean red = false;
-        int secs = -1;
+        // A wave runs by what a line says; a line in a wave's colour only counts with no countdown.
+        boolean active = false, colored = false;
+        int secs = -1, nextSecs = -1;
+        String[] claims = claimText.split(",");
         for (String raw : lines) {
             String p = plain(raw).toLowerCase(Locale.ROOT);
             if (p.length() == 0) {
                 continue;
             }
-            for (String ct : claimText.split(",")) {
-                String t = ct.trim();
-                if (t.length() > 0 && p.contains(t)) {
-                    return new int[] {Frame.CLAIMABLE, 0};
-                }
+            if (isClaim(p, claims)) {
+                return new int[] {Frame.CLAIMABLE, 0};
             }
-            if (p.equals("wave defeated")) {
+            if (p.equals("wave defeated") || p.equals("oleada derrotada")) {
                 continue;
             }
+            boolean next = NEXT.matcher(p).find();
+            active |= !next && ACTIVE.matcher(p).find();
             char c = color(raw);
-            if (c != 0 && activeColors.indexOf(c) >= 0) {
-                red = true;
+            colored |= c != 0 && activeColors.indexOf(c) >= 0;
+            int s = countdown(p);
+            if (next && s >= 0 && nextSecs < 0) {
+                nextSecs = s;
             }
             if (secs < 0) {
-                secs = countdown(p);
+                secs = s;
             }
         }
-        if (red) {
+        if (active) {
             return new int[] {Frame.ACTIVE, 0};
         }
-        if (secs > 0) {
-            return new int[] {Frame.COOLDOWN, secs};
+        int left = nextSecs >= 0 ? nextSecs : secs;
+        if (left >= 0) {
+            return new int[] {left > 0 ? Frame.COOLDOWN : Frame.READY, left};
         }
-        if (secs == 0) {
-            return new int[] {Frame.READY, 0};
-        }
-        return null;
+        return colored ? new int[] {Frame.ACTIVE, 0} : null;
     }
 }

@@ -4,6 +4,7 @@ import java.util.List;
 import net.minecraft.entity.player.InventoryPlayer;
 import net.minecraft.init.Items;
 import net.minecraft.item.Item;
+import net.minecraft.item.ItemAxe;
 import net.minecraft.item.ItemBow;
 import net.minecraft.item.ItemFood;
 import net.minecraft.item.ItemPotion;
@@ -51,17 +52,27 @@ final class Layout {
         return false;
     }
 
+    /** A sword or an axe: what the left button fights with. */
+    static boolean isMeleeWeapon(ItemStack s) {
+        return s != null && s.stackSize > 0 && (s.getItem() instanceof ItemSword || s.getItem() instanceof ItemAxe);
+    }
+
     static Layout of(InventoryPlayer inv) {
         Layout l = new Layout();
+        // The first axe, for the sword's slot when there is no sword.
+        int axe = -1;
         for (int i = 0; i < 9; i++) {
             ItemStack s = inv.mainInventory[i];
             if (s == null || s.stackSize <= 0) {
                 continue;
             }
             Item it = s.getItem();
-            if (it instanceof ItemSword) {
-                if (l.real[Pilot.SWORD] < 0 || i == inv.currentItem) {
+            if (isMeleeWeapon(s)) {
+                // The weapon in the hand, else the first sword.
+                if (i == inv.currentItem || (it instanceof ItemSword && l.real[Pilot.SWORD] < 0)) {
                     l.real[Pilot.SWORD] = i;
+                } else if (it instanceof ItemAxe && axe < 0) {
+                    axe = i;
                 }
             } else if (it instanceof ItemBow) {
                 if (l.real[Pilot.BOW] < 0) {
@@ -90,6 +101,9 @@ final class Layout {
                     l.foodCount = s.stackSize;
                 }
             }
+        }
+        if (l.real[Pilot.SWORD] < 0) {
+            l.real[Pilot.SWORD] = axe;
         }
         for (ItemStack s : inv.mainInventory) {
             if (s != null && s.getItem() == Items.arrow) {

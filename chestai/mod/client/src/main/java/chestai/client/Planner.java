@@ -5,7 +5,10 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.PriorityQueue;
+import net.minecraft.entity.Entity;
+import net.minecraft.util.AxisAlignedBB;
 import net.minecraft.util.BlockPos;
+import net.minecraft.util.Vec3;
 import net.minecraft.world.World;
 
 /**
@@ -22,6 +25,7 @@ final class Planner {
 
     private final World w;
     private final MapStore map;
+    private final Reader reader;
     private final Map<Long, Byte> cache = new HashMap<Long, Byte>();
     /** Spots the player got stuck going to, left out of ways until the tick kept for each. */
     private final Map<Long, Long> bans = new HashMap<Long, Long>();
@@ -29,14 +33,16 @@ final class Planner {
     /** Whether the last way planned gets to the goal (not only as near as it can). */
     boolean reached;
 
-    Planner(World w, MapStore map) {
+    Planner(World w, MapStore map, Reader reader) {
         this.w = w;
         this.map = map;
+        this.reader = reader;
     }
 
     /** Forget the blocks read for the last way (they may have changed). */
     void clear() {
         cache.clear();
+        brinks.clear();
     }
 
     /** The tick it is, for the spots left out. */
@@ -87,8 +93,37 @@ final class Planner {
         return cell(x, y, z) == MapStore.SOLID;
     }
 
+    /**
+     * Whether a blow from (ax, ay, az) gets to (bx, by, bz): no block on the
+     * line, as the game's ray sees them, and no chest's hologram stand the
+     * crosshair would stop on first.
+     */
+    boolean combatSight(double ax, double ay, double az, double bx, double by, double bz) {
+        Vec3 from = new Vec3(ax, ay, az);
+        Vec3 to = new Vec3(bx, by, bz);
+        if (w.rayTraceBlocks(from, to, false, false, false) != null) {
+            return false;
+        }
+        for (Entity e : reader.chestMarkers()) {
+            if (!e.canBeCollidedWith()) {
+                continue;
+            }
+            float border = e.getCollisionBorderSize();
+            AxisAlignedBB box = e.getEntityBoundingBox().expand(border, border, border);
+            if (box.isVecInside(from) || box.calculateIntercept(from, to) != null) {
+                return false;
+            }
+        }
+        return true;
+    }
+
     boolean water(int x, int y, int z) {
         return cell(x, y, z) == MapStore.WATER;
+    }
+
+    /** Whether the client has the chunk of the column (x, z) loaded. */
+    boolean loaded(int x, int z) {
+        return !w.getChunkFromChunkCoords(x >> 4, z >> 4).isEmpty();
     }
 
     /** Air, water or plants: a body fits through. */

@@ -14,6 +14,7 @@ import net.minecraft.client.gui.inventory.GuiContainer;
 import net.minecraft.client.multiplayer.ServerData;
 import net.minecraft.client.multiplayer.WorldClient;
 import net.minecraft.client.network.NetworkPlayerInfo;
+import net.minecraft.entity.EntityLivingBase;
 import net.minecraft.tileentity.TileEntity;
 import net.minecraft.util.BlockPos;
 import net.minecraft.util.MouseHelper;
@@ -30,22 +31,37 @@ import chestai.core.Pilot;
  */
 public final class Session {
     private static final boolean DEBUG = Boolean.getBoolean("chestai.debug");
+    /** Blows queued through SilentAim, and of them the ones the client's own attack went out for. */
     private int dbgAttacks, dbgOnMob;
-    /** Blows on a mob that was not in its half second after a hit, and how many of them took health off. */
+    /** Blows on a mob the client attacked, and how many of them were seen to take health off (or hurt it again). */
     private int blows, blowsLanded;
-    private int blowMob = -1;
+    /** The mob of this tick's queued blow, and the one of the blow being watched for whether it landed. */
+    private EntityLivingBase queuedTarget, blowTarget;
+    /** Whether the client's attack went out for this tick's queued blow already. */
+    private boolean queuedAttackConsumed;
     private float blowHp;
+    private int blowHurtTime;
     private long blowAt;
-    private final java.util.Map<String, Integer> dbgClasses = new java.util.TreeMap<String, Integer>();
     private static final double PING = 200.0;
 
-    /** A mouse that does not turn the view while the agent aims. */
-    private static final class Still extends MouseHelper {
+    /**
+     * A mouse that does not turn the view while the agent aims; while SilentAim
+     * fights the player may turn it (the agent then only walks), and when the
+     * player last did is kept.
+     */
+    private final class CombatMouse extends MouseHelper {
+        boolean enabled;
+        long lastManualTurn = -1000;
+
         @Override
         public void mouseXYChange() {
             super.mouseXYChange();
-            deltaX = 0;
-            deltaY = 0;
+            if (!enabled) {
+                deltaX = 0;
+                deltaY = 0;
+            } else if (deltaX != 0 || deltaY != 0) {
+                lastManualTurn = tick;
+            }
         }
     }
 
@@ -57,14 +73,20 @@ public final class Session {
     private Memory mem;
     private Pilot pilot;
     private Hands hands;
+    /** The blows through Minecadia's SilentAim; null without it (no fighting then). */
+    private VapeCombat combat;
+    private final Reader reader = new Reader();
     private final Obs obs = new Obs();
     private Coach coach;
     private EntityPlayerSP me;
     private WorldClient world;
     private MouseHelper mouse;
+    private CombatMouse combatMouse;
     private long tick;
     private long pearlUntil;
     private boolean first;
+    /** Whether the SilentAim settings were open: the keys and SilentAim let go meanwhile. */
+    private boolean editingSilentAim;
     private int saved;
     private double ping;
     private File chestFile;
@@ -203,11 +225,11 @@ public final class Session {
             if (!(o instanceof net.minecraft.tileentity.TileEntityChest)) {
                 continue;
             }
-            BlockPos p = ((TileEntity) o).getPos();
+            BlockPos p = Reader.chestAnchor(world, ((TileEntity) o).getPos());
             double dx = p.getX() + 0.5 - f.x, dz = p.getZ() + 0.5 - f.z;
             long k = p.toLong();
             if (dx * dx + dz * dz > settings.searchRadius * settings.searchRadius || notFarm.contains(k)
-                || mem.near(p.getX(), p.getY(), p.getZ(), 2.5) >= 0) {
+                || mem.indexOfChest(p.getX(), p.getY(), p.getZ()) >= 0) {
                 continue;
             }
             mem.chest(p.getX(), p.getY(), p.getZ());
@@ -222,7 +244,7 @@ public final class Session {
         while (it.hasNext()) {
             java.util.Map.Entry<Long, Integer> e = it.next();
             BlockPos p = BlockPos.fromLong(e.getKey());
-            int ci = mem.near(p.getX(), p.getY(), p.getZ(), 0.5);
+            int ci = mem.indexOfChest(p.getX(), p.getY(), p.getZ());
             if (ci < 0 || mem.chests.get(ci).seen) {
                 // Gone, or a farm chest after all.
                 it.remove();
@@ -262,17 +284,23 @@ public final class Session {
                 long nowMs = System.currentTimeMillis();
                 while ((line = r.readLine()) != null) {
                     String[] t = line.trim().split("\\s+");
-                    if (t.length >= 3 && mem.near(Integer.parseInt(t[0]), Integer.parseInt(t[1]), Integer.parseInt(t[2]), 2.5) < 0) {
-                        int ci = mem.chest(Integer.parseInt(t[0]), Integer.parseInt(t[1]), Integer.parseInt(t[2]));
+                    if (t.length >= 3) {
+                        // Known by its block as the chests are now (a double chest by its west or north half).
+                        BlockPos p = Reader.chestAnchor(world, new BlockPos(Integer.parseInt(t[0]), Integer.parseInt(t[1]), Integer.parseInt(t[2])));
+                        if (mem.indexOfChest(p.getX(), p.getY(), p.getZ()) >= 0) {
+                            continue;
+                        }
+                        int ci = mem.chest(p.getX(), p.getY(), p.getZ());
                         if (t.length >= 6) {
                             // What its hologram said last, and when: a wave timer still running counts on.
                             int state = Integer.parseInt(t[3]), secs = Integer.parseInt(t[4]);
                             double ago = (nowMs - Long.parseLong(t[5])) / 1000.0;
                             Memory.Known k = mem.chests.get(ci);
-                            if (state == chestai.core.Frame.COOLDOWN && ago >= 0 && secs - ago > 5.0) {
+                            if (state == chestai.core.Frame.COOLDOWN && ago >= 0 && secs > ago) {
                                 k.seen = true;
                                 k.state = state;
-                                k.secs = (int) Math.round(secs - ago);
+                                k.secs = (int) Math.ceil(secs - ago);
+                                k.guessed = true;
                                 k.tick = 0;
                             }
                         }
@@ -333,8 +361,22 @@ public final class Session {
         notFarmFile = new File(dir, "nocofres-" + serverName() + ".txt");
         loadNotFarm();
         map = s.map ? new MapStore(new File(dir, "mapa-" + serverName())) : null;
-        planner = new Planner(world, map);
+        planner = new Planner(world, map, reader);
         double cps = s.cpsMin + draws.nextDouble() * (s.cpsMax - s.cpsMin);
+        try {
+            combat = new VapeCombat(mc, cps, dir, reader);
+            combat.open(this::allowNativeAttack);
+        } catch (ClassNotFoundException e) {
+            // Without Minecadia at all the agent goes on without fighting; any other class missing is an error.
+            if (!"net.minecadia.client.LiquidBounce".equals(e.getMessage())) {
+                return combatError(e);
+            }
+        } catch (NoSuchFieldException e) {
+            // A SilentAim without Chest AI's hooks (or values), from another version.
+            return combat == null ? "Chest AI: instal\u00e1 los dos JAR de SilentAim de la misma versi\u00f3n." : combatError(e);
+        } catch (ReflectiveOperationException | IOException | RuntimeException | LinkageError e) {
+            return combatError(e);
+        }
         pilot = new Pilot(cps);
         hands = new Hands(mc);
         coach = new Coach(s, planner);
@@ -356,14 +398,26 @@ public final class Session {
         tick = 0;
         pearlUntil = 0;
         first = true;
+        editingSilentAim = false;
         mouse = mc.mouseHelper;
-        mc.mouseHelper = new Still();
-        return String.format(Locale.ROOT, "Chest AI prendido. %d cofres conocidos en este servidor. Ping %.0f ms%s, %.1f clics por segundo. Barra: %s.",
-            mem.chests.size(), ping, guessed ? " (supuesto)" : "", cps, kit(lay));
+        mc.mouseHelper = combatMouse = new CombatMouse();
+        String fighting = combat == null ? "Combate deshabilitado: falta Minecadia SilentAim." : "Combate con SilentAim.";
+        return String.format(Locale.ROOT, "Chest AI prendido. %d cofres conocidos en este servidor. Ping %.0f ms%s, %.1f clics por segundo. Barra: %s. %s",
+            mem.chests.size(), ping, guessed ? " (supuesto)" : "", cps, kit(lay), fighting);
+    }
+
+    /** SilentAim could not be set up: everything of it put back, and the line for the player. */
+    private String combatError(Throwable t) {
+        if (combat != null) {
+            combat.close();
+            combat = null;
+        }
+        t.printStackTrace();
+        return "Chest AI: no se pudo iniciar Minecadia SilentAim. " + t;
     }
 
     private static String kit(Layout l) {
-        String[] names = {"espada", "arco", "manzanas", "perlas", "pociones"};
+        String[] names = {"arma", "arco", "manzanas", "perlas", "pociones"};
         StringBuilder b = new StringBuilder();
         for (int i = 0; i < 5; i++) {
             if (i > 0) {
@@ -383,8 +437,12 @@ public final class Session {
         } catch (RuntimeException e) {
             // Nothing left to let go.
         }
-        if (mc.mouseHelper instanceof Still) {
+        if (mc.mouseHelper == combatMouse) {
             mc.mouseHelper = mouse;
+        }
+        if (combat != null) {
+            combat.close();
+            combat = null;
         }
         saveChests();
         if (map != null) {
@@ -404,14 +462,14 @@ public final class Session {
         if (me.isDead || me.getHealth() <= 0.0F) {
             return "Chest AI apagado: el jugador murio.";
         }
-        if (mc.currentScreen != null && !(mc.currentScreen instanceof GuiContainer)) {
+        if (mc.currentScreen != null && !(mc.currentScreen instanceof GuiContainer) && !(mc.currentScreen instanceof GuiSilentAim)) {
             return "Chest AI apagado: se abrio otra pantalla.";
         }
         return null;
     }
 
     /** At the start of a client tick. A line for the player when the agent leaves the keys, else null. */
-    public String tickStart() {
+    public String tickStart() throws ReflectiveOperationException, IOException {
         if (pilot == null) {
             return null;
         }
@@ -420,27 +478,52 @@ public final class Session {
             stop();
             return why;
         }
+        // The SilentAim settings open: the keys and SilentAim let go until they are shut,
+        // then SilentAim takes what was set.
+        if (mc.currentScreen instanceof GuiSilentAim) {
+            if (!editingSilentAim) {
+                hands.release();
+                combatMouse.enabled = false;
+                if (combat != null) {
+                    combat.suspend();
+                }
+                editingSilentAim = true;
+            }
+            return null;
+        }
         if (mc.isGamePaused()) {
             return null;
+        }
+        if (editingSilentAim) {
+            if (combat != null) {
+                combat.reloadProfile();
+            }
+            editingSilentAim = false;
         }
         // A chest window opened by a claim: shut it, the reward is in.
         if (mc.currentScreen instanceof GuiContainer) {
             me.closeScreen();
         }
         tick++;
+        queuedTarget = null;
+        queuedAttackConsumed = false;
+        observeHit();
         Layout lay = Layout.of(me.inventory);
         int pearlLeft = (int) Math.max(0, pearlUntil - tick);
-        Frame f = Reader.read(mc, mem, pilot, lay, settings, tick, ping, pearlLeft);
+        Frame f = reader.read(mc, mem, pilot, lay, settings, tick, ping, pearlLeft);
         mostMobs = Math.max(mostMobs, f.mobs.size());
+        if (settings.search && (tick == 1 || tick % 40 == 0)) {
+            searchChests(f);
+        }
         mem.update(f, first);
         first = false;
         if (map != null && tick % 2 == 0) {
             map.tick(world, f.x, f.z, Math.max(2, Math.min(mc.gameSettings.renderDistanceChunks, 16)), tick);
         }
-        if (settings.search && (tick == 1 || tick % 40 == 0)) {
-            searchChests(f);
-        }
+        // The chest the crosshair is on by itself, not its index: a chest taken off moves the others'.
+        Memory.Known picked = f.pickChest >= 0 ? mem.chests.get(f.pickChest) : null;
         checkCandidates(f);
+        f.pickChest = mem.chests.indexOf(picked);
         String note = null;
         boolean noFarm = true;
         for (Memory.Known k : mem.chests) {
@@ -459,13 +542,20 @@ public final class Session {
         }
         int[] fromNet = a.clone();
         coach.before(f, mem, pilot, a, lay);
+        // No click of the agent's own: SilentAim hits.
+        a[6] = 0;
         if ((DEBUG || settings.log) && tick % 10 == 0) {
             StringBuilder b = new StringBuilder();
             b.append(String.format(java.util.Locale.ROOT, "CHESTAI t=%d pos=%.1f,%.1f,%.1f yaw=%.0f pitch=%.0f hp=%.1f abs=%.1f mobs=%d holos=%d known=%d posibles=%d mapa=%d modo=%s |",
                 tick, f.x, f.y, f.z, f.yaw, f.pitch, f.hp, f.absorption, f.mobs.size(), f.holos.size(), mem.chests.size(), candidates.size(),
                 map == null ? 0 : map.scanned(), coach.describe()));
-            for (chestai.core.Memory.Known k : mem.chests) {
-                b.append(String.format(java.util.Locale.ROOT, " (%d,%d,%d s%d %ds)", k.x, k.y, k.z, k.state, k.secs));
+            for (int i = 0; i < mem.chests.size(); i++) {
+                chestai.core.Memory.Known k = mem.chests.get(i);
+                int secs = k.state == Frame.COOLDOWN ? (int) Math.ceil(mem.estSecs(i, f.tick)) : k.secs;
+                b.append(String.format(java.util.Locale.ROOT, " (%d,%d,%d s%d %ds)", k.x, k.y, k.z, k.state, secs));
+                if (k.contestedWave || k.reserved) {
+                    b.append(" ocupado");
+                }
             }
             for (chestai.core.Frame.Mob m : f.mobs) {
                 double dx = m.x - f.x, dz = m.z - f.z, dy = m.y + m.h * 0.5 - (f.y + 1.62);
@@ -482,47 +572,33 @@ public final class Session {
         // What the agent can do with what the hotbar holds.
         int pearls = lay.real[Pilot.PEARL] >= 0 ? lay.pearls : 0;
         int potions = lay.real[Pilot.POTION] >= 0 ? lay.potions : 0;
-        Pilot.Keys k = pilot.step(a, pearls, pearlLeft, potions, lay.real[Pilot.BOW] >= 0 ? lay.arrows : 0, lay.real[Pilot.GAPPLE] >= 0 ? lay.gapples : 0, f.pickMob >= 0, f.pickChest >= 0);
+        // A chest another player has (their wave, or they stand by it) is not clicked.
+        Memory.Known pickedChest = f.pickChest >= 0 && f.pickChest < mem.chests.size() ? mem.chests.get(f.pickChest) : null;
+        boolean claimable = pickedChest != null && !pickedChest.contestedWave && !pickedChest.reserved;
+        if (!claimable && f.pickChest >= 0 && coach.mode == Coach.CLAIM && coach.heal == Coach.HEAL_NONE) {
+            a[7] = 0;
+        }
+        Pilot.Keys k = pilot.step(a, pearls, pearlLeft, potions, lay.real[Pilot.BOW] >= 0 ? lay.arrows : 0, lay.real[Pilot.GAPPLE] >= 0 ? lay.gapples : 0, f.pickMob >= 0, claimable);
         coach.after(f, k);
+        if (k.claim && coach.mode == Coach.CLAIM) {
+            Memory.Known c = mem.chests.get(f.pickChest);
+            c.claimAttempts++;
+            c.lastClaimAttempt = tick;
+        }
         if (k.throwIt && k.slot == Pilot.PEARL) {
             pearlUntil = tick + (long) Math.round(settings.pearlCooldownS * 20.0);
         }
-        if ((DEBUG || settings.log) && k.attack) {
-            dbgAttacks++;
-            if (mc.objectMouseOver != null && mc.objectMouseOver.entityHit != null) {
-                dbgOnMob++;
-                net.minecraft.entity.Entity eh = mc.objectMouseOver.entityHit;
-                String key = eh.getClass().getSimpleName() + (eh instanceof net.minecraft.entity.EntityLivingBase && ((net.minecraft.entity.EntityLivingBase) eh).hurtTime > 0 ? "-hurt" : "-fresh");
-                Integer c = dbgClasses.get(key);
-                dbgClasses.put(key, c == null ? 1 : c + 1);
-            }
-        }
         if ((DEBUG || settings.log) && tick % 100 == 0) {
-            log("CHESTAI golpes=" + blows + " con_dano=" + blowsLanded + " attacks=" + dbgAttacks + " on_entity=" + dbgOnMob + " pitch=" + me.rotationPitch + " " + dbgClasses);
+            log("CHESTAI clics=" + dbgAttacks + " ataques_cliente=" + dbgOnMob + " impactos_observados=" + blowsLanded);
         }
-        // Whether blows land: the mob's health 10 ticks after a blow on it, as the server sends it.
-        if (blowMob >= 0 && tick - blowAt >= 10) {
-            boolean landed = true;
-            for (chestai.core.Frame.Mob mm : f.mobs) {
-                if (mm.id == blowMob) {
-                    landed = mm.hp < blowHp;
-                }
-            }
-            if (landed) {
-                blowsLanded++;
-            }
-            blowMob = -1;
+        // SilentAim on the agent's mob; while it fights, a turn of the player's own mouse in
+        // the last 8 ticks leaves the view to the player, and the agent only walks.
+        combatMouse.enabled = combat != null && combat.prepare(coach.silentTarget(k), k, lay);
+        if (combatMouse.enabled && tick - combatMouse.lastManualTurn <= 8) {
+            k.dyaw = k.dpitch = 0;
+            coach.steerWhileLooking(f, k);
         }
-        if (k.attack && blowMob < 0 && f.pickMob >= 0) {
-            for (chestai.core.Frame.Mob mm : f.mobs) {
-                if (mm.id == f.pickMob && mm.hurtTime == 0 && mm.hp < mm.maxHp + 1) {
-                    blows++;
-                    blowMob = mm.id;
-                    blowHp = mm.hp;
-                    blowAt = tick;
-                }
-            }
-        }
+        coach.limitCombatMovement(f, k);
         hands.press(k, lay);
         if (tick % 200 == 0) {
             saveChests();
@@ -531,5 +607,57 @@ public final class Session {
             map.save();
         }
         return note;
+    }
+
+    /**
+     * Late in the tick's start (after SilentAim has turned): the blow of the
+     * tick through SilentAim, if it can land.
+     */
+    public void queueCombatClick() throws ReflectiveOperationException {
+        if (combat == null || mc.currentScreen != null || mc.isGamePaused() || check() != null) {
+            return;
+        }
+        queuedTarget = combat.queueAttack(tick);
+        if (queuedTarget != null) {
+            dbgAttacks++;
+        }
+    }
+
+    /** SilentAim's gate: a blow only for the queued one, once, while it still lands. */
+    private boolean allowNativeAttack() {
+        return queuedTarget == null || (!queuedAttackConsumed && combat.allowNativeAttack(queuedTarget));
+    }
+
+    /** The client's player attacked {@code target}: the queued blow went out. */
+    public void attackObserved(net.minecraft.entity.Entity player, net.minecraft.entity.Entity target) {
+        if (queuedTarget == null || queuedAttackConsumed || player != me || target != queuedTarget) {
+            return;
+        }
+        dbgOnMob++;
+        if (blowTarget == null) {
+            blows++;
+            blowTarget = queuedTarget;
+            blowHp = blowTarget.getHealth();
+            blowHurtTime = blowTarget.hurtTime;
+            blowAt = tick;
+        }
+        queuedAttackConsumed = true;
+    }
+
+    /** Whether the blow watched landed: its mob lost health or was hurt again within 12 ticks, as the server sends it. */
+    private void observeHit() {
+        if (blowTarget == null) {
+            return;
+        }
+        if (world.getEntityByID(blowTarget.getEntityId()) != blowTarget) {
+            blowTarget = null;
+        } else if (blowTarget.getHealth() < blowHp || blowTarget.hurtTime > blowHurtTime) {
+            blowsLanded++;
+            blowTarget = null;
+        } else if (tick - blowAt >= 12) {
+            blowTarget = null;
+        } else {
+            blowHurtTime = blowTarget.hurtTime;
+        }
     }
 }

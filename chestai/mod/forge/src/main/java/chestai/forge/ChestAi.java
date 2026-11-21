@@ -15,9 +15,12 @@ import net.minecraftforge.fml.common.FMLCommonHandler;
 import net.minecraftforge.fml.common.Mod;
 import net.minecraftforge.fml.common.event.FMLInitializationEvent;
 import net.minecraftforge.fml.common.event.FMLPreInitializationEvent;
+import net.minecraftforge.event.entity.player.AttackEntityEvent;
+import net.minecraftforge.fml.common.eventhandler.EventPriority;
 import net.minecraftforge.fml.common.eventhandler.SubscribeEvent;
 import net.minecraftforge.fml.common.gameevent.TickEvent;
 import org.lwjgl.input.Keyboard;
+import chestai.client.GuiSilentAim;
 import chestai.client.Session;
 import chestai.client.Settings;
 import chestai.core.Net;
@@ -26,11 +29,13 @@ import chestai.core.Net;
  * The mod as Forge loads it: a key (J) that hands the keys of the game to
  * the trained chest farmer and takes them back. The policy comes inside
  * the jar; a file policy.bin in config/chestai is used in its place, and
- * ajustes.txt there holds what the player sets.
+ * ajustes.txt there holds what the player sets. A second key (U) opens
+ * the settings of the SilentAim that lands the blows.
  */
 @Mod(modid = "chestai", name = "Chest AI", version = "1.0", clientSideOnly = true, acceptedMinecraftVersions = "[1.8.9]")
 public final class ChestAi {
     private final KeyBinding key = new KeyBinding("Chest AI: prender y apagar", Keyboard.KEY_J, "Chest AI");
+    private final KeyBinding aimSettings = new KeyBinding("Chest AI: ajustes de SilentAim", Keyboard.KEY_U, "Chest AI");
     private File dir = new File("config", "chestai");
     private Session session;
     private final SelfTest selfTest = Boolean.getBoolean("chestai.selftest") ? new SelfTest(this) : null;
@@ -52,6 +57,7 @@ public final class ChestAi {
     @Mod.EventHandler
     public void init(FMLInitializationEvent e) {
         ClientRegistry.registerKeyBinding(key);
+        ClientRegistry.registerKeyBinding(aimSettings);
         MinecraftForge.EVENT_BUS.register(this);
         FMLCommonHandler.instance().bus().register(this);
     }
@@ -131,7 +137,7 @@ public final class ChestAi {
     @SubscribeEvent
     public void interact(net.minecraftforge.event.entity.player.PlayerInteractEvent e) {
         if (demo != null && !e.world.isRemote && e.pos != null
-                && e.action != net.minecraftforge.event.entity.player.PlayerInteractEvent.Action.RIGHT_CLICK_AIR
+                && e.action == net.minecraftforge.event.entity.player.PlayerInteractEvent.Action.RIGHT_CLICK_BLOCK
                 && demo.click(e.entityPlayer, e.pos)) {
             e.setCanceled(true);
         }
@@ -157,21 +163,52 @@ public final class ChestAi {
             if (pressed) {
                 flip(mc);
             }
+            if (aimSettings.isPressed() && mc.thePlayer != null && mc.currentScreen == null) {
+                mc.displayGuiScreen(new GuiSilentAim(dir));
+            }
             if (session != null) {
                 say(mc, session.tickStart());
             }
         } catch (Throwable t) {
-            // Whatever goes wrong, the player gets the keys back.
-            t.printStackTrace();
-            try {
-                if (session != null) {
-                    session.stop();
-                }
-            } catch (Throwable again) {
-                again.printStackTrace();
-            }
-            session = null;
-            say(mc, "Chest AI apagado por un error: " + t);
+            stopAfterError(mc, t);
         }
+    }
+
+    /**
+     * The blow of the tick, after every other handler of the tick's start
+     * (SilentAim's own included) has turned the view and set the target.
+     */
+    @SubscribeEvent(priority = EventPriority.LOWEST)
+    public void combatTick(TickEvent.ClientTickEvent e) {
+        if (e.phase != TickEvent.Phase.START || !on()) {
+            return;
+        }
+        try {
+            session.queueCombatClick();
+        } catch (Throwable t) {
+            stopAfterError(Minecraft.getMinecraft(), t);
+        }
+    }
+
+    /** Every blow the client's player lands, whoever pressed for it (canceled ones too). */
+    @SubscribeEvent(priority = EventPriority.LOWEST, receiveCanceled = true)
+    public void attackObserved(AttackEntityEvent e) {
+        if (e.entityPlayer.worldObj.isRemote && on()) {
+            session.attackObserved(e.entityPlayer, e.target);
+        }
+    }
+
+    private void stopAfterError(Minecraft mc, Throwable t) {
+        // Whatever goes wrong, the player gets the keys back.
+        t.printStackTrace();
+        try {
+            if (session != null) {
+                session.stop();
+            }
+        } catch (Throwable again) {
+            again.printStackTrace();
+        }
+        session = null;
+        say(mc, "Chest AI apagado por un error: " + t);
     }
 }
