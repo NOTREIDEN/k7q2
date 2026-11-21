@@ -245,7 +245,9 @@ final class Reader {
         f.burning = me.isBurning();
         f.inWall = me.isEntityInsideOpaqueBlock();
         // The simulator's player has 20 health: a kit with more counts in twentieths.
-        float hpScale = me.getMaxHealth() > 20.0f ? 20.0f / me.getMaxHealth() : 1.0f;
+        // Health as of 20 whatever the hearts (a server's 20, 30 or 5 of them): every threshold is a
+        // share of the most there can be.
+        float hpScale = me.getMaxHealth() > 0.0f ? 20.0f / me.getMaxHealth() : 1.0f;
         f.hp = me.getHealth() * hpScale;
         f.absorption = me.getAbsorptionAmount() * hpScale;
         f.food = me.getFoodStats().getFoodLevel();
