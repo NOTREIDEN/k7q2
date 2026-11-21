@@ -285,6 +285,10 @@ final class Coach {
     /** How good a chest is to go to now: lower is better. */
     private double score(Frame f, Memory mem, int ci) {
         Memory.Known k = mem.chests.get(ci);
+        if (outOfHeals && !(k.seen && k.state == Frame.CLAIMABLE)) {
+            // No apple or potion left: no new wave (one still to claim, yes).
+            return 1e9;
+        }
         if (f.tick < k.skipUntil) {
             // Tried long and not claimed (no chest block to click, walled in): another for now.
             return 1e9;
@@ -1024,7 +1028,21 @@ final class Coach {
     }
 
     /** Changes the network's choices {@code a} of this tick, before the pilot turns them into keys. */
+    /**
+     * Out of golden apples and healing potions after having some: no new wave started, only the one
+     * on fought or got away from (-Dchestai.heal.stop=false, or sin_curas=seguir: on as before).
+     */
+    private static final boolean HEAL_STOP = !"false".equals(System.getProperty("chestai.heal.stop"));
+    private boolean outOfHeals;
+    private int mostHeals;
+
+    boolean outOfHeals() {
+        return outOfHeals;
+    }
+
     void before(Frame f, Memory mem, Pilot pilot, int[] a, Layout lay) {
+        mostHeals = Math.max(mostHeals, f.gapples + f.potions);
+        outOfHeals = HEAL_STOP && s.healStop && mostHeals > 0 && f.gapples + f.potions == 0;
         long t = f.tick;
         if (!boostJudged) {
             // Did the arrow carry the player? Two that did not: no boosts for a minute.
@@ -1483,7 +1501,7 @@ final class Coach {
                     if (claimSince < 0) {
                         claimSince = t;
                     }
-                    if (k.guessed && k.claimTicks > 60 && (claimClicks > 20 || k.claimTicks > 200)) {
+                    if (k.guessed && k.claimTicks > 60 && claimClicks > 20) {
                         // No hologram to say it was claimed: clicked on a while, taken as done (the next
                         // wave as far off as its hologram said last time).
                         mem.claimedGuess(k, t);
@@ -1491,7 +1509,13 @@ final class Coach {
                         hasGoal = false;
                         goalAt = -1000;
                     }
-                    if (++k.claimTicks > 600) {
+                    if (++k.claimTicks > 600 && k.guessed) {
+                        // Thirty seconds and no click on it (buried, walled in), with only a guess that it is
+                        // there to claim: taken as done.
+                        mem.claimedGuess(k, t);
+                        hasGoal = false;
+                        goalAt = -1000;
+                    } else if (k.claimTicks > 600) {
                         // Thirty seconds at it and no wave: left aside for a minute.
                         k.claimTicks = 0;
                         k.skipUntil = t + 1200;
@@ -1556,6 +1580,7 @@ final class Coach {
                     }
                     if (k.guessed && t - waitSince > 300) {
                         // Waited for a wave on a guess (no hologram): not yet, other chests meanwhile.
+                        k.idleWaits++;
                         mem.claimedGuess(k, t);
                         waitSince = -1;
                         hasGoal = false;
@@ -1568,6 +1593,11 @@ final class Coach {
                     boost(f, pilot, a, lay, dc);
                 }
             }
+        }
+        if (mode == NONE && outOfHeals) {
+            // Out of apples and potions: still, where it is, rather than off to more mobs.
+            mode = WAIT;
+            aim(f.x - Math.sin(Math.toRadians(f.yaw)) * 6.0, eyeY(f), f.z + Math.cos(Math.toRadians(f.yaw)) * 6.0);
         }
         if (mode == NONE && heal != HEAL_POTION) {
             // Nothing known to go to: out looking, 30 blocks at a time.

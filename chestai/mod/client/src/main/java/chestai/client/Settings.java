@@ -51,6 +51,8 @@ public final class Settings {
     public boolean fightJump = true;
     /** The bow at a mob shooting from where it cannot be got to on foot (up a step, across water). */
     public boolean bowMobs = true;
+    /** Out of golden apples and potions: no new waves (sin_curas=parar). */
+    public boolean healStop = true;
     /** Something eaten as soon as the food bar is short of full (plain food first, else a golden apple). */
     public boolean foodFull = true;
 
@@ -99,6 +101,12 @@ public final class Settings {
         + "# si: con arco y flechas, le tira con el arco a un mob que le tira flechas desde donde no se llega caminando.\n"
         + "arco_a_mobs=si\n";
 
+    /** The lines of the settings added after MORE5. */
+    static final String MORE6 = ""
+        + "# parar: sin manzanas doradas ni pociones de vida (habiendo tenido), no empieza oleadas nuevas y se queda quieto,\n"
+        + "# para no morir y perder el kit. seguir: sigue farmeando igual.\n"
+        + "sin_curas=parar\n";
+
     /** The lines of the settings added after MORE2. */
     static final String MORE3 = ""
         + "# si: cuando le pegan come una manzana dorada apenas la vida baja a manzana_golpe_vida (respetando\n"
@@ -138,7 +146,7 @@ public final class Settings {
         + "\n"
         + "# si: anota lo que ve y hace en config/chestai/registro.txt (para revisar problemas). no: nada.\n"
         + "registro=si\n"
-        + "\n" + MORE + "\n" + MORE2 + "\n" + MORE3 + "\n" + MORE4 + "\n" + MORE5 + "\n" + VERSION;
+        + "\n" + MORE + "\n" + MORE2 + "\n" + MORE3 + "\n" + MORE4 + "\n" + MORE5 + "\n" + MORE6 + "\n" + VERSION;
 
     public static Settings parse(Properties p) {
         Settings s = new Settings();
@@ -184,6 +192,8 @@ public final class Settings {
         s.foodFull = yes(p.getProperty("comida_llena"), true);
         s.bow = yes(p.getProperty("arco_punch"), true);
         s.bowMobs = yes(System.getProperty("chestai.bow.mobs", p.getProperty("arco_a_mobs")), true);
+        String sc = p.getProperty("sin_curas");
+        s.healStop = sc == null || !sc.trim().toLowerCase(Locale.ROOT).startsWith("s");
         s.search = yes(p.getProperty("buscar_cofres"), true);
         s.searchRadius = number(p.getProperty("buscar_radio"), 160.0);
         s.map = yes(p.getProperty("mapa"), true);
@@ -269,7 +279,8 @@ public final class Settings {
         String add = (old.getProperty("pocion_vida") == null ? "\n" + MORE : "") + (old.getProperty("pegar") == null ? "\n" + MORE2 : "")
             + (old.getProperty("comida_llena") == null ? "\n" + MORE3 : "")
             + (old.getProperty("pelea_saltando") == null ? "\n" + MORE4 : "")
-            + (old.getProperty("arco_a_mobs") == null ? "\n" + MORE5 : "");
+            + (old.getProperty("arco_a_mobs") == null ? "\n" + MORE5 : "")
+            + (old.getProperty("sin_curas") == null ? "\n" + MORE6 : "");
         if (add.length() > 0) {
             OutputStream out = new FileOutputStream(f, true);
             try {

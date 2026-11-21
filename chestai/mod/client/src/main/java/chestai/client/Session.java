@@ -75,6 +75,8 @@ public final class Session {
     private final java.util.Map<Long, Integer> candidates = new java.util.HashMap<Long, Integer>();
     /** Chests that were looked at and are no farm chests. */
     private final java.util.Set<Long> notFarm = new java.util.HashSet<Long>();
+    /** Whether the chat has been told it is out of apples and potions. */
+    private boolean saidOut;
     private File notFarmFile;
 
     /** Farm chests the agent knows of. */
@@ -459,6 +461,12 @@ public final class Session {
         }
         int[] fromNet = a.clone();
         coach.before(f, mem, pilot, a, lay);
+        if (coach.outOfHeals() != saidOut) {
+            saidOut = coach.outOfHeals();
+            String o = saidOut ? "Chest AI: sin manzanas doradas ni pociones de vida. No empiezo oleadas nuevas para no morir (sin_curas=seguir en ajustes.txt para seguir igual)."
+                : "Chest AI: tengo curas de nuevo, sigo farmeando.";
+            note = note == null ? o : note + "\n" + o;
+        }
         if ((DEBUG || settings.log) && tick % 10 == 0) {
             StringBuilder b = new StringBuilder();
             b.append(String.format(java.util.Locale.ROOT, "CHESTAI t=%d pos=%.1f,%.1f,%.1f yaw=%.0f pitch=%.0f hp=%.1f abs=%.1f mobs=%d holos=%d known=%d posibles=%d mapa=%d modo=%s |",

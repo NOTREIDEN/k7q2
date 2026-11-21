@@ -32,6 +32,8 @@ public final class Memory {
         public long waveAt = -1;
         /** The longest wait to the next wave its hologram has said, for a guess when none shows. */
         public int cdSecs;
+        /** Waits at it for a wave on a guess that brought none: each makes the next guess twice as long. */
+        public int idleWaits;
 
         public Known(int x, int y, int z) {
             this.x = x;
@@ -180,6 +182,7 @@ public final class Memory {
             }
             if (k != null) {
                 waveMob.put(m.id, k);
+                k.idleWaits = 0;
                 if (k.waveAt < 0) {
                     k.waveAt = t;
                 }
@@ -230,9 +233,6 @@ public final class Memory {
                     k.tick = t;
                     k.guessed = true;
                 }
-            } else if (k.guessed && k.state == Frame.CLAIMABLE && t - k.tick > 1200) {
-                // A minute and not clicked (out of reach): taken as claimed, not gone back to forever.
-                claimedGuess(k, t);
             } else if (k.waveAt >= 0) {
                 // Its wave's mobs all dead: with no hologram to say so, the chest is clicked to claim it.
                 k.waveAt = -1;
@@ -249,7 +249,7 @@ public final class Memory {
     /** A guessed claim done (clicked a while): the wait to the next wave, as long as the hologram said before, else a guess. */
     public void claimedGuess(Known k, long t) {
         k.state = Frame.COOLDOWN;
-        k.secs = k.cdSecs > 0 ? k.cdSecs : 30;
+        k.secs = (k.cdSecs > 0 ? k.cdSecs : 30) << Math.min(k.idleWaits, 4);
         k.tick = t;
         k.claimTicks = 0;
         k.guessed = true;
