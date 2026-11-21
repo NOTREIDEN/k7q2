@@ -159,6 +159,8 @@ final class Coach {
     int mode = NONE, heal = HEAL_NONE;
     boolean boosting;
     private int target = -1;
+    /** Health (without absorption) as of the tick before. */
+    private float lastHpSeen = 20f;
     /** Across from a mob's middle, where seenAt found a clear line to it. */
     private double seenDx, seenDz;
     /** The mob, side and height seenAt found a clear line to last, tried first the next time. */
@@ -1573,7 +1575,11 @@ final class Coach {
         }
 
         // 2. Out of what hurts with no mob doing it: water over the head, a wall, lava, fire.
-        if (mem.sinceHurt == 0 && t - lastBoost > 40) {
+        // Only health itself going down counts: absorption that goes by itself (as on some servers)
+        // took the player for hurt by the ground, and off to the "dry" block it already stood on.
+        boolean hpDown = f.hp < lastHpSeen - 0.01f;
+        lastHpSeen = f.hp;
+        if (mem.sinceHurt == 0 && hpDown && t - lastBoost > 40) {
             // (Its own Punch arrow is no harm from nowhere.)
             harmNoMob = nearest > 12.0 ? harmNoMob + 1 : 0;
         } else if (mem.sinceHurt > 100) {
@@ -2189,7 +2195,10 @@ final class Coach {
             // Down for a potion, up for the bow: quicker, still smooth.
             k.dpitch = (float) clamp((pitchAbs - f.pitch) * 0.6, -20.0, 20.0);
         }
-        if (move) {
+        // A point close by and well off to a side: turned to first, standing. Walking on at it with
+        // the view turning at most so far a tick only goes round it (seconds of circles on the spot).
+        boolean orbit = move && aimSet && hd(tx, tz, f.x, f.z) < 3.0 && Math.abs(ey) > 50.0 && !surface && !swim;
+        if (move && !orbit) {
             k.forward = 1;
             k.sprint = true;
             k.jump = jumpUp || swim;

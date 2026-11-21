@@ -70,7 +70,9 @@ public final class Memory {
 
     public final List<Known> chests = new ArrayList<Known>();
     public int sinceHurt = 100;
-    private float lastHp = Float.NaN;
+    private float lastHp = Float.NaN, lastOwnHp = Float.NaN;
+    /** Absorption down by this much in a tick is a blow (absorption going by itself goes by less). */
+    private static final float HURT_ABS = 0.3f;
     /** When a farm hologram was last read anywhere: whether the server shows them at all. */
     public long holoWorkAt = -100000;
     /** Each mob seen (entity id) and when last; each wave mob and the chest it came from. */
@@ -188,13 +190,16 @@ public final class Memory {
         waves(f);
         float hp = f.hp + f.absorption;
         if (!first) {
-            if (hp < lastHp) {
+            // A hurt: health itself down, or the absorption down by a blow's worth. Absorption that
+            // goes by itself a little at a time (as on some servers) is no hurt.
+            if (f.hp < lastOwnHp - 0.01f || hp < lastHp - HURT_ABS) {
                 sinceHurt = 0;
             } else {
                 sinceHurt = Math.min(sinceHurt + 1, 1000);
             }
         }
         lastHp = hp;
+        lastOwnHp = f.hp;
     }
 
     /**
