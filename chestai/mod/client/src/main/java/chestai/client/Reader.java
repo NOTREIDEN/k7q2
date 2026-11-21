@@ -45,6 +45,9 @@ import chestai.core.Pilot;
  * holograms say, other players and projectiles.
  */
 final class Reader {
+    /** The last hologram text of each chest (raw, colour codes as &), and the lines of the play log about them, for Session. */
+    private final Map<BlockPos, String> holoSaid = new HashMap<BlockPos, String>();
+    final List<String> holoLog = new ArrayList<String>();
     /** When each mob was last crossed by another player's arrow (entity id). */
     private final Map<Integer, Long> foreignArrowAt = new HashMap<Integer, Long>();
     /**
@@ -334,6 +337,11 @@ final class Reader {
             }
             for (Entity e : l) {
                 chestMarkers.put(e.getEntityId(), e);
+            }
+            // For the play log: what each chest's hologram says, raw, each time it changes, and how it was read.
+            String said = String.join(" | ", lines).replace('\u00a7', '&') + " => " + st[0] + " " + st[1] + "s";
+            if (!said.equals(holoSaid.put(c, said)) && holoLog.size() < 64) {
+                holoLog.add(String.format(Locale.ROOT, "holo (%d,%d,%d): %s", c.getX(), c.getY(), c.getZ(), said));
             }
             Frame.Holo h = new Frame.Holo();
             h.chest = ci;

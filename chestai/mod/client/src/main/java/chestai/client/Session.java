@@ -531,6 +531,11 @@ public final class Session {
         }
         mem.update(f, first);
         first = false;
+        // Raw hologram texts (and what they were read as), each time one changes.
+        for (String hl : reader.holoLog) {
+            log("CHESTAI t=" + tick + " " + hl);
+        }
+        reader.holoLog.clear();
         // Potions (and apples) down from the inventory to the hotbar: nothing else meanwhile.
         double mobD = 1e9;
         for (Frame.Mob m : f.mobs) {
