@@ -33,6 +33,8 @@ import net.minecraft.world.WorldType;
  * chestai.demo.seconds. The farm runs on the integrated server's thread.
  */
 final class Demo {
+    /** Ticks a plain wave has before it resets: 17 s, as on the real server (15 to 20 s); -Dchestai.arena.wave=200 for the old 10 s. */
+    private static final int WAVE_TICKS = Integer.getInteger("chestai.arena.wave", 340);
     private static final int COOLDOWN = 0, READY = 1, ACTIVE = 2, CLAIMABLE = 3;
 
     private final ChestAi mod;
@@ -835,7 +837,7 @@ final class Demo {
                             p.getDistance(cx, c.pos.getY(), cz)));
                     }
                     c.state = ACTIVE;
-                    c.waveTicks = exp ? 20 * 60 : 200;
+                    c.waveTicks = exp ? 20 * 60 : WAVE_TICKS;
                     c.started = w.getTotalWorldTime();
                     if (lastClaimAt >= 0) {
                         betweens++;

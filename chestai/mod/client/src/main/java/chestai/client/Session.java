@@ -627,7 +627,7 @@ public final class Session {
         if (!claimable && f.pickChest >= 0 && coach.mode == Coach.CLAIM && coach.heal == Coach.HEAL_NONE) {
             a[7] = 0;
         }
-        Pilot.Keys k = pilot.step(a, pearls, pearlLeft, potions, lay.real[Pilot.BOW] >= 0 ? lay.arrows : 0, lay.real[Pilot.GAPPLE] >= 0 ? lay.gapples : 0, f.pickMob >= 0, claimable);
+        Pilot.Keys k = lastKeys = pilot.step(a, pearls, pearlLeft, potions, lay.real[Pilot.BOW] >= 0 ? lay.arrows : 0, lay.real[Pilot.GAPPLE] >= 0 ? lay.gapples : 0, f.pickMob >= 0, claimable);
         coach.after(f, k);
         if (k.claim && coach.mode == Coach.CLAIM) {
             Memory.Known c = mem.chests.get(f.pickChest);
@@ -663,6 +663,10 @@ public final class Session {
      * tick through SilentAim, if it can land.
      */
     public void queueCombatClick() throws ReflectiveOperationException {
+        if (combat == null && NO_AIM_CLICKS && pilot != null && lastKeys != null && mc.currentScreen == null && !mc.isGamePaused() && check() == null) {
+            ownClick();
+            return;
+        }
         if (combat == null || mc.currentScreen != null || mc.isGamePaused() || check() != null) {
             return;
         }
@@ -670,6 +674,35 @@ public final class Session {
         if (queuedTarget != null) {
             dbgAttacks++;
         }
+    }
+
+    /**
+     * Without SilentAim, in the arena and the self test only (-Dchestai.arena or -Dchestai.selftest,
+     * where Minecadia is not there): the agent's own click, as SilentAim would give it, on the mob
+     * Coach fights when the crosshair is on it within 3 blocks, at the clicks per second.
+     */
+    private static final boolean NO_AIM_CLICKS = Boolean.getBoolean("chestai.arena") || Boolean.getBoolean("chestai.selftest");
+    private Pilot.Keys lastKeys;
+    private long lastOwnClick = -1000;
+
+    private void ownClick() {
+        int id = coach.silentTarget(lastKeys);
+        MovingObjectPosition mo = mc.objectMouseOver;
+        if (id < 0 || me.isUsingItem() || tick - lastOwnClick < 20.0 / pilot.cps || mo == null
+                || mo.typeOfHit != MovingObjectPosition.MovingObjectType.ENTITY || mo.entityHit == null || mo.hitVec == null) {
+            return;
+        }
+        Entity e = mo.entityHit;
+        boolean on = e.getEntityId() == id || (e.ridingEntity != null && e.ridingEntity.getEntityId() == id)
+            || (e.riddenByEntity != null && e.riddenByEntity.getEntityId() == id);
+        if (!on || !(e instanceof EntityLivingBase) || mo.hitVec.distanceTo(me.getPositionEyes(1.0F)) > 3.0) {
+            return;
+        }
+        KeyBinding.onTick(mc.gameSettings.keyBindAttack.getKeyCode());
+        lastOwnClick = tick;
+        queuedTarget = (EntityLivingBase) e;
+        queuedAttackConsumed = false;
+        dbgAttacks++;
     }
 
     /** SilentAim's gate: a blow only for the queued one, once, while it still lands. */
