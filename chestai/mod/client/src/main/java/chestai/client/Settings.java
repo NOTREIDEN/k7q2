@@ -234,7 +234,7 @@ public final class Settings {
         s.searchRadius = number(p.getProperty("buscar_radio"), 160.0);
         s.map = yes(p.getProperty("mapa"), true);
         s.multi = yes(System.getProperty("chestai.multi", p.getProperty("multi_cofre")), false);
-        s.waveSecs = Math.max(5.0, Math.min(number(p.getProperty("oleada_segundos"), 17.0), 600.0));
+        s.waveSecs = Math.max(5.0, Math.min(number(System.getProperty("chestai.wave.secs", p.getProperty("oleada_segundos")), 17.0), 600.0));
         t = p.getProperty("ignorar");
         if (t != null) {
             for (String n : t.split(",")) {
