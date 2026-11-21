@@ -18,7 +18,7 @@ public final class HoloText {
     private static final Pattern CLOCK = Pattern.compile("(?:^|\\D)(\\d{1,4}):(\\d{1,2})(?:\\D|$)");
     /** A line about the next wave (its countdown is the one that counts), and a line of a wave that runs (of lowercase text). */
     private static final Pattern NEXT = Pattern.compile("next wave|pr[o\u00f3]xima oleada|\\brespawns?\\b|\\bspawns? in\\b|reaparece|cooldown");
-    private static final Pattern ACTIVE = Pattern.compile("wave in progress|oleada en curso|kill (?:the )?(?:mobs|creatures|monsters)|mat[a\u00e1].*(?:mobs|criaturas|monstruos)");
+    private static final Pattern ACTIVE = Pattern.compile("wave in progress|oleada en curso|\\b(?:seconds?|secs?|minutes?|mins?|time) (?:left|remaining)\\b|\\bremaining\\b|quedan|restantes?|kill (?:the )?(?:mobs|creatures|monsters)|mat[a\u00e1].*(?:mobs|criaturas|monstruos)");
 
     private HoloText() {
     }
@@ -91,7 +91,9 @@ public final class HoloText {
      * or null if they say nothing the agent knows.
      */
     public static int[] parse(List<String> lines, String claimText, String activeColors) {
-        // A wave runs by what a line says; a line in a wave's colour only counts with no countdown.
+        // A wave runs by what a line says, or by a line in a wave's colour that is not about the next
+        // wave ("Wave 3" in red over "8 seconds left": the time left of the wave that runs, not a
+        // wait). Only a line about the next wave makes its countdown a wait over a wave's colour.
         boolean active = false, colored = false;
         int secs = -1, nextSecs = -1;
         String[] claims = claimText.split(",");
@@ -109,7 +111,7 @@ public final class HoloText {
             boolean next = NEXT.matcher(p).find();
             active |= !next && ACTIVE.matcher(p).find();
             char c = color(raw);
-            colored |= c != 0 && activeColors.indexOf(c) >= 0;
+            colored |= !next && c != 0 && activeColors.indexOf(c) >= 0;
             int s = countdown(p);
             if (next && s >= 0 && nextSecs < 0) {
                 nextSecs = s;
@@ -121,10 +123,12 @@ public final class HoloText {
         if (active) {
             return new int[] {Frame.ACTIVE, 0};
         }
-        int left = nextSecs >= 0 ? nextSecs : secs;
-        if (left >= 0) {
-            return new int[] {left > 0 ? Frame.COOLDOWN : Frame.READY, left};
+        if (nextSecs >= 0) {
+            return new int[] {nextSecs > 0 ? Frame.COOLDOWN : Frame.READY, nextSecs};
         }
-        return colored ? new int[] {Frame.ACTIVE, 0} : null;
+        if (colored) {
+            return new int[] {Frame.ACTIVE, 0};
+        }
+        return secs >= 0 ? new int[] {secs > 0 ? Frame.COOLDOWN : Frame.READY, secs} : null;
     }
 }

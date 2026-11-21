@@ -43,7 +43,16 @@ final class Coach {
     /** Reach of the sword, from the eyes to the mob's box. */
     private static final double REACH = 3.0;
     /** How much sooner (in seconds) another chest of the same priority must be to be gone for instead. */
-    private static final double GOAL_SWITCH_MARGIN = 0.75;
+    /**
+     * Another chest takes the goal's place only when it saves this many seconds; at the goal (within
+     * GOAL_AT blocks) or just after a pearl thrown toward it, GOAL_STAY_MARGIN. A goal that can no
+     * longer be farmed (another player's, set aside, out of heals) is left at once.
+     */
+    private static final double GOAL_SWITCH_MARGIN = 8.0, GOAL_STAY_MARGIN = 25.0, GOAL_AT = 8.0;
+    /** Goals looked over again every this many ticks (half a second). */
+    private static final int GOAL_EVERY = 10;
+    /** After a pearl toward the goal, held to it this long (from the throw). */
+    private static final int PEARL_COMMIT_TICKS = 200;
     /** Ticks between two potions. */
     private static final int POT_GAP = 22;
     /** The Punch boost: from this far, the view this high, the bow drawn this many ticks. */
@@ -148,6 +157,10 @@ final class Coach {
     int mode = NONE, heal = HEAL_NONE;
     boolean boosting;
     private int target = -1;
+    /** Across from a mob's middle, where seenAt found a clear line to it. */
+    private double seenDx, seenDz;
+    /** Ticks since the player was last hurt, as of this tick. */
+    private int sinceHurtNow = 1000;
     /** The mob fought last, and when: after a step back, a knock out of reach or a potion, the same one again first. */
     private int lastFought = -1;
     private long lastFoughtAt = -1000;
@@ -420,25 +433,25 @@ final class Coach {
     }
 
     /**
-     * Which chests come first (lower first): a claim (its hologram read lately, or a guess of the
-     * last half minute), then a wave of its own on near by, then one ready or counting down as its
-     * hologram says lately; the rest (unseen, or not read for long) last.
+     * The seconds a chest's kind is worth against the time to it: a claim first (its hologram read
+     * in the last two minutes, or a guess of the last half minute), then a wave of its own on near by,
+     * then one ready or counting down; one never seen last. A chest's hologram out of sight for a
+     * while does not change what it was: only its state does.
      */
-    private static int goalPriority(Frame f, Memory.Known k, double secs) {
+    private static double goalBonus(Frame f, Memory.Known k) {
         if (!k.seen) {
-            return 3;
+            return 30.0;
         }
-        boolean fresh = f.tick - k.holoTick <= Memory.HOLO_STALE;
         switch (k.state) {
             case Frame.CLAIMABLE:
-                return fresh || (k.guessed && f.tick - k.tick <= 600) ? 0 : 3;
+                return (!k.guessed && f.tick - k.holoTick <= 2400) || (k.guessed && f.tick - k.tick <= 600) ? -30.0 : 20.0;
             case Frame.ACTIVE:
-                return k.waveLeft > 0 && f.tick - k.tick < 200 && hd(k.cx(), k.cz(), f.x, f.z) < LOCK_R ? 1 : 3;
+                return k.waveLeft > 0 && f.tick - k.tick < 200 && hd(k.cx(), k.cz(), f.x, f.z) < LOCK_R ? -20.0 : 20.0;
             case Frame.READY:
-                return fresh ? 2 : 3;
+                return f.tick - k.holoTick <= 1200 ? 0.0 : 10.0;
             case Frame.COOLDOWN:
             default:
-                return fresh || secs > 0 ? 2 : 3;
+                return 0.0;
         }
     }
 
@@ -458,28 +471,36 @@ final class Coach {
         }
     }
 
-    /** Picks the chest to go for, keeping the one picked unless another is clearly better. */
+    /**
+     * Picks the chest to go for, keeping the one picked unless another is clearly better: one that
+     * saves GOAL_SWITCH_MARGIN seconds or more, GOAL_STAY_MARGIN once at the goal or just after a
+     * pearl toward it. No going back and forth over a second or two, nor leaving a chest come to.
+     */
     private int chooseGoal(Frame f, Memory mem) {
         int cur = hasGoal ? mem.indexOfChest(goalX, goalY, goalZ) : -1;
-        if (cur >= 0 && f.tick - goalAt < 5 && Double.isFinite(score(f, mem, cur))) {
+        double cc = cur >= 0 ? score(f, mem, cur) : Double.POSITIVE_INFINITY;
+        if (cur >= 0 && f.tick - goalAt < GOAL_EVERY && Double.isFinite(cc)) {
             return cur;
         }
-        // The first by priority, the soonest of those.
         int best = -1;
-        int bp = Integer.MAX_VALUE;
         double bs = Double.POSITIVE_INFINITY;
         for (int i = 0; i < mem.chests.size(); i++) {
             double sc = score(f, mem, i);
-            int pr = goalPriority(f, mem.chests.get(i), mem.estSecs(i, f.tick));
-            if (Double.isFinite(sc) && (pr < bp || (pr == bp && sc < bs))) {
+            if (!Double.isFinite(sc)) {
+                continue;
+            }
+            sc += goalBonus(f, mem.chests.get(i));
+            if (sc < bs) {
                 bs = sc;
-                bp = pr;
                 best = i;
             }
         }
-        if (best >= 0 && cur >= 0 && goalPriority(f, mem.chests.get(cur), mem.estSecs(cur, f.tick)) == bp) {
-            double cs = score(f, mem, cur);
-            if (cs <= bs + GOAL_SWITCH_MARGIN) {
+        if (best >= 0 && best != cur && Double.isFinite(cc)) {
+            Memory.Known ck = mem.chests.get(cur);
+            boolean at = hd(ck.cx(), ck.cz(), f.x, f.z) < GOAL_AT && Math.abs(ck.y - f.y) <= 5.0;
+            boolean pearled = f.tick - pearlAt < PEARL_COMMIT_TICKS || (pearlUntil >= f.tick);
+            double margin = at || pearled ? GOAL_STAY_MARGIN : GOAL_SWITCH_MARGIN;
+            if (cc + goalBonus(f, ck) <= bs + margin) {
                 best = cur;
             }
         }
@@ -797,8 +818,9 @@ final class Coach {
      * it, if there is one (looked for every two seconds at most). True when one is being thrown.
      */
     private boolean tryChestPearl(Frame f, Memory.Known k, boolean canPearl, int[] a) {
+        // Never with a mob near or while being hurt: a pearl is aimed for up to two seconds and a half.
         if (!k.seen || !canPearl || !f.onGround || f.headInWater || f.tick - pearlAt <= 160 || f.tick - pearlTryAt < 40
-                || hd(f.x, f.z, k.cx(), k.cz()) < CHEST_PEARL_DISTANCE) {
+                || hd(f.x, f.z, k.cx(), k.cz()) < CHEST_PEARL_DISTANCE || nearestMob < 10.0 || sinceHurtNow < 40) {
             return false;
         }
         pearlTryAt = f.tick;
@@ -1444,6 +1466,7 @@ final class Coach {
             && (haveFood || (haveApple && (f.food <= 6 || (f.food <= 16 && appleGap && absGone))));
         healWanted = potNeed || appleNeed || foodNeed;
         nearestMob = nearest;
+        sinceHurtNow = mem.sinceHurt;
         if (drawing && (potNeed || appleNeed || foodNeed || !cand.isEmpty())) {
             // The bow is let go: something matters more.
             boosting = false;
@@ -1560,6 +1583,10 @@ final class Coach {
                 noPearlAt = t;
             }
         }
+        if (pearlUntil >= t && !pearlThrown && (nearest < 6.0 || mem.sinceHurt == 0)) {
+            // A mob come close, or a hit, while aiming the pearl: the pearl is not thrown, the mob first.
+            pearlUntil = -1;
+        }
         if (pearlUntil >= t && heal == HEAL_NONE) {
             // No way out on foot (or a far chest): an ender pearl to where the goal can be walked to.
             aimPearl(f, a);
@@ -1608,6 +1635,8 @@ final class Coach {
             int melee = 0;
             // One in reach that no blow gets to (a block, a hologram in the way): gone for closer.
             boolean hidden = false;
+            Frame.Mob hiddenMob = null;
+            double hiddenR = 1e9;
             for (Frame.Mob m : cand) {
                 melee += m != shooter && hd(m.x, m.z, f.x, f.z) < 4.0 ? 1 : 0;
             }
@@ -1621,6 +1650,10 @@ final class Coach {
                 double vy = seenAt(f, m);
                 if (Double.isNaN(vy)) {
                     hidden = true;
+                    if (r < hiddenR) {
+                        hiddenR = r;
+                        hiddenMob = m;
+                    }
                     continue;
                 }
                 // The first wave's own before the others; one shooting before one that is not; the one fought before a new one.
@@ -1664,7 +1697,10 @@ final class Coach {
                 }
                 // Low on the body (the name a server keeps over a mob's head can be in the way higher up),
                 // higher where grass or a block is in the way. On a horse: the rider, not the horse.
-                double ax = tgt.x + tgt.mx * 2.0, az = tgt.z + tgt.mz * 2.0,
+                if (tgtY == tgtY) {
+                    tgtY = seenAt(f, tgt);
+                }
+                double ax = tgt.x + tgt.mx * 2.0 + (tgtY == tgtY ? seenDx : 0.0), az = tgt.z + tgt.mz * 2.0 + (tgtY == tgtY ? seenDz : 0.0),
                     ay = tgtY == tgtY ? tgtY : tgt.kind == Frame.HORSEMAN ? tgt.y + 2.0 : tgt.y + Math.min(tgt.h, 2.6) * 0.45;
                 aim(ax, ay, az);
                 // No click here: SilentAim hits (see silentTarget).
@@ -1709,7 +1745,27 @@ final class Coach {
                         back = m;
                     }
                 }
-                if (back != null) {
+                if (back == null && hiddenMob != null) {
+                    // In reach but no blow gets to it (a hologram's stand, a block between): a step to
+                    // one side of it for a clear line, the view kept low on its body, never up at the
+                    // hologram over the chest.
+                    double hx = hiddenMob.x - f.x, hz = hiddenMob.z - f.z, hl = Math.max(Math.hypot(hx, hz), 1e-3);
+                    double side = (t / 30) % 2 == 0 ? 1.0 : -1.0;
+                    double px = f.x - hz / hl * 1.5 * side, pz = f.z + hx / hl * 1.5 * side;
+                    if (!planner.straight(f.x, f.y, f.z, px, pz)) {
+                        side = -side;
+                        px = f.x - hz / hl * 1.5 * side;
+                        pz = f.z + hx / hl * 1.5 * side;
+                    }
+                    move = false;
+                    path = null;
+                    if (planner.straight(f.x, f.y, f.z, px, pz)) {
+                        // The keys toward the spot with the view on the mob (as off a rim, in after()).
+                        rimX = px;
+                        rimZ = pz;
+                    }
+                    aim(hiddenMob.x, hiddenMob.y + Math.min(hiddenMob.h, 2.6) * 0.3, hiddenMob.z);
+                } else if (back != null) {
                     move = true;
                     path = null;
                     aim(back.x + back.mx * 2.0, back.y + Math.min(back.h, 2.6) * 0.45, back.z + back.mz * 2.0);
@@ -1718,8 +1774,8 @@ final class Coach {
                     go(f, gc[0], gc[1], gc[2], hidden ? 0.8 : 1.5);
                 }
                 // The view up at the group only when walking straight at it.
-                if (back == null && aimSet && hd(tx, tz, gc[0], gc[2]) < 0.5) {
-                    aim(tx, gc[1] + 1.0, tz);
+                if (back == null && hiddenMob == null && aimSet && hd(tx, tz, gc[0], gc[2]) < 0.5) {
+                    aim(tx, gc[1] + 0.8, tz);
                 }
                 if (deadEndNow) {
                     // The way to them stops short (up a cliff, down a pit): left alone now, not in eight seconds.
@@ -1980,10 +2036,19 @@ final class Coach {
         double ex = f.x, ey = eyeY(f), ez = f.z;
         double base = m.kind == Frame.HORSEMAN ? m.y + 1.4 : m.y, h = m.kind == Frame.HORSEMAN ? 1.0 : Math.min(m.h, 2.6);
         double[] at = {0.45, 0.7, 0.25, 0.88};
-        for (double q : at) {
-            double y = base + h * q;
-            if (planner.combatSight(ex, ey, ez, m.x, y, m.z)) {
-                return y;
+        // The middle of its body first, then a little to either side of it (a hologram's stand is
+        // thin: a blow past it at the mob's edge still lands, and the view stays on the mob).
+        double dx = m.x - ex, dz = m.z - ez, dl = Math.max(Math.hypot(dx, dz), 1e-3);
+        double sx = -dz / dl * 0.22, sz = dx / dl * 0.22;
+        double[] side = {0.0, 1.0, -1.0};
+        for (double sd : side) {
+            for (double q : at) {
+                double y = base + h * q;
+                if (planner.combatSight(ex, ey, ez, m.x + sx * sd, y, m.z + sz * sd)) {
+                    seenDx = sx * sd;
+                    seenDz = sz * sd;
+                    return y;
+                }
             }
         }
         return Double.NaN;
@@ -2132,7 +2197,7 @@ final class Coach {
                 k.strafe = tapDir;
             }
         }
-        if (mode == FIGHT && rimX == rimX && heal != HEAL_POTION) {
+        if ((mode == FIGHT || mode == APPROACH) && rimX == rimX && heal != HEAL_POTION) {
             // Off the rim, the view left on the mob: the keys toward the spot as seen from where it looks.
             double yr = Math.toRadians(f.yaw + k.dyaw);
             double dx = rimX - f.x, dz = rimZ - f.z, len = Math.max(Math.sqrt(dx * dx + dz * dz), 1e-6);
