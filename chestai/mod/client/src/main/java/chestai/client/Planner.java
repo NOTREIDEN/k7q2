@@ -22,6 +22,12 @@ import net.minecraft.world.World;
 final class Planner {
     /** How far from the start the search goes, and how many spots it opens at most. */
     static final int RANGE = 80, MAX_NODES = 24000;
+    /**
+     * -Dchestai.move3: no step up from a spot held up by water alone (the player floats half a
+     * block lower than that and cannot get two up out of a pool), falling water (a waterfall)
+     * dear to go through or up, and no step up where the head has no room to jump.
+     */
+    static final boolean MOVE3 = Boolean.getBoolean("chestai.move3");
 
     private final World w;
     private final MapStore map;
@@ -119,6 +125,23 @@ final class Planner {
 
     boolean water(int x, int y, int z) {
         return cell(x, y, z) == MapStore.WATER;
+    }
+
+    /** Water falling (a waterfall's column, as the game's level 8 and up) where the client has it loaded. */
+    boolean falling(int x, int y, int z) {
+        if (!water(x, y, z) || y < 0 || y > 255 || !loaded(x, z)) {
+            return false;
+        }
+        net.minecraft.block.state.IBlockState st = w.getBlockState(new BlockPos(x, y, z));
+        if (!(st.getBlock() instanceof net.minecraft.block.BlockLiquid)) {
+            return false;
+        }
+        return st.getValue(net.minecraft.block.BlockLiquid.LEVEL).intValue() >= 8;
+    }
+
+    /** Over water and not in it: the player is in fact half a block lower, in the water, and no higher step is in reach. */
+    boolean floats(int x, int y, int z) {
+        return !water(x, y, z) && water(x, y - 1, z);
     }
 
     /** Whether the client has the chunk of the column (x, z) loaded. */
@@ -341,7 +364,7 @@ final class Planner {
                 if (stand(nx, n.y, nz)) {
                     ny = n.y;
                     cost = base;
-                } else if (stand(nx, n.y + 1, nz) && open(n.x, n.y + 2, n.z)) {
+                } else if (stand(nx, n.y + 1, nz) && open(n.x, n.y + 2, n.z) && !(MOVE3 && floats(n.x, n.y, n.z))) {
                     ny = n.y + 1;
                     cost = base + 0.8;
                 } else if (open(nx, n.y, nz) && open(nx, n.y + 1, nz)) {
@@ -362,6 +385,10 @@ final class Planner {
                 if (water(nx, ny, nz) || inWater) {
                     cost += 1.5;
                 }
+                if (MOVE3 && (falling(nx, ny, nz) || falling(nx, ny + 1, nz))) {
+                    // A waterfall pushes down and across: round it if there is a way.
+                    cost += 6.0;
+                }
                 if (brink(nx, ny, nz)) {
                     // Along the edge of a drop only if there is no other way.
                     cost += 1.5;
@@ -370,7 +397,9 @@ final class Planner {
             }
             // Swimming up out of water, or up a column of it.
             if (inWater && stand(n.x, n.y + 1, n.z)) {
-                add(nodes, open, n, n.x, n.y + 1, n.z, 1.0, gx, gy, gz);
+                // (Up still water a tenth of a block a tick; up a waterfall hardly at all.)
+                double up = !MOVE3 ? 1.0 : falling(n.x, n.y, n.z) || falling(n.x, n.y + 1, n.z) ? 14.0 : 2.5;
+                add(nodes, open, n, n.x, n.y + 1, n.z, up, gx, gy, gz);
             }
         }
         reached = goal != null;
@@ -421,13 +450,17 @@ final class Planner {
         double len = Math.sqrt(dx * dx + dz * dz);
         int steps = (int) Math.ceil(len / 0.5);
         int y = startAt(px, py, pz)[1];
+        int lx = (int) Math.floor(px), lz = (int) Math.floor(pz);
         for (int i = 1; i <= steps; i++) {
             double t = (double) i / steps;
             int bx = (int) Math.floor(px + dx * t), bz = (int) Math.floor(pz + dz * t);
+            int fx = lx, fz = lz;
+            lx = bx;
+            lz = bz;
             if (stand(bx, y, bz)) {
                 continue;
             }
-            if (stand(bx, y + 1, bz) && open(bx, y + 2, bz)) {
+            if (stand(bx, y + 1, bz) && open(bx, y + 2, bz) && (!MOVE3 || (open(fx, y + 2, fz) && !floats(fx, y, fz)))) {
                 y++;
                 continue;
             }

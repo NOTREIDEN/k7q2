@@ -185,6 +185,27 @@ final class Coach {
      * the chest's own level.
      */
     static final boolean MOVE2 = Boolean.getBoolean("chestai.move2");
+    /**
+     * The second movement round (-Dchestai.move3=true): in water up only for air, at a bank or a way
+     * up, or over deep water (on a shallow bottom walked, as Depth Strider lets it); a jump timed to a
+     * step up just ahead, with room for the head; and a Punch boost shot up from standing, the arrow
+     * coming back down on the player, only where its push lands on safe ground the way is slow to.
+     */
+    static final boolean MOVE3 = Boolean.getBoolean("chestai.move3");
+    private static final double BOOST3_PITCH = -87.5;
+    private static final int BOOST3_DRAW = Integer.getInteger("chestai.boost3.draw", 5);
+    /** Ticks a boost must save over walking (-Dchestai.boost3.margin; very low to try the shot itself). */
+    private static final double BOOST3_MARGIN = Double.parseDouble(System.getProperty("chestai.boost3.margin", "8"));
+    /** Set by go() under MOVE3: the jump in water is its own (not held all the time). */
+    private boolean swimSet;
+    /** Across this tick (blocks), from the last one. */
+    private double spd, prevFx = Double.NaN, prevFz;
+    /** The MOVE3 boost: 0 none, 1 bow up, 2 drawing, 3 still under the arrow. */
+    private int boostPhase;
+    private long boostPhaseAt, boostCallAt = -10, boostLookAt = -100;
+    private double boostYaw;
+    private static final boolean BOOST3_DEBUG = Boolean.getBoolean("chestai.boost3.debug"), BOOST3_TEST = Boolean.getBoolean("chestai.boost3.test");
+    private final int[] boostWhy = new int[20];
     private static final int HIDDEN_GIVEUP = 120;
     /** A retreat of a few seconds to eat an apple (apples, no potion), back with the absorption counted. */
     private boolean shortRetreat;
@@ -598,6 +619,7 @@ final class Coach {
         move = true;
         objective(gx, gy, gz, f.tick);
         swim = inWater(f);
+        swimSet = MOVE3;
         double d = hd(gx, gz, f.x, f.z);
         // After a mob more than a step up or down: never straight at it, only along a way that gets there.
         boolean approach = mode == APPROACH;
@@ -643,7 +665,7 @@ final class Coach {
         if (d < 7.0 && (!approach || !steep) && planner.straight(f.x, f.y, f.z, gx, gz)) {
             path = null;
             aim(gx, eyeY(f) - 0.4, gz);
-            jumpUp = (f.collidedH && f.onGround) || swim;
+            jumpUp = MOVE3 ? jump3(f, false) : (f.collidedH && f.onGround) || swim;
             return;
         }
         boolean far = path == null || hd(gx, gz, pgx, pgz) > 2.0 || Math.abs(gy - pgy) > 3.0;
@@ -697,7 +719,7 @@ final class Coach {
         }
         if (path == null) {
             aim(gx, eyeY(f) - 0.4, gz);
-            jumpUp = (f.collidedH && f.onGround) || swim;
+            jumpUp = MOVE3 ? jump3(f, false) : (f.collidedH && f.onGround) || swim;
             return;
         }
         // The node of the way the player is at.
@@ -729,7 +751,57 @@ final class Coach {
         int[] to = path.get(j);
         aim(to[0] + 0.5, Math.max(to[1] + 1.2, eyeY(f) - 0.6), to[2] + 0.5);
         int[] next = path.get(Math.min(last, pi + 1));
+        if (MOVE3) {
+            // The next spot one up and close: the jump now (too early and it comes down short of it).
+            jumpUp = jump3(f, next[1] > Math.floor(f.y + 0.01) && hd(next[0] + 0.5, next[2] + 0.5, f.x, f.z) < 1.2 + spd * 2.0);
+            return;
+        }
         jumpUp = next[1] > Math.floor(f.y + 0.01) || (f.collidedH && f.onGround) || (swim && next[1] >= Math.floor(f.y + 0.01));
+    }
+
+    /**
+     * MOVE3: whether to jump this tick. In water: for air, at a bank or a way up, or kept up over
+     * deep water; on a shallow bottom not (Depth Strider walks it as fast as dry ground). On the
+     * ground: the next spot one up close by ({@code up}), a step up just ahead, or against a wall,
+     * and only with room over the head (a jump under a block only knocks the head).
+     */
+    private boolean jump3(Frame f, boolean up) {
+        int x = (int) Math.floor(f.x), y = (int) Math.floor(f.y + 0.01), z = (int) Math.floor(f.z);
+        if (inWater(f)) {
+            return f.headInWater || f.collidedH || up || planner.water(x, y - 1, z) || stepAhead(f);
+        }
+        if (!f.onGround || !planner.open(x, y + 2, z)) {
+            return false;
+        }
+        return up || f.collidedH || stepAhead(f);
+    }
+
+    /**
+     * A step one block up straight ahead, close enough that a jump now clears it: 1.8.9 has no
+     * auto-jump and a jump is over the height of a block from its third tick to its eighth, so it
+     * is pressed some four ticks' walk before the step (later, it is walked into and climbed slow).
+     */
+    private boolean stepAhead(Frame f) {
+        int x0 = (int) Math.floor(f.x), y = (int) Math.floor(f.y + 0.01), z0 = (int) Math.floor(f.z);
+        if (!planner.open(x0, y + 2, z0) || planner.floats(x0, y, z0)) {
+            return false;
+        }
+        double yr = Math.toRadians(f.yaw), dx = -Math.sin(yr), dz = Math.cos(yr);
+        double reach = Math.min(2.0, 0.3 + Math.max(0.2, spd) * 4.5);
+        int lx = x0, lz = z0;
+        for (double d = 0.35; d <= reach; d += 0.25) {
+            int bx = (int) Math.floor(f.x + dx * d), bz = (int) Math.floor(f.z + dz * d);
+            if (bx == lx && bz == lz) {
+                continue;
+            }
+            lx = bx;
+            lz = bz;
+            if (planner.stand(bx, y, bz)) {
+                continue;
+            }
+            return planner.stand(bx, y + 1, bz) && !planner.floats(bx, y + 1, bz);
+        }
+        return false;
     }
 
     /**
@@ -756,6 +828,20 @@ final class Coach {
                 }
                 if (air == null) {
                     return null;
+                }
+                if (MOVE3) {
+                    // Only down on top of something, with room for the head round it too: a pearl that hits
+                    // the side of a tree or a wall puts the player against it, the body in the leaves, and
+                    // a spot under them with no room to stand up is a trap for good (seed 11: 400 s).
+                    if (bx != air[0] || bz != air[2] || by != air[1] - 1 || !planner.stand(air[0], air[1], air[2])) {
+                        return null;
+                    }
+                    for (int[] d : new int[][] {{1, 0}, {-1, 0}, {0, 1}, {0, -1}}) {
+                        if (!planner.open(air[0] + d[0], air[1] + 1, air[2] + d[1])) {
+                            return null;
+                        }
+                    }
+                    return new int[] {air[0], air[1], air[2], i + 1};
                 }
                 // Down on top of something, or against its side with ground under: a spot to stand.
                 for (int dy = 0; dy >= -2; dy--) {
@@ -1391,10 +1477,20 @@ final class Coach {
                 pearlUntil = -1;
             }
         }
+        spd = prevFx == prevFx ? hd(f.x, f.z, prevFx, prevFz) : 0.0;
+        prevFx = f.x;
+        prevFz = f.z;
+        swimSet = false;
+        if (MOVE3 && boostPhase > 0 && (t - boostCallAt > 1 || !boosting)) {
+            // Something else came first (a mob, a heal): the boost is off.
+            boostPhase = 0;
+            boosting = false;
+            boostFrom = -1;
+        }
         if (!boostJudged) {
             // Did the arrow carry the player? Two that did not: no boosts for a minute.
             boostTop = Math.max(boostTop, Math.sqrt(f.mx * f.mx + f.mz * f.mz));
-            if (t - lastBoost >= 30) {
+            if (t - lastBoost >= (MOVE3 ? 45 : 30)) {
                 boostJudged = true;
                 if (boostTop > 0.6) {
                     boostMisses = 0;
@@ -1803,7 +1899,7 @@ final class Coach {
                 fightWalk = s.fightJump && !pressed && shooter == null && !Boolean.getBoolean("chestai.fight.sprint");
                 if (hd(gc[0], gc[2], f.x, f.z) > 1.8 && hd(tgt.x, tgt.z, f.x, f.z) > 1.2 && !ledge(f)) {
                     move = true;
-                    jumpUp = (f.collidedH && f.onGround) || inWater(f);
+                    jumpUp = MOVE3 ? jump3(f, false) : (f.collidedH && f.onGround) || inWater(f);
                 }
             } else {
                 // None in reach: straight at the group, without swinging.
@@ -1879,7 +1975,7 @@ final class Coach {
                     move = true;
                     path = null;
                     aim(back.x + back.mx * 2.0, back.y + Math.min(back.h, 2.6) * 0.45, back.z + back.mz * 2.0);
-                    jumpUp = (f.collidedH && f.onGround) || inWater(f);
+                    jumpUp = MOVE3 ? jump3(f, false) : (f.collidedH && f.onGround) || inWater(f);
                 } else {
                     go(f, gc[0], gc[1], gc[2], hidden ? 0.8 : 1.5);
                 }
@@ -2057,7 +2153,11 @@ final class Coach {
                     }
                     giveUp(k, t);
                     if (!MOVE2 || pearlUntil < t) {
-                        boost(f, pilot, a, lay, dc);
+                        if (MOVE3) {
+                            boost3(f, pilot, a, lay, dc);
+                        } else {
+                            boost(f, pilot, a, lay, dc);
+                        }
                     }
                 }
             }
@@ -2583,6 +2683,225 @@ final class Coach {
         return Double.NaN;
     }
 
+    /**
+     * MOVE3: a Punch arrow shot all but straight up from standing (a little toward the way, so its
+     * push goes along it), let go once the view is up and the player still, then still under it until
+     * it comes back down on the head; only where the push (Punch's, give or take the hit's own of 0.4
+     * any way) lands on dry safe ground clearly sooner than the way gets there on foot.
+     */
+    private void boost3(Frame f, Pilot pilot, int[] a, Layout lay, double dist) {
+        long t = f.tick;
+        boolean can = s.bow && heal == HEAL_NONE && lay.real[Pilot.BOW] >= 0 && lay.arrows > 0 && f.punch >= 1 && !inWater(f) && t >= boostOffUntil;
+        if (boostPhase == 0) {
+            if (BOOST3_DEBUG && t % 200 == 0) {
+                event = "impulso no: " + java.util.Arrays.toString(boostWhy);
+            }
+            if (!can || boosting || dist < BOOST_D || t - lastBoost < 60 || !boostJudged || !f.onGround || pilot.using || t - boostLookAt < 10) {
+                boostWhy[0]++;
+                return;
+            }
+            if (nearestMob < 12.0 || sinceHurtNow < 20) {
+                boostWhy[1]++;
+                return;
+            }
+            if (shooter != null || evade) {
+                boostWhy[2]++;
+                return;
+            }
+            boostLookAt = t;
+            double[] plan = boostPlan(f);
+            if (plan == null) {
+                return;
+            }
+            boostYaw = plan[0];
+            boostPhase = 1;
+            boostPhaseAt = t;
+            boosting = true;
+            boostFrom = t;
+            event = String.format(java.util.Locale.ROOT, "impulso: a pie %.0f ticks, con el arco %.0f", plan[1], plan[2]);
+        }
+        if (boostPhase < 3 && (!can || (boostPhase == 1 && t - boostPhaseAt > 30) || (nearestMob < 8.0 && !pilot.using))) {
+            boostPhase = 0;
+            boosting = false;
+            boostFrom = -1;
+            return;
+        }
+        boostCallAt = t;
+        if (boostPhase == 3) {
+            if (Math.sqrt(f.mx * f.mx + f.mz * f.mz) > 0.5 || t - boostPhaseAt > 40) {
+                // Carried (or it did not come): on along the way.
+                boostPhase = 0;
+                boosting = false;
+                boostFrom = -1;
+                return;
+            }
+        }
+        // Still: off the keys, the view along the push and up.
+        movedAt = t;
+        move = false;
+        jumpUp = false;
+        double yr = Math.toRadians(boostYaw);
+        aim(f.x - Math.sin(yr) * 20.0, eyeY(f), f.z + Math.cos(yr) * 20.0);
+        pitchAbs = BOOST3_PITCH;
+        double perr = Math.abs(f.pitch - BOOST3_PITCH), yerr = Math.abs(wrap(boostYaw - f.yaw));
+        if (boostPhase == 1) {
+            if (pilot.slot != Pilot.BOW) {
+                a[8] = 1 + Pilot.BOW;
+            } else if (perr < 25.0 && spd < 0.12 && f.onGround) {
+                a[7] = 1;
+                boostPhase = 2;
+                boostPhaseAt = t;
+            }
+            return;
+        }
+        if (boostPhase == 2) {
+            boolean ready = pilot.using && pilot.useTicks >= BOOST3_DRAW && perr < 2.0 && yerr < 6.0 && spd < 0.03 && f.onGround;
+            if (!ready && (!pilot.using || pilot.useTicks < 25)) {
+                a[7] = 1;
+                return;
+            }
+            // Let go: the arrow is off, up.
+            a[7] = 0;
+            lastBoost = t;
+            boostJudged = false;
+            boostTop = 0.0;
+            boostPhase = 3;
+            boostPhaseAt = t;
+        }
+    }
+
+    /**
+     * {yaw of the push, ticks on foot, ticks with the boost} where a boost from here pays, or null:
+     * sky over the head for the arrow, every push it may give (Punch's 0.6 a level, the hit's own 0.4
+     * any way) landing on dry ground off any drop, and the way's spot by the landing clearly further
+     * on foot (water, steps and turns counted) than the boost's two seconds or so.
+     */
+    private double[] boostPlan(Frame f) {
+        boostWhy[3]++;
+        if (path == null || path.size() < 4 || f.punch < 2) {
+            // (Punch I: 0.6 against a push of 0.4 any way: too little and too far from sure.)
+            return null;
+        }
+        int x0 = (int) Math.floor(f.x), y0 = (int) Math.floor(f.y + 0.01), z0 = (int) Math.floor(f.z);
+        for (int dy = 2; dy <= 9; dy++) {
+            if (!planner.open(x0, y0 + dy, z0) || planner.water(x0, y0 + dy, z0)) {
+                return null;
+            }
+        }
+        if (planner.water(x0, y0, z0) || planner.water(x0, y0 - 1, z0)) {
+            return null;
+        }
+        boostWhy[4]++;
+        int last = path.size() - 1, aimI = -1;
+        for (int i = pi; i <= last; i++) {
+            int[] n = path.get(i);
+            if (hd(n[0] + 0.5, n[2] + 0.5, f.x, f.z) >= 9.0) {
+                aimI = i;
+                break;
+            }
+        }
+        if (aimI < 0) {
+            return null;
+        }
+        int[] an = path.get(aimI);
+        double yaw = Math.toDegrees(Math.atan2(-(an[0] + 0.5 - f.x), an[2] + 0.5 - f.z));
+        double sp = 0.6 * Math.min(f.punch, 2);
+        double spread = Math.toDegrees(Math.asin(Math.min(1.0, 0.4 / sp))) + 8.0;
+        boostWhy[5]++;
+        int[] c = boostLand(f, yaw, sp);
+        if (BOOST3_TEST) {
+            // (To try the shot itself: wherever the sky is open.)
+            return new double[] {yaw, 0.0, 0.0};
+        }
+        if (c == null) {
+            return null;
+        }
+        boostWhy[6]++;
+        double[][] tries = {{0.0, sp - 0.4}, {0.0, sp + 0.4}, {spread, sp}, {-spread, sp}};
+        for (double[] tr : tries) {
+            if (boostLand(f, yaw + tr[0], tr[1]) == null) {
+                return null;
+            }
+        }
+        int li = -1;
+        double ld = 1e9;
+        for (int i = pi; i <= last; i++) {
+            int[] n = path.get(i);
+            double dd = hd(n[0] + 0.5, n[2] + 0.5, c[0] + 0.5, c[2] + 0.5) + Math.abs(n[1] - c[1]);
+            if (dd < ld) {
+                ld = dd;
+                li = i;
+            }
+        }
+        boostWhy[7]++;
+        if (li <= pi || ld > 2.5) {
+            return null;
+        }
+        boostWhy[8]++;
+        int[] p0 = path.get(pi);
+        double walk = hd(p0[0] + 0.5, p0[2] + 0.5, f.x, f.z) / 0.28;
+        for (int i = pi; i < li; i++) {
+            int[] u = path.get(i), v = path.get(i + 1);
+            boolean wet = planner.water(v[0], v[1], v[2]);
+            walk += hd(u[0], u[2], v[0], v[2]) / (wet ? 0.2 : 0.28) + Math.abs(v[1] - u[1]) * (wet ? 8.0 : 3.0);
+        }
+        double cost = 40.0 + ld / 0.28;
+        if (walk < cost + BOOST3_MARGIN) {
+            return null;
+        }
+        return new double[] {yaw, walk, cost};
+    }
+
+    /** Where a push of {@code sp} along {@code yaw} from standing comes down (as the game moves the player in the air), safely, or null. */
+    private int[] boostLand(Frame f, double yaw, double sp) {
+        double yr = Math.toRadians(yaw);
+        double vx = -Math.sin(yr) * sp, vz = Math.cos(yr) * sp, vy = 0.5;
+        double x = f.x, y = f.y, z = f.z;
+        int y0 = (int) Math.floor(f.y + 0.01);
+        for (int i = 0; i < 40; i++) {
+            double py = y;
+            x += vx;
+            y += vy;
+            z += vz;
+            vx *= 0.91;
+            vz *= 0.91;
+            vy = (vy - 0.08) * 0.98;
+            int bx = (int) Math.floor(x), by = (int) Math.floor(y), bz = (int) Math.floor(z);
+            if (!planner.open(bx, (int) Math.floor(y + 1.75), bz)) {
+                boostWhy[10]++;
+                return null;
+            }
+            if (planner.water(bx, by, bz)) {
+                boostWhy[11]++;
+                return null;
+            }
+            if (planner.open(bx, by, bz)) {
+                continue;
+            }
+            // Down into a block: on top of it, if it is ground to stand on.
+            int ly = by + 1;
+            if (vy >= 0 || py < ly - 1e-6) {
+                boostWhy[12]++;
+                return null;
+            }
+            if (!planner.stand(bx, ly, bz) || planner.water(bx, ly - 1, bz)) {
+                boostWhy[13]++;
+                return null;
+            }
+            if (ly < y0 - 3) {
+                boostWhy[14]++;
+                return null;
+            }
+            if (planner.brink(bx, ly, bz)) {
+                boostWhy[15]++;
+                return null;
+            }
+            return new int[] {bx, ly, bz};
+        }
+        boostWhy[16]++;
+        return null;
+    }
+
     /** Far to go on open ground: a Punch arrow shot up that carries the player along. */
     private void boost(Frame f, Pilot pilot, int[] a, Layout lay, double dist) {
         boolean can = s.bow && heal == HEAL_NONE && lay.real[Pilot.BOW] >= 0 && lay.arrows > 0 && f.punch >= 1 && !swim && f.tick >= boostOffUntil;
@@ -2680,7 +2999,7 @@ final class Coach {
         k.dpitch = (float) clamp(ep * g, -capP, capP);
         if (pitchAbs == pitchAbs) {
             // Down for a potion, up for the bow: quicker, still smooth.
-            k.dpitch = (float) clamp((pitchAbs - f.pitch) * 0.6, -20.0, 20.0);
+            k.dpitch = (float) clamp((pitchAbs - f.pitch) * (MOVE3 && boosting ? 0.9 : 0.6), -20.0, 20.0);
         }
         // A point close by and well off to a side: turned to first, standing. Walking on at it with
         // the view turning at most so far a tick only goes round it (seconds of circles on the spot).
@@ -2688,7 +3007,7 @@ final class Coach {
         if (move && !orbit) {
             k.forward = 1;
             k.sprint = true;
-            k.jump = jumpUp || swim;
+            k.jump = jumpUp || (swim && !swimSet);
         } else {
             k.forward = 0;
             k.jump = mode == WAIT || mode == CLAIM ? false : f.collidedH && f.onGround && k.forward > 0;
@@ -2740,7 +3059,7 @@ final class Coach {
             k.jump = false;
             return;
         }
-        if (f.tick < dodgeUntil && heal != HEAL_POTION && !(mode == ESCAPE && pearlThrown) && sideSafe(f, dodgeDir)) {
+        if (f.tick < dodgeUntil && heal != HEAL_POTION && !(mode == ESCAPE && pearlThrown) && !(MOVE3 && boosting) && sideSafe(f, dodgeDir)) {
             // Out of the way of an arrow.
             k.strafe = dodgeDir;
         }
