@@ -161,12 +161,21 @@ final class Coach {
     private int target = -1;
     /** Across from a mob's middle, where seenAt found a clear line to it. */
     private double seenDx, seenDz;
+    /** The mob, side and height seenAt found a clear line to last, tried first the next time. */
+    private int seenMob = -1;
+    private double seenSide, seenQ = 0.45;
+    /** The mob in reach that no blow gets to, since when, and the side stepped to for a line to it. */
+    private int hiddenId = -1;
+    private long hiddenSince;
+    private double hiddenSide = 1.0;
     /** Ticks since the player was last hurt, as of this tick. */
     private int sinceHurtNow = 1000;
     /** The mob fought last, and when: after a step back, a knock out of reach or a potion, the same one again first. */
     private int lastFought = -1;
     private long lastFoughtAt = -1000;
     private static final int LAST_FOUGHT_TICKS = 200;
+    /** Ticks a mob in reach stays hidden before the step aside for a line to it. */
+    private static final int HIDDEN_TICKS = 6;
     /** A retreat of a few seconds to eat an apple (apples, no potion), back with the absorption counted. */
     private boolean shortRetreat;
     private double tx, ty, tz;
@@ -1753,15 +1762,21 @@ final class Coach {
                         back = m;
                     }
                 }
-                if (back == null && hiddenMob != null) {
+                if (hiddenMob == null || hiddenMob.id != hiddenId) {
+                    hiddenId = hiddenMob == null ? -1 : hiddenMob.id;
+                    hiddenSince = t;
+                }
+                // Only one hidden for a while (not one that is hidden a tick and in sight the next).
+                if (back == null && hiddenMob != null && t - hiddenSince >= HIDDEN_TICKS) {
                     // In reach but no blow gets to it (a hologram's stand, a block between): a step to
                     // one side of it for a clear line, the view kept low on its body, never up at the
                     // hologram over the chest.
                     double hx = hiddenMob.x - f.x, hz = hiddenMob.z - f.z, hl = Math.max(Math.hypot(hx, hz), 1e-3);
-                    double side = (t / 30) % 2 == 0 ? 1.0 : -1.0;
+                    double side = hiddenSide;
                     double px = f.x - hz / hl * 1.5 * side, pz = f.z + hx / hl * 1.5 * side;
                     if (!planner.straight(f.x, f.y, f.z, px, pz)) {
                         side = -side;
+                        hiddenSide = side;
                         px = f.x - hz / hl * 1.5 * side;
                         pz = f.z + hx / hl * 1.5 * side;
                     }
@@ -1782,7 +1797,7 @@ final class Coach {
                     go(f, gc[0], gc[1], gc[2], hidden ? 0.8 : 1.5);
                 }
                 // The view up at the group only when walking straight at it.
-                if (back == null && hiddenMob == null && aimSet && hd(tx, tz, gc[0], gc[2]) < 0.5) {
+                if (back == null && (hiddenMob == null || t - hiddenSince < HIDDEN_TICKS) && aimSet && hd(tx, tz, gc[0], gc[2]) < 0.5) {
                     aim(tx, gc[1] + 0.8, tz);
                 }
                 if (deadEndNow) {
@@ -2048,6 +2063,16 @@ final class Coach {
         // thin: a blow past it at the mob's edge still lands, and the view stays on the mob).
         double dx = m.x - ex, dz = m.z - ez, dl = Math.max(Math.hypot(dx, dz), 1e-3);
         double sx = -dz / dl * 0.22, sz = dx / dl * 0.22;
+        // The point found last time on this mob first, while it still has a clear line: the view does
+        // not hop between two points that both do (which made it tremble).
+        if (m.id == seenMob) {
+            double y = base + h * seenQ;
+            if (planner.combatSight(ex, ey, ez, m.x + sx * seenSide, y, m.z + sz * seenSide)) {
+                seenDx = sx * seenSide;
+                seenDz = sz * seenSide;
+                return y;
+            }
+        }
         double[] side = {0.0, 1.0, -1.0};
         for (double sd : side) {
             for (double q : at) {
@@ -2055,6 +2080,9 @@ final class Coach {
                 if (planner.combatSight(ex, ey, ez, m.x + sx * sd, y, m.z + sz * sd)) {
                     seenDx = sx * sd;
                     seenDz = sz * sd;
+                    seenMob = m.id;
+                    seenSide = sd;
+                    seenQ = q;
                     return y;
                 }
             }
