@@ -54,6 +54,8 @@ public final class Settings {
     /** Out of golden apples and potions: no new waves (sin_curas=parar). */
     public boolean healStop = true;
     public int healKeep = 4;
+    /** Splash potions thrown between two golden apples, when there are potions (an apple, a potion or two, an apple). */
+    public int potsPerApple = 1;
     /** Something eaten as soon as the food bar is short of full (plain food first, else a golden apple). */
     public boolean foodFull = true;
 
@@ -109,6 +111,12 @@ public final class Settings {
         + "sin_curas=parar\n"
         + "curas_reserva=4\n";
 
+    /** The lines of the settings added after MORE6. */
+    static final String MORE7 = ""
+        + "# Pociones de vida que tira entre dos manzanas doradas (si tiene pociones). Una manzana solo cuando ya\n"
+        + "# perdio la absorcion de la anterior: manzana, una o dos pociones, manzana. 0: sin esperar pociones.\n"
+        + "pociones_entre_manzanas=1\n";
+
     /** The lines of the settings added after MORE2. */
     static final String MORE3 = ""
         + "# si: cuando le pegan come una manzana dorada apenas la vida baja a manzana_golpe_vida (respetando\n"
@@ -148,7 +156,7 @@ public final class Settings {
         + "\n"
         + "# si: anota lo que ve y hace en config/chestai/registro.txt (para revisar problemas). no: nada.\n"
         + "registro=si\n"
-        + "\n" + MORE + "\n" + MORE2 + "\n" + MORE3 + "\n" + MORE4 + "\n" + MORE5 + "\n" + MORE6 + "\n" + VERSION;
+        + "\n" + MORE + "\n" + MORE2 + "\n" + MORE3 + "\n" + MORE4 + "\n" + MORE5 + "\n" + MORE6 + "\n" + MORE7 + "\n" + VERSION;
 
     public static Settings parse(Properties p) {
         Settings s = new Settings();
@@ -196,6 +204,7 @@ public final class Settings {
         String sc = p.getProperty("sin_curas");
         s.healStop = sc == null || !sc.trim().toLowerCase(Locale.ROOT).startsWith("s");
         s.healKeep = (int) Math.round(number(p.getProperty("curas_reserva"), 4.0));
+        s.potsPerApple = (int) Math.round(number(p.getProperty("pociones_entre_manzanas"), 1.0));
         s.search = yes(p.getProperty("buscar_cofres"), true);
         s.searchRadius = number(p.getProperty("buscar_radio"), 160.0);
         s.map = yes(p.getProperty("mapa"), true);
@@ -264,7 +273,8 @@ public final class Settings {
             + (old.getProperty("comida_llena") == null ? "\n" + MORE3 : "")
             + (old.getProperty("pelea_saltando") == null ? "\n" + MORE4 : "")
             + (old.getProperty("arco_a_mobs") == null ? "\n" + MORE5 : "")
-            + (old.getProperty("sin_curas") == null ? "\n" + MORE6 : "");
+            + (old.getProperty("sin_curas") == null ? "\n" + MORE6 : "")
+            + (old.getProperty("pociones_entre_manzanas") == null ? "\n" + MORE7 : "");
         if (add.length() > 0) {
             OutputStream out = new FileOutputStream(f, true);
             try {

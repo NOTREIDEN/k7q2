@@ -148,12 +148,20 @@ final class Coach {
     int mode = NONE, heal = HEAL_NONE;
     boolean boosting;
     private int target = -1;
+    /** The mob fought last, and when: after a step back, a knock out of reach or a potion, the same one again first. */
+    private int lastFought = -1;
+    private long lastFoughtAt = -1000;
+    private static final int LAST_FOUGHT_TICKS = 200;
+    /** A retreat of a few seconds to eat an apple (apples, no potion), back with the absorption counted. */
+    private boolean shortRetreat;
     private double tx, ty, tz;
     private boolean aimSet, move, jumpUp, swim, surface;
     private double pitchAbs = Double.NaN;
     private double gain = 0.55;
 
     private long lastPot = -1000, lastApple = -10000, lastBoost = -1000, boostFrom = -1;
+    /** Splash potions thrown since the last golden apple (one or two go between two apples). */
+    private int potsSinceApple = 99;
     /** Plain food being eaten (through the apple's slot), and since when. */
     private boolean foodBite;
     private long foodAt = -1000;
@@ -285,6 +293,13 @@ final class Coach {
         int x = (int) Math.floor(ax), z = (int) Math.floor(az);
         int ly = planner.stand(x, y, z) ? y : y + 1;
         return planner.stand(x, ly, z) && planner.open(x, ly + 2, z) && !planner.brink(x, ly, z) && planner.straight(f.x, f.y, f.z, ax, az);
+    }
+
+    private void rememberTarget(long t) {
+        if (target >= 0) {
+            lastFought = target;
+            lastFoughtAt = t;
+        }
     }
 
     private static double wrap(double a) {
@@ -1387,8 +1402,13 @@ final class Coach {
         for (Memory.Known k : mem.chests) {
             claimNear |= !k.contestedWave && !k.reserved && k.seen && k.state == Frame.CLAIMABLE && hd(k.cx(), k.cz(), f.x, f.z) < 5.0;
         }
+        // Six or more gone in two seconds (an area blow, arrows, all at once): with potions, one at once
+        // a little higher up, and the fight goes on (no running away from it with potions in the hotbar).
+        double lifeNow = hp + f.absorption;
+        boolean burst = lifeSet && lifeAgo[(int) (t % lifeAgo.length)] - lifeNow >= 6.0;
         boolean potNeed = havePot && !eating && t - lastPot > POT_GAP
-            && ((hp <= s.potHp && (mem.sinceHurt < 100 || close > 0)) || hp <= s.potHp * 0.6);
+            && ((hp <= s.potHp && (mem.sinceHurt < 100 || close > 0)) || hp <= s.potHp * 0.6
+                || (burst && hp <= s.potHp + 4.0));
         boolean appleGap = t - lastApple > Math.round(s.appleWaitS * 20.0);
         boolean spare = apples > s.appleKeep;
         // (Its own Punch arrow, with no mob about, is no reason.)
@@ -1407,15 +1427,21 @@ final class Coach {
         // Getting away with a mob right behind: away first (eating slows the walk to a crawl), the
         // apple when there is a step between, or at once when very low.
         boolean fleeing = !RETREAT_OLD && t < retreatUntil && nearest < 4.5 && hp + f.absorption > 5.0;
+        // An apple is for the absorption: never while some of the last one's is left. With potions in
+        // the hotbar, potsPerApple of them between two apples (an apple, a potion or two, an apple),
+        // so a fight does not eat the whole stack; without potions, or very low, the apple anyway.
+        boolean absGone = f.absorption < 0.5f;
+        boolean potsBetween = !havePot || potsSinceApple >= s.potsPerApple || hp <= s.potHp * 0.6;
         boolean appleNeed = !potNeed && !eating && haveApple && appleGap && !fleeing
-            && ((mem.sinceHurt < 60 && (s.appleOnHit && spare && !ownArrow ? hp <= s.appleHitHp : hp <= s.appleHp && f.absorption < 0.5f && f.regenLeft == 0))
+            && ((mem.sinceHurt < 60 && absGone && potsBetween
+                    && (s.appleOnHit && spare && !ownArrow ? hp <= s.appleHitHp : hp <= s.appleHp && f.regenLeft == 0))
                 || (hp <= s.potHp && !havePot));
         // Food as soon as the bar is short: plain food first; an apple (4 of food) when 4 are missing,
         // or when the bar is so low the player can no longer sprint. Not with a claim at hand, nor with
         // a mob at the sword while the bar still lets the player sprint for long.
         boolean foodNeed = s.foodFull && !potNeed && !appleNeed && !eating && f.food < 20 && !claimNear && !fleeing
             && (nearest > 3.5 || f.food <= 14)
-            && (haveFood || (haveApple && (f.food <= 6 || (f.food <= 16 && appleGap))));
+            && (haveFood || (haveApple && (f.food <= 6 || (f.food <= 16 && appleGap && absGone))));
         healWanted = potNeed || appleNeed || foodNeed;
         nearestMob = nearest;
         if (drawing && (potNeed || appleNeed || foodNeed || !cand.isEmpty())) {
@@ -1441,6 +1467,7 @@ final class Coach {
             a[7] = 1;
             if (appleNeed || !haveFood) {
                 lastApple = t;
+                potsSinceApple = 0;
             } else {
                 foodBite = true;
                 foodAt = t;
@@ -1476,21 +1503,27 @@ final class Coach {
             } else if (!havePot && !haveApple && life <= 14.0) {
                 // Nothing left to heal with: out sooner, back only nearly full.
                 exit = 18.0;
-            } else if (life <= 7.0 || (life <= 13.0 && lifeBefore - life >= 6.0)) {
-                // Very low, or six gone in two seconds (an area blow, arrows, all at once).
-                exit = 16.0;
+            } else if (!havePot && (life <= 7.0 || (life <= 13.0 && lifeBefore - life >= 6.0))) {
+                // Apples but no potion, very low or six gone in two seconds: a few steps back to eat one,
+                // and back to the same mobs with the absorption counted. With potions there is no
+                // running away: one is thrown on the spot (potNeed above) and the fight goes on.
+                exit = 14.0;
+                shortRetreat = true;
             }
             if (exit > 0.0) {
                 retreatExit = exit;
-                retreatUntil = t + (regen ? 1800 : 400);
+                retreatUntil = t + (shortRetreat ? 200 : regen ? 1800 : 400);
                 retreatSpot = null;
             }
         }
-        if (t < retreatUntil && (RETREAT_OLD ? life : hp) >= retreatExit) {
+        if (t < retreatUntil && (RETREAT_OLD || shortRetreat ? life : hp) >= retreatExit) {
             // Back by health, not by an apple's absorption: that is gone at the first blows.
             retreatUntil = -1;
         }
         boolean retreating = t < retreatUntil;
+        if (!retreating) {
+            shortRetreat = false;
+        }
         for (Memory.Known k : mem.chests) {
             if (k.state != Frame.CLAIMABLE) {
                 k.claimTicks = 0;
@@ -1543,6 +1576,7 @@ final class Coach {
             evade = shooter != null;
             boosting = false;
             boostFrom = -1;
+            rememberTarget(t);
             target = -1;
             boolean there = retreatSpot != null && hd(retreatSpot[0] + 0.5, retreatSpot[2] + 0.5, f.x, f.z) < 2.0;
             if (retreatSpot == null || mobNear(f, retreatSpot) < 8.0 || (there && nearest < 12.0) || (!there && t - retreatSpotAt > 300)) {
@@ -1590,7 +1624,7 @@ final class Coach {
                     continue;
                 }
                 // The first wave's own before the others; one shooting before one that is not; the one fought before a new one.
-                double sc = r + (m.hurtTime > 2 ? 2.0 : 0.0) + (m.id == target ? -1.2 : 0.0)
+                double sc = r + (m.hurtTime > 2 ? 2.0 : 0.0) + (m.id == target || (m.id == lastFought && t - lastFoughtAt < LAST_FOUGHT_TICKS) ? -1.2 : 0.0)
                     + (focus.contains(m) ? 0.0 : 2.0) + (m == shooter ? -1.0 : 0.0);
                 if (sc < bs) {
                     bs = sc;
@@ -1608,6 +1642,7 @@ final class Coach {
             if (tgt != null) {
                 mode = FIGHT;
                 target = tgt.id;
+                rememberTarget(t);
                 if (tgt.id != hitTgt) {
                     hitTgt = tgt.id;
                     hitSeen = t;
@@ -1644,6 +1679,7 @@ final class Coach {
             } else {
                 // None in reach: straight at the group, without swinging.
                 mode = APPROACH;
+                rememberTarget(t);
                 target = -1;
                 double dg = hd(gc[0], gc[2], f.x, f.z) + Math.abs(gc[1] - f.y);
                 if (t - apprLast > 20 || dg < apprBest - 1.0) {
@@ -1663,9 +1699,26 @@ final class Coach {
                     apprBest = 1e9;
                     apprAt = t;
                 }
-                go(f, gc[0], gc[1], gc[2], hidden ? 0.8 : 1.5);
+                // The mob fought a moment ago (knocked back out of reach, a potion, a step back): straight
+                // back at it with the view on it, so the fight goes on with the same one instead of the
+                // view going off along a way to the group.
+                Frame.Mob back = null;
+                for (Frame.Mob m : focus) {
+                    if (m.id == lastFought && t - lastFoughtAt < LAST_FOUGHT_TICKS && hd(m.x, m.z, f.x, f.z) < 7.0
+                        && Math.abs(m.y - f.y) <= 1.5 && planner.straight(f.x, f.y, f.z, m.x, m.z)) {
+                        back = m;
+                    }
+                }
+                if (back != null) {
+                    move = true;
+                    path = null;
+                    aim(back.x + back.mx * 2.0, back.y + Math.min(back.h, 2.6) * 0.45, back.z + back.mz * 2.0);
+                    jumpUp = (f.collidedH && f.onGround) || inWater(f);
+                } else {
+                    go(f, gc[0], gc[1], gc[2], hidden ? 0.8 : 1.5);
+                }
                 // The view up at the group only when walking straight at it.
-                if (aimSet && hd(tx, tz, gc[0], gc[2]) < 0.5) {
+                if (back == null && aimSet && hd(tx, tz, gc[0], gc[2]) < 0.5) {
                     aim(tx, gc[1] + 1.0, tz);
                 }
                 if (deadEndNow) {
@@ -1983,6 +2036,7 @@ final class Coach {
     void after(Frame f, Pilot.Keys k) {
         if (k.throwIt && k.slot == Pilot.POTION) {
             lastPot = f.tick;
+            potsSinceApple++;
         }
         if (k.throwIt && k.slot == Pilot.PEARL && mode == ESCAPE) {
             // Thrown: still until it lands, then a new way from where the player is.
