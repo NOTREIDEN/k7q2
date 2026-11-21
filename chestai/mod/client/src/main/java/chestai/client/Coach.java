@@ -1290,9 +1290,11 @@ final class Coach {
     }
 
     void before(Frame f, Memory mem, Pilot pilot, int[] a, Layout lay) {
-        mostHeals = Math.max(mostHeals, f.gapples + f.potions);
+        // The whole inventory counts: the hotbar is refilled from it (Refill).
+        int heals = f.gapples + f.potions + lay.storedGapples + lay.storedPotions;
+        mostHeals = Math.max(mostHeals, heals);
         // (A reserve kept for the wave on and the way out: the deaths came in the wave the last apples went in.)
-        outOfHeals = HEAL_STOP && s.healStop && mostHeals > s.healKeep + 1 && f.gapples + f.potions <= s.healKeep;
+        outOfHeals = HEAL_STOP && s.healStop && mostHeals > s.healKeep + 1 && heals <= s.healKeep;
         long t = f.tick;
         // The chest gone for is no longer to be gone to (another player's now): the goal, the
         // way and a pearl not thrown yet are dropped.

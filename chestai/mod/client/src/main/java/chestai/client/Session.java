@@ -73,6 +73,7 @@ public final class Session {
     private Memory mem;
     private Pilot pilot;
     private Hands hands;
+    private Refill refill;
     /** The blows through Minecadia's SilentAim; null without it (no fighting then). */
     private VapeCombat combat;
     private final Reader reader = new Reader();
@@ -381,6 +382,11 @@ public final class Session {
         }
         pilot = new Pilot(cps);
         hands = new Hands(mc);
+        refill = new Refill(mc, cps);
+        // The server's answers to inventory clicks, for the refill (as the PvP AI's Wire).
+        if (!Wire.install(mc, mc.getNetHandler().getNetworkManager(), refill.tap)) {
+            log("CHESTAI no pude enganchar la conexion: el refill no espera la confirmacion del servidor");
+        }
         coach = new Coach(s, planner);
         Layout lay = Layout.of(me.inventory);
         if (lay.real[Pilot.SWORD] >= 0) {
@@ -435,6 +441,12 @@ public final class Session {
             return;
         }
         try {
+            if (refill != null) {
+                refill.reset();
+                if (mc.getNetHandler() != null) {
+                    Wire.remove(mc.getNetHandler().getNetworkManager());
+                }
+            }
             hands.release();
         } catch (RuntimeException e) {
             // Nothing left to let go.
@@ -503,7 +515,7 @@ public final class Session {
             editingSilentAim = false;
         }
         // A chest window opened by a claim: shut it, the reward is in.
-        if (mc.currentScreen instanceof GuiContainer) {
+        if (mc.currentScreen instanceof GuiContainer && !(mc.currentScreen instanceof net.minecraft.client.gui.inventory.GuiInventory)) {
             me.closeScreen();
         }
         tick++;
@@ -519,6 +531,23 @@ public final class Session {
         }
         mem.update(f, first);
         first = false;
+        // Potions (and apples) down from the inventory to the hotbar: nothing else meanwhile.
+        double mobD = 1e9;
+        for (Frame.Mob m : f.mobs) {
+            mobD = Math.min(mobD, Math.hypot(m.x - f.x, m.z - f.z));
+        }
+        boolean ready = lay.real[Pilot.SWORD] == me.inventory.currentItem && !me.isUsingItem()
+            && coach.heal == Coach.HEAL_NONE && coach.mode != Coach.ESCAPE;
+        if (refill.tick(settings.potsHotbar, mobD < 4.0, ready)) {
+            String said = refill.note;
+            refill.note = null;
+            hands.release();
+            combatMouse.enabled = false;
+            if (combat != null) {
+                combat.suspend();
+            }
+            return said;
+        }
         if (map != null && tick % 2 == 0) {
             map.tick(world, f.x, f.z, Math.max(2, Math.min(mc.gameSettings.renderDistanceChunks, 16)), tick);
         }

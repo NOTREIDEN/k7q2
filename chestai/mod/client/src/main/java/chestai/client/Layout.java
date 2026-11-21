@@ -23,6 +23,8 @@ final class Layout {
     /** Hotbar index of each of the agent's slots, or -1. */
     final int[] real = {-1, -1, -1, -1, -1};
     int gapples, pearls, potions, arrows;
+    /** Golden apples and heal splash potions in the inventory above the hotbar (brought down by Refill). */
+    int storedGapples, storedPotions;
     /** Hotbar index of the food that fills the bar most (not a golden apple), or -1, and how much of it there is. */
     int food = -1, foodCount;
     private int foodFill;
@@ -110,6 +112,8 @@ final class Layout {
                 l.arrows += s.stackSize;
             }
         }
+        l.storedGapples = Refill.stored(inv, true);
+        l.storedPotions = Refill.stored(inv, false);
         return l;
     }
 }

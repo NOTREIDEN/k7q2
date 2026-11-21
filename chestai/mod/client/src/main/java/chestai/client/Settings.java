@@ -56,6 +56,8 @@ public final class Settings {
     public int healKeep = 4;
     /** Splash potions thrown between two golden apples, when there are potions (an apple, a potion or two, an apple). */
     public int potsPerApple = 1;
+    /** Heal splash potions kept in the hotbar, brought down from the inventory (0: never). */
+    public int potsHotbar = 2;
     /** Something eaten as soon as the food bar is short of full (plain food first, else a golden apple). */
     public boolean foodFull = true;
 
@@ -115,7 +117,11 @@ public final class Settings {
     static final String MORE7 = ""
         + "# Pociones de vida que tira entre dos manzanas doradas (si tiene pociones). Una manzana solo cuando ya\n"
         + "# perdio la absorcion de la anterior: manzana, una o dos pociones, manzana. 0: sin esperar pociones.\n"
-        + "pociones_entre_manzanas=1\n";
+        + "pociones_entre_manzanas=1\n"
+        + "\n"
+        + "# Pociones de vida que mantiene en la barra: con menos, abre el inventario un momento y baja las que\n"
+        + "# faltan a los slots vacios (y una pila de manzanas doradas si no queda ninguna en la barra). 0: nunca.\n"
+        + "pociones_barra=2\n";
 
     /** The lines of the settings added after MORE2. */
     static final String MORE3 = ""
@@ -204,6 +210,7 @@ public final class Settings {
         String sc = p.getProperty("sin_curas");
         s.healStop = sc == null || !sc.trim().toLowerCase(Locale.ROOT).startsWith("s");
         s.healKeep = (int) Math.round(number(p.getProperty("curas_reserva"), 4.0));
+        s.potsHotbar = (int) Math.round(number(p.getProperty("pociones_barra"), 2.0));
         s.potsPerApple = (int) Math.round(number(p.getProperty("pociones_entre_manzanas"), 1.0));
         s.search = yes(p.getProperty("buscar_cofres"), true);
         s.searchRadius = number(p.getProperty("buscar_radio"), 160.0);
@@ -274,7 +281,7 @@ public final class Settings {
             + (old.getProperty("pelea_saltando") == null ? "\n" + MORE4 : "")
             + (old.getProperty("arco_a_mobs") == null ? "\n" + MORE5 : "")
             + (old.getProperty("sin_curas") == null ? "\n" + MORE6 : "")
-            + (old.getProperty("pociones_entre_manzanas") == null ? "\n" + MORE7 : "");
+            + (old.getProperty("pociones_entre_manzanas") == null || old.getProperty("pociones_barra") == null ? "\n" + MORE7 : "");
         if (add.length() > 0) {
             OutputStream out = new FileOutputStream(f, true);
             try {
