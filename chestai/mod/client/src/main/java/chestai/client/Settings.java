@@ -66,6 +66,12 @@ public final class Settings {
      * one when there is time to come back and finish it. Off: one chest at a time, as before.
      */
     public boolean multi;
+    /**
+     * World bosses (bosses, or -Dchestai.boss, which wins over the file): a monster of no chest that
+     * comes out of nowhere (a pigman, one out of an end crystal, one named boss, or far tougher than the
+     * waves) is gone for within 30 blocks and fought until it is dead, whoever else hits it.
+     */
+    public boolean bosses = true;
     /** Seconds a wave has before its chest resets, when its hologram does not show it. */
     public double waveSecs = 17.0;
 
@@ -141,6 +147,13 @@ public final class Settings {
         + "# Segundos que da el servidor para matar una oleada antes de que el cofre se resetee (si el holograma no los muestra).\n"
         + "oleada_segundos=17\n";
 
+    /** The lines of the settings added after MORE8. */
+    static final String MORE9 = ""
+        + "# si: pelea los jefes del mundo: un mob que no salio de un cofre (un pigman, uno que sale de un end crystal,\n"
+        + "# uno con boss o jefe en el nombre, o con mucha mas vida que los de las oleadas). Va a pelearlo a menos de 30\n"
+        + "# bloques y no lo deja aunque otros le peguen, hasta que muere. Sin oleadas nuevas mientras tanto. no: como antes.\n"
+        + "bosses=si\n";
+
     /** The lines of the settings added after MORE2. */
     static final String MORE3 = ""
         + "# si: cuando le pegan come una manzana dorada apenas la vida baja a manzana_golpe_vida (respetando\n"
@@ -180,7 +193,7 @@ public final class Settings {
         + "\n"
         + "# si: anota lo que ve y hace en config/chestai/registro.txt (para revisar problemas). no: nada.\n"
         + "registro=si\n"
-        + "\n" + MORE + "\n" + MORE2 + "\n" + MORE3 + "\n" + MORE4 + "\n" + MORE5 + "\n" + MORE6 + "\n" + MORE7 + "\n" + MORE8 + "\n" + VERSION;
+        + "\n" + MORE + "\n" + MORE2 + "\n" + MORE3 + "\n" + MORE4 + "\n" + MORE5 + "\n" + MORE6 + "\n" + MORE7 + "\n" + MORE8 + "\n" + MORE9 + "\n" + VERSION;
 
     public static Settings parse(Properties p) {
         Settings s = new Settings();
@@ -234,6 +247,9 @@ public final class Settings {
         s.searchRadius = number(p.getProperty("buscar_radio"), 160.0);
         s.map = yes(p.getProperty("mapa"), true);
         s.multi = yes(System.getProperty("chestai.multi", p.getProperty("multi_cofre")), false);
+        String bo = System.getProperty("chestai.boss", p.getProperty("bosses"));
+        // (-Dchestai.boss=false as well as bosses=no.)
+        s.bosses = yes(bo, true) && !"false".equalsIgnoreCase(bo == null ? "" : bo.trim());
         s.waveSecs = Math.max(5.0, Math.min(number(System.getProperty("chestai.wave.secs", p.getProperty("oleada_segundos")), 17.0), 600.0));
         t = p.getProperty("ignorar");
         if (t != null) {
@@ -302,7 +318,8 @@ public final class Settings {
             + (old.getProperty("arco_a_mobs") == null ? "\n" + MORE5 : "")
             + (old.getProperty("sin_curas") == null ? "\n" + MORE6 : "")
             + (old.getProperty("pociones_entre_manzanas") == null || old.getProperty("pociones_barra") == null ? "\n" + MORE7 : "")
-            + (old.getProperty("multi_cofre") == null || old.getProperty("oleada_segundos") == null ? "\n" + MORE8 : "");
+            + (old.getProperty("multi_cofre") == null || old.getProperty("oleada_segundos") == null ? "\n" + MORE8 : "")
+            + (old.getProperty("bosses") == null ? "\n" + MORE9 : "");
         if (add.length() > 0) {
             OutputStream out = new FileOutputStream(f, true);
             try {

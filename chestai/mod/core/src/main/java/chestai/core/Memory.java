@@ -103,6 +103,80 @@ public final class Memory {
     /** Mobs first seen near the player with no chest yet to give them to, and where they were then. */
     private final Map<Integer, SpawnSighting> unmatchedSpawns = new HashMap<Integer, SpawnSighting>();
 
+    /**
+     * World bosses (bosses=si, -Dchestai.boss=false to turn off): a monster of no chest's wave that is a
+     * zombie pigman, came by an end crystal, is named as a boss, or has far more health than any wave's
+     * mob seen (BOSS_HP_X times the most, at least BOSS_HP_MIN). Fought in a crowd: another player on it
+     * does not make it theirs.
+     */
+    public boolean bosses = true;
+    /** The most health a wave's mob was seen with. */
+    public float waveMaxHp;
+    private static final float BOSS_HP_MIN = 300.0f, BOSS_HP_X = 2.0f;
+    /** The bosses seen (entity id), their name and where and when last, for the play log. */
+    private final Map<Integer, BossSeen> bossSeen = new HashMap<Integer, BossSeen>();
+    /** Lines for the play log (Session writes and clears them). */
+    public final List<String> notes = new ArrayList<String>();
+    /**
+     * The movement round 3 (-Dchestai.move3=true): another player by a chest keeps it theirs a few
+     * seconds after they step off (no goal dropped and taken again as they walk in and out of 12 blocks).
+     */
+    private static final boolean MOVE3 = Boolean.getBoolean("chestai.move3");
+    private static final int RESERVED_HOLD_TICKS = 60;
+
+    private static final class BossSeen {
+        final String name;
+        double x, y, z;
+        long tick;
+
+        BossSeen(String name) {
+            this.name = name;
+        }
+    }
+
+    /** The health from which a monster of no wave is a boss. */
+    public float bossHp() {
+        return Math.max(BOSS_HP_MIN, BOSS_HP_X * waveMaxHp);
+    }
+
+    /** When each mob was first seen (entity id). */
+    private final Map<Integer, Long> mobFirst = new HashMap<Integer, Long>();
+    /** A pigman or a tough one only once seen this long without coming out of a chest, and no wave on within BOSS_CHEST_R. */
+    private static final int BOSS_SETTLE_TICKS = 20;
+    private static final double BOSS_CHEST_R = 12.0;
+
+    /**
+     * Whether this mob (of no wave) is a boss: by its name or an end crystal at once; a pigman or one
+     * far tougher than the waves' once it has been about a second without being of a wave, and with no
+     * chest's wave on by it (a server's waves of tough mobs or of pigmen are no bosses).
+     */
+    private boolean bossLike(Frame.Mob m, long t) {
+        if (!m.hostile) {
+            return false;
+        }
+        if (m.fromCrystal || m.bossName) {
+            return true;
+        }
+        if (!m.pigman && m.maxHp < bossHp()) {
+            return false;
+        }
+        Long first = mobFirst.get(m.id);
+        if (first == null || t - first < BOSS_SETTLE_TICKS) {
+            return false;
+        }
+        SpawnSighting sp = unmatchedSpawns.get(m.id);
+        if (sp != null && chestNear(sp.x, sp.y, sp.z, SPAWN_R, 4.0, true) != null) {
+            // First seen by a chest: maybe its wave, its hologram not read yet.
+            return false;
+        }
+        for (Known k : chests) {
+            if (k.seen && k.state == Frame.ACTIVE && Math.hypot(k.cx() - m.x, k.cz() - m.z) < BOSS_CHEST_R && Math.abs(k.y - m.y) < 8.0) {
+                return false;
+            }
+        }
+        return true;
+    }
+
     /** Within this of a chest (and 5 up or down) the player is at it; this far for AWAY_TICKS, it is no longer the agent's. */
     private static final double OWN_R = 10.0, AWAY_R = 24.0;
     private static final int AWAY_TICKS = 200;
@@ -287,6 +361,30 @@ public final class Memory {
         for (Frame.Mob m : f.mobs) {
             here.add(m.id);
             Long seen = mobSeen.put(m.id, t);
+            if (seen == null) {
+                mobFirst.put(m.id, t);
+            }
+            if (waveMob.containsKey(m.id)) {
+                waveMaxHp = Math.max(waveMaxHp, m.maxHp);
+            }
+            // A boss is no chest's wave, and nobody's: whoever else hits it, it is fought until it is dead.
+            BossSeen bs = bosses ? bossSeen.get(m.id) : null;
+            if (bs == null && bosses && !waveMob.containsKey(m.id) && bossLike(m, t)) {
+                bs = new BossSeen(m.name);
+                bossSeen.put(m.id, bs);
+                unmatchedSpawns.remove(m.id);
+                notes.add(String.format(java.util.Locale.ROOT, "boss: veo %s hp %.0f/%.0f en (%.0f,%.0f,%.0f)%s", m.name, m.hp, m.maxHp, m.x, m.y, m.z,
+                    m.pigman ? " (pigman)" : m.fromCrystal ? " (cristal)" : m.bossName ? " (nombre)" : " (vida)"));
+            }
+            if (bs != null) {
+                m.boss = true;
+                m.contested = false;
+                bs.x = m.x;
+                bs.y = m.y;
+                bs.z = m.z;
+                bs.tick = t;
+                continue;
+            }
             // Another player on it (it hit it last, or stands by it): its wave is not the agent's to claim.
             // ...unless its chest is the agent's (the player was there first), or it is at the player
             // and hurting them: that one is always fought back.
@@ -344,6 +442,20 @@ public final class Memory {
                 }
             }
         }
+        for (Iterator<Map.Entry<Integer, BossSeen>> it = bossSeen.entrySet().iterator(); it.hasNext();) {
+            BossSeen b = it.next().getValue();
+            if (b.tick == t) {
+                continue;
+            }
+            // Gone from the world: dead (close by), or out of sight (far); kept a while for one back in sight.
+            double d = Math.hypot(b.x - f.x, b.z - f.z);
+            if (b.tick == t - 1) {
+                notes.add(String.format(java.util.Locale.ROOT, "boss: ya no esta %s (a %.0f bloques)", b.name, d));
+            }
+            if (t - b.tick > 6000) {
+                it.remove();
+            }
+        }
         // Every mob of a wave another player has is theirs.
         for (Frame.Mob m : f.mobs) {
             Known k = waveMob.get(m.id);
@@ -382,6 +494,7 @@ public final class Memory {
                     it.remove();
                 }
             }
+            mobFirst.keySet().retainAll(mobSeen.keySet());
         }
         for (Known k : chests) {
             if (k.waveAt >= 0 && k.waveLeft > k.wavePeak) {
@@ -460,7 +573,7 @@ public final class Memory {
                 k.contestedWave = false;
             }
         }
-        k.reserved = !k.ours && (k.theirs || rival);
+        k.reserved = !k.ours && (k.theirs || rival || (MOVE3 && f.tick - k.rivalSeenAt < RESERVED_HOLD_TICKS));
     }
 
     /** The chest this mob belongs to (its wave's, or the nearest within 12 blocks) is the agent's. */

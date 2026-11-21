@@ -57,6 +57,14 @@ final class Reader {
     private final Map<Integer, Entity> chestMarkers = new HashMap<Integer, Entity>();
     /** How far under a hologram its chest may be. */
     private static final int HOLO_DEPTH = 8;
+    /** End crystals seen (entity id): where, and when last; a mob first seen by one (or where one just was) came from it. */
+    private final Map<Integer, double[]> crystals = new HashMap<Integer, double[]>();
+    /** Mobs seen before (entity id, when last), and those that came from a crystal. */
+    private final Map<Integer, Long> mobFirst = new HashMap<Integer, Long>();
+    private final java.util.Set<Integer> fromCrystal = new java.util.HashSet<Integer>();
+    /** A crystal this close (and gone at most CRYSTAL_GONE_TICKS before) to where a mob is first seen. */
+    private static final double CRYSTAL_R = 6.0;
+    private static final int CRYSTAL_GONE_TICKS = 100;
     /** -Dchestai.holo.off=true: no hologram read, as on a server that does not show them (for the arena). */
     private static final boolean HOLO_OFF = Boolean.getBoolean("chestai.holo.off");
 
@@ -370,6 +378,21 @@ final class Reader {
         }
         foreignArrowAt.values().removeIf(at -> tick - at > 5);
 
+        // End crystals, for the bosses that come out of one.
+        for (Entity e : all) {
+            if (e instanceof net.minecraft.entity.item.EntityEnderCrystal) {
+                crystals.put(e.getEntityId(), new double[] {e.posX, e.posY, e.posZ, tick});
+            }
+        }
+        crystals.values().removeIf(c -> tick - (long) c[3] > CRYSTAL_GONE_TICKS);
+        if (mobFirst.size() > 4000) {
+            mobFirst.values().removeIf(at -> tick - at > 6000);
+            fromCrystal.retainAll(mobFirst.keySet());
+        }
+        // The boss bar's name (a wither's, a dragon's, or one a server shows), as plain lower case text.
+        String bar = net.minecraft.entity.boss.BossStatus.statusBarTime > 0 && net.minecraft.entity.boss.BossStatus.bossName != null
+            ? HoloText.plain(net.minecraft.entity.boss.BossStatus.bossName).toLowerCase(Locale.ROOT).trim() : "";
+
         // Mobs, projectiles, other players.
         Entity hit = mc.objectMouseOver != null && mc.objectMouseOver.typeOfHit == MovingObjectPosition.MovingObjectType.ENTITY ? mc.objectMouseOver.entityHit : null;
         if (hit instanceof EntitySkeleton && hit.ridingEntity instanceof EntityHorse) {
@@ -454,6 +477,25 @@ final class Reader {
             }
             m.hitByOtherPlayer = life.hurtTime >= 8 && foreignArrowAt.containsKey(m.id);
             m.mounted = k == Frame.RIDER && e.ridingEntity == me;
+            // What a boss is known by (Memory decides with the waves it knows).
+            m.hostile = life instanceof net.minecraft.entity.monster.IMob;
+            m.pigman = life instanceof net.minecraft.entity.monster.EntityPigZombie && (life.getMaxHealth() > 20.5f || life.hasCustomName());
+            String plain = life.hasCustomName() ? HoloText.plain(life.getCustomNameTag()).trim() : "";
+            String low = plain.toLowerCase(Locale.ROOT);
+            m.bossName = life instanceof net.minecraft.entity.boss.IBossDisplayData || low.contains("boss") || low.contains("jefe")
+                || (bar.length() >= 3 && low.length() >= 3 && (low.contains(bar) || (bar.contains(low) && low.length() * 2 >= bar.length())));
+            String ename = EntityList.getEntityString(life);
+            m.name = plain.length() > 0 ? plain : ename != null ? ename : life.getClass().getSimpleName();
+            if (mobFirst.put(m.id, tick) == null) {
+                for (double[] c : crystals.values()) {
+                    double dx = c[0] - e.posX, dy = c[1] - e.posY, dz = c[2] - e.posZ;
+                    if (dx * dx + dy * dy + dz * dz <= CRYSTAL_R * CRYSTAL_R) {
+                        fromCrystal.add(m.id);
+                        break;
+                    }
+                }
+            }
+            m.fromCrystal = fromCrystal.contains(m.id);
             if (k == Frame.HORSEMAN && e instanceof EntityHorse) {
                 m.hw = 0.7;
                 m.h = 2.6;

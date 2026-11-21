@@ -25,6 +25,14 @@ public final class Frame {
         /** Whether the player sees it from the eyes, whether another player hit it last, and whether another player is fighting it. */
         public boolean inSight, hitByOtherPlayer, contested;
         public double hw, h;
+        /**
+         * What it looks like (Reader): a monster (not an animal, a golem or a dog), a zombie pigman, one
+         * first seen by an end crystal (or where one was a moment before), one whose name says boss
+         * ("boss", "jefe", or the boss bar's name); its name. Whether it is a boss (Memory): one of
+         * those, or one far tougher than any wave's, and of no chest's wave.
+         */
+        public boolean hostile, pigman, fromCrystal, bossName, boss;
+        public String name = "";
     }
 
     public static final class Proj {

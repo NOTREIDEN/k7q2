@@ -207,6 +207,26 @@ final class Coach {
     private static final boolean BOOST3_DEBUG = Boolean.getBoolean("chestai.boost3.debug"), BOOST3_TEST = Boolean.getBoolean("chestai.boost3.test");
     private final int[] boostWhy = new int[20];
     private static final int HIDDEN_GIVEUP = 120;
+    /**
+     * A world boss (Memory: bosses=si): one within BOSS_R blocks (BOSS_KEEP_R once gone for, BOSS_DY up
+     * or down) is gone for and fought until it is dead, unless a wave of the player's own is on (it would
+     * reset) or, from afar, with the heals down to the reserve. No new wave meanwhile: BOSS_HOLD_TICKS after
+     * it was last fought, the player stays (a claim yes). One no way gets to is left alone BOSS_UNREACH_TICKS.
+     */
+    private static final double BOSS_R = 30.0, BOSS_KEEP_R = 40.0, BOSS_DY = 12.0;
+    private static final int BOSS_HOLD_TICKS = 60, BOSS_UNREACH_TICKS = 200;
+    private int bossId = -1;
+    private long bossAt = -10000;
+    private double bossX, bossY, bossZ;
+    private boolean bossFight;
+    /**
+     * MOVE3: jumps on the ground that got no higher (against a wall two high, under a chest up a cliff,
+     * a step the map has wrong): two from the same spot and no more jumps there for HOP_OFF_TICKS.
+     */
+    private long hopAt = -1000, hopOffUntil = -1;
+    private double hopX, hopY, hopZ;
+    private int hopFails;
+    private static final int HOP_OFF_TICKS = 60;
     /** A retreat of a few seconds to eat an apple (apples, no potion), back with the absorption counted. */
     private boolean shortRetreat;
     private double tx, ty, tz;
@@ -417,6 +437,9 @@ final class Coach {
         if (juggling) {
             b.append(String.format(java.util.Locale.ROOT, "+multi(%d,%d,%d)", jugX, jugY, jugZ));
         }
+        if (bossFight) {
+            b.append("+jefe");
+        }
         if (hasGoal) {
             b.append(String.format(java.util.Locale.ROOT, " meta=(%d,%d,%d %s)", goalX, goalY, goalZ, goalWhy));
         }
@@ -485,17 +508,20 @@ final class Coach {
      * then one ready or counting down; one never seen last. A chest's hologram out of sight for a
      * while does not change what it was: only its state does.
      */
-    private static double goalBonus(Frame f, Memory.Known k) {
+    private static double goalBonus(Frame f, Memory.Known k, boolean goal) {
         if (!k.seen) {
             return 30.0;
         }
+        // MOVE3: the goal's hologram may be out of sight half as long again before it counts as old (no
+        // goal dropped the moment it goes stale and taken again the moment it is read).
+        long stale = MOVE3 && goal ? 3 : 2;
         switch (k.state) {
             case Frame.CLAIMABLE:
-                return (!k.guessed && f.tick - k.holoTick <= 2400) || (k.guessed && f.tick - k.tick <= 600) ? -30.0 : 20.0;
+                return (!k.guessed && f.tick - k.holoTick <= 1200 * stale) || (k.guessed && f.tick - k.tick <= 600) ? -30.0 : 20.0;
             case Frame.ACTIVE:
-                return k.waveLeft > 0 && f.tick - k.tick < 200 && hd(k.cx(), k.cz(), f.x, f.z) < LOCK_R ? -20.0 : 20.0;
+                return k.waveLeft > 0 && f.tick - k.tick < 200 && hd(k.cx(), k.cz(), f.x, f.z) < (MOVE3 && goal ? LOCK_R + 4.0 : LOCK_R) ? -20.0 : 20.0;
             case Frame.READY:
-                return f.tick - k.holoTick <= 1200 ? 0.0 : 10.0;
+                return f.tick - k.holoTick <= 600 * stale ? 0.0 : 10.0;
             case Frame.COOLDOWN:
             default:
                 return 0.0;
@@ -536,7 +562,7 @@ final class Coach {
             if (!Double.isFinite(sc)) {
                 continue;
             }
-            sc += goalBonus(f, mem.chests.get(i));
+            sc += goalBonus(f, mem.chests.get(i), i == cur);
             if (sc < bs) {
                 bs = sc;
                 best = i;
@@ -550,8 +576,10 @@ final class Coach {
             // sooner one, by a little. The wide margins are against going off far for little.
             Memory.Known bk = mem.chests.get(best);
             boolean neighbour = hd(bk.cx(), bk.cz(), ck.cx(), ck.cz()) < GOAL_NEIGHBOUR_R && Math.abs(bk.y - ck.y) <= 6;
-            double margin = neighbour ? GOAL_NEIGHBOUR_MARGIN : at || pearled ? GOAL_STAY_MARGIN : GOAL_SWITCH_MARGIN;
-            if (cc + goalBonus(f, ck) <= bs + margin) {
+            // (MOVE3: at the goal, a neighbour by GOAL_SWITCH_MARGIN: by two seconds the player went to one and
+            // back to the other as their countdowns came in.)
+            double margin = neighbour && !(MOVE3 && at) ? GOAL_NEIGHBOUR_MARGIN : at || pearled ? (neighbour ? GOAL_SWITCH_MARGIN : GOAL_STAY_MARGIN) : GOAL_SWITCH_MARGIN;
+            if (cc + goalBonus(f, ck, true) <= bs + margin) {
                 best = cur;
             }
         }
@@ -583,8 +611,13 @@ final class Coach {
      * set off on the way to another), the one whose wave came first: its time runs out first, so
      * its mobs are finished first, then the next one's. Two that came within a second: the nearer.
      */
-    private static int waveLock(Frame f, Memory mem) {
-        int lock = -1;
+    private Memory.Known lastLock;
+    /** MOVE3: two waves that came within a second: the one locked on stays unless another is this much nearer. */
+    private static final double LOCK_STAY_D = 4.0;
+
+    private int waveLock(Frame f, Memory mem) {
+        int lock = -1, prev = -1;
+        double prevD = 1e9;
         long first = Long.MAX_VALUE;
         double ld = 1e9;
         for (int i = 0; i < mem.chests.size(); i++) {
@@ -594,6 +627,10 @@ final class Coach {
                     || f.tick < k.skipUntil) {
                 continue;
             }
+            if (k == lastLock) {
+                prev = i;
+                prevD = d;
+            }
             boolean sooner = lock < 0 || k.activeSeenAt < first - 20;
             boolean same = lock >= 0 && Math.abs(k.activeSeenAt - first) <= 20 && d < ld;
             if (sooner || same) {
@@ -602,6 +639,12 @@ final class Coach {
                 lock = i;
             }
         }
+        if (MOVE3 && prev >= 0 && prev != lock && Math.abs(mem.chests.get(prev).activeSeenAt - mem.chests.get(lock).activeSeenAt) <= 20
+                && prevD < ld + LOCK_STAY_D) {
+            // Two that came together, the player between them: no going to and fro as one or the other is a step nearer.
+            lock = prev;
+        }
+        lastLock = lock >= 0 ? mem.chests.get(lock) : null;
         return lock;
     }
 
@@ -773,7 +816,30 @@ final class Coach {
         if (!f.onGround || !planner.open(x, y + 2, z)) {
             return false;
         }
-        return up || f.collidedH || stepAhead(f);
+        if (!(up || f.collidedH || stepAhead(f))) {
+            return false;
+        }
+        long t = f.tick;
+        boolean sameSpot = hd(f.x, f.z, hopX, hopZ) < 1.0;
+        if (t < hopOffUntil && sameSpot) {
+            // Jumped here twice for nothing: not again for a while (no hopping on the spot).
+            return false;
+        }
+        if (t - hopAt >= 5) {
+            // A new jump (one pressed a tick or two ago is the same one): the last from about here
+            // that got no higher counts against the spot.
+            hopFails = t - hopAt < 40 && sameSpot && f.y < hopY + 0.5 ? hopFails + 1 : 0;
+            hopAt = t;
+            hopX = f.x;
+            hopY = f.y;
+            hopZ = f.z;
+            if (hopFails >= 2) {
+                hopFails = 0;
+                hopOffUntil = t + HOP_OFF_TICKS;
+                return false;
+            }
+        }
+        return true;
     }
 
     /**
@@ -1554,7 +1620,25 @@ final class Coach {
                 cand.add(m);
             }
         }
-        // Who is shooting at the player: a projectile of a mob's that comes within two blocks.
+        // A world boss about: gone for (from afar too) unless a wave of the player's own is on.
+        Frame.Mob boss = null;
+        for (Frame.Mob m : f.mobs) {
+            if (!m.boss) {
+                continue;
+            }
+            double d = hd(m.x, m.z, f.x, f.z);
+            Long gone = unreach.get(m.id), nohit = unhit.get(m.id);
+            if ((gone != null && gone > t && reach(f, m) > REACH) || (nohit != null && nohit > t) || d > (m.id == bossId ? BOSS_KEEP_R : BOSS_R)
+                    || Math.abs(m.y - f.y) > BOSS_DY) {
+                continue;
+            }
+            if (boss == null || d < hd(boss.x, boss.z, f.x, f.z)) {
+                boss = m;
+            }
+        }
+        if (boss != null && lock < 0 && (!outOfHeals || boss.id == bossId) && !cand.contains(boss)) {
+            cand.add(boss);
+        }
         for (Frame.Proj p : f.projs) {
             if (SHOOTERS && p.owner >= 0 && (p.kind == Frame.ARROW || p.kind == Frame.SNOWBALL)) {
                 double[] c = closest(f, p);
@@ -1591,6 +1675,20 @@ final class Coach {
         if (hasUpperMob(f, cand)) {
             // One up where the player is: those far below are left for after (no jumping down to them).
             cand.removeIf(m -> m.y < f.y - MAX_UPPER_DROP);
+        }
+        bossFight = boss != null && cand.contains(boss);
+        if (bossFight) {
+            if (boss.id != bossId) {
+                note(String.format(java.util.Locale.ROOT, "boss: voy a pelear %s hp %.0f/%.0f a %.0f bloques", boss.name, boss.hp, boss.maxHp,
+                    hd(boss.x, boss.z, f.x, f.z)));
+            }
+            bossId = boss.id;
+            bossAt = t;
+            bossX = boss.x;
+            bossY = boss.y;
+            bossZ = boss.z;
+        } else if (bossId >= 0 && t - bossAt > BOSS_HOLD_TICKS) {
+            bossId = -1;
         }
         boolean eating = pilot.using && pilot.slot == Pilot.GAPPLE;
         boolean drawing = pilot.using && pilot.slot == Pilot.BOW;
@@ -1847,7 +1945,7 @@ final class Coach {
                 }
                 // The first wave's own before the others; one shooting before one that is not; the one fought before a new one.
                 double sc = r + (m.hurtTime > 2 ? 2.0 : 0.0) + (m.id == target || (m.id == lastFought && t - lastFoughtAt < LAST_FOUGHT_TICKS) ? -1.2 : 0.0)
-                    + (focus.contains(m) ? 0.0 : 2.0) + (m == shooter ? -1.0 : 0.0);
+                    + (focus.contains(m) ? 0.0 : 2.0) + (m == shooter ? -1.0 : 0.0) + (m.boss && bossFight ? -1.0 : 0.0);
                 if (sc < bs) {
                     bs = sc;
                     tgt = m;
@@ -1918,7 +2016,7 @@ final class Coach {
                     }
                     for (Frame.Mob m : focus) {
                         if (hd(m.x, m.z, gc[0], gc[2]) < 5.0) {
-                            unreach.put(m.id, t + 600);
+                            unreach.put(m.id, t + (m.boss ? BOSS_UNREACH_TICKS : 600));
                         }
                     }
                     apprBest = 1e9;
@@ -1987,7 +2085,7 @@ final class Coach {
                     // The way to them stops short (up a cliff, down a pit): left alone now, not in eight seconds.
                     for (Frame.Mob m : focus) {
                         if (hd(m.x, m.z, gc[0], gc[2]) < 5.0) {
-                            unreach.put(m.id, t + 600);
+                            unreach.put(m.id, t + (m.boss ? BOSS_UNREACH_TICKS : 600));
                         }
                     }
                     endSince = -1;
@@ -2022,6 +2120,14 @@ final class Coach {
             } else if (hd(k.cx(), k.cz(), f.x, f.z) > (lastMode == GUARD ? 4.5 : 3.0) || (MOVE2 && Math.abs(k.y - f.y) > 2.5)) {
                 // (move2: down a pit or up a ledge by it, back up to the chest's own level, where its mobs are.)
                 go(f, k.cx(), k.y, k.cz(), 2.0);
+                if (MOVE3 && endSince >= 0 && hd(k.cx(), k.cz(), f.x, f.z) < 16.0) {
+                    // (move3) At the end of a way that stops short of a chest up a cliff: stood at its foot
+                    // watching for its mobs, not pushed (and hopped) against the wall; the way up is still
+                    // looked for, a pearl thrown, or the chest given up after a while.
+                    move = false;
+                    jumpUp = false;
+                    aim(k.cx(), eyeY(f), k.cz());
+                }
             } else {
                 aim(k.cx(), eyeY(f), k.cz());
             }
@@ -2029,6 +2135,12 @@ final class Coach {
             if (shot) {
                 evade = true;
             }
+        } else if (bossId >= 0 && t - bossAt <= BOSS_HOLD_TICKS && !claimNear) {
+            // A boss fight on, the boss out of reach a moment (knocked away, behind something): no new
+            // wave meanwhile, the view to where it was.
+            mode = WAIT;
+            evade = shooter != null;
+            aim(bossX, bossY + 1.0, bossZ);
         } else {
             // 4. Chests.
             int g = chooseGoal(f, mem);
