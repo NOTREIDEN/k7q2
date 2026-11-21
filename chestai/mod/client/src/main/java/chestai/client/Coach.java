@@ -49,6 +49,8 @@ final class Coach {
      * longer be farmed (another player's, set aside, out of heals) is left at once.
      */
     private static final double GOAL_SWITCH_MARGIN = 8.0, GOAL_STAY_MARGIN = 25.0, GOAL_AT = 8.0;
+    /** Two chests this close (across) are neighbours: between them the sooner one wins by this many seconds. */
+    private static final double GOAL_NEIGHBOUR_R = 16.0, GOAL_NEIGHBOUR_MARGIN = 2.0;
     /** Goals looked over again every this many ticks (half a second). */
     private static final int GOAL_EVERY = 10;
     /** After a pearl toward the goal, held to it this long (from the throw). */
@@ -499,7 +501,11 @@ final class Coach {
             Memory.Known ck = mem.chests.get(cur);
             boolean at = hd(ck.cx(), ck.cz(), f.x, f.z) < GOAL_AT && Math.abs(ck.y - f.y) <= 5.0;
             boolean pearled = f.tick - pearlAt < PEARL_COMMIT_TICKS || (pearlUntil >= f.tick);
-            double margin = at || pearled ? GOAL_STAY_MARGIN : GOAL_SWITCH_MARGIN;
+            // A chest next to the goal (the next one of a row): no long way to throw away, so the
+            // sooner one, by a little. The wide margins are against going off far for little.
+            Memory.Known bk = mem.chests.get(best);
+            boolean neighbour = hd(bk.cx(), bk.cz(), ck.cx(), ck.cz()) < GOAL_NEIGHBOUR_R && Math.abs(bk.y - ck.y) <= 6;
+            double margin = neighbour ? GOAL_NEIGHBOUR_MARGIN : at || pearled ? GOAL_STAY_MARGIN : GOAL_SWITCH_MARGIN;
             if (cc + goalBonus(f, ck) <= bs + margin) {
                 best = cur;
             }

@@ -42,6 +42,8 @@ final class Refill {
     private long refusedAt = -100000;
     /** A line for the player (a click refused), once. */
     String note;
+    /** A line for the play log (what the refill did this tick), once. */
+    String event;
 
     Refill(Minecraft mc, double cps) {
         this.mc = mc;
@@ -125,6 +127,7 @@ final class Refill {
                 refill = 2;
                 return true;
             }
+            event = "refill: el inventario no se abrio o se cerro";
             refill = 0;
             return false;
         }
@@ -136,6 +139,7 @@ final class Refill {
             }
             refill = 1;
             clickTokens = clicksAvailable();
+            event = "refill: abro el inventario (" + (kind == APPLE ? "manzanas" : "pociones") + ")";
             // The inventory key, read by the game later in this tick.
             KeyBinding.unPressAllKeys();
             KeyBinding.onTick(mc.gameSettings.keyBindInventory.getKeyCode());
@@ -157,6 +161,7 @@ final class Refill {
         }
         // What the screen does for a shift click.
         mc.playerController.windowClick(me.openContainer.windowId, slot, 0, 1, me);
+        event = "refill: shift-clic en el slot " + slot;
         boolean more = wanted(inv, want, mobClose) >= 0;
         if (!more) {
             refill = 0;

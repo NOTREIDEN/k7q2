@@ -101,4 +101,9 @@ final class Hands {
         KeyBinding.unPressAllKeys();
         useDown = false;
     }
+
+    /** The keys left as they are (another one let go of them), the right button taken as up. */
+    void forgetUse() {
+        useDown = false;
+    }
 }

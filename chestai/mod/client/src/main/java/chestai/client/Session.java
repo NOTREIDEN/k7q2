@@ -541,7 +541,14 @@ public final class Session {
         if (refill.tick(settings.potsHotbar, mobD < 4.0, ready)) {
             String said = refill.note;
             refill.note = null;
-            hands.release();
+            if (refill.event != null) {
+                log("CHESTAI t=" + tick + " " + refill.event);
+                refill.event = null;
+            }
+            // Not hands.release(): letting go of every key here would also take back the inventory
+            // key the refill pressed this tick (the game reads it later in the tick). Refill lets
+            // go of the keys itself, before pressing it.
+            hands.forgetUse();
             combatMouse.enabled = false;
             if (combat != null) {
                 combat.suspend();
