@@ -6,6 +6,7 @@ import numpy as np
 STAT_NAMES = [
     "episodes", "ticks", "claims", "kills", "waves", "resets", "deaths", "dmg_dealt", "dmg_taken", "leash_tps",
     "hits", "clicks", "self_punch", "punch_boost", "gapples", "gapple_waste", "potions", "potion_waste", "pearls", "max_simul",
+    "punch_paid",
 ]
 
 # Widths of the parts of an observation, in order (sim/src/env.rs).

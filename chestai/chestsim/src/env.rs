@@ -5,6 +5,13 @@ use crate::game::{ChestState, Cfg, Events, Game, Input, MobKind, PlayerStart, Pr
 use crate::mth::Rng;
 use crate::terrain::{generate, TerrainCfg};
 
+/// Scale of the observation's "wave time left": (this - ticks the wave has
+/// run) / this, as `Obs.java` (WAVE_TICKS = 200) builds it in the real
+/// client, which cannot know the server's timeout. With 15-20 s waves it goes
+/// below 0 (to -0.5 .. -1) before the wave resets. The critic's private part
+/// has the true time left (`Cfg::wave_ticks`).
+pub const WAVE_OBS_TICKS: i64 = WAVE_TICKS;
+
 pub const K_MOBS: usize = 8;
 pub const K_CHESTS: usize = 8;
 pub const K_PROJ: usize = 4;
@@ -30,9 +37,10 @@ pub const PITCH_BINS: [f32; 11] = [-30.0, -15.0, -7.0, -3.0, -1.0, 0.0, 1.0, 3.0
 pub const ACT_HEADS: usize = 9;
 pub const ACT_DIMS: [i32; ACT_HEADS] = [3, 3, 2, 2, 15, 11, 2, 2, 6];
 
-pub const STAT_NAMES: [&str; 20] = [
+pub const STAT_NAMES: [&str; 21] = [
     "episodes", "ticks", "claims", "kills", "waves", "resets", "deaths", "dmg_dealt", "dmg_taken", "leash_tps",
     "hits", "clicks", "self_punch", "punch_boost", "gapples", "gapple_waste", "potions", "potion_waste", "pearls", "max_simul",
+    "punch_paid",
 ];
 pub const STATS_DIM: usize = STAT_NAMES.len();
 
@@ -105,7 +113,19 @@ pub struct Params {
     pub w_tp: f64,
     pub w_waste: f64,
     pub w_shape: f64,
+    /// Pay of a Punch shot at oneself. With `punch_mode` 1 it is paid only when,
+    /// within `punch_window` ticks of the hit, the player has come at least
+    /// `punch_gain` blocks closer to the chest that mattered at the hit than
+    /// sprinting would have brought it, to a distance from that chest it had
+    /// not reached before (so going away and boosting back pays nothing), at
+    /// most once every `punch_every_s` seconds and not with a pearl thrown in
+    /// between. With `punch_mode` 0, run 3e's rule: paid for any self-hit with
+    /// no wave running close by and the nearest chest to work on past 12 blocks.
     pub w_punch: f64,
+    pub punch_mode: f64,
+    pub punch_gain: f64,
+    pub punch_window: f64,
+    pub punch_every_s: f64,
     pub gamma: f64,
     pub arrow_self_dmg: f64,
     pub rival_prob: f64,
@@ -125,6 +145,20 @@ pub struct Params {
     /// Cost of spinning: the signed turn averaged over about a second, past 3
     /// degrees a tick, so that the view does not go round and round.
     pub w_spin: f64,
+    /// 1: hits land as the SilentAim aimbot of the real client lands them (the
+    /// nearest own mob within reach and in sight, at the click rate, with the
+    /// sword in hand, wherever the view points); the attack head then only
+    /// claims a chest under the crosshair. 0: the agent aims and clicks itself.
+    pub silent_aim: f64,
+    /// Seconds a wave has before its chest resets, drawn per episode.
+    pub wave_s_min: f64,
+    pub wave_s_max: f64,
+    /// Pay per point of damage to the mobs of another player's wave (w_dmg is
+    /// for the player's own mobs only).
+    pub w_dmg_rival: f64,
+    /// A golden apple eaten with this much absorption still left counts as a
+    /// waste (as well as one eaten at full health with all of it and regeneration on).
+    pub gapple_waste_abs: f64,
 }
 
 impl Default for Params {
@@ -194,7 +228,15 @@ impl Default for Params {
             w_tp: 0.2,
             w_waste: 0.5,
             w_shape: 0.08,
-            w_punch: 1.5,
+            // Run 3e paid 1.5 for any self-hit (punch_mode 0) and it was farmed;
+            // now only for measured travel. A perfect shot gains 2-5 blocks over
+            // sprinting in the 30 ticks after the hit (Punch I-II, Speed I-IV), so
+            // the bar is 3 blocks, not 8.
+            w_punch: 1.0,
+            punch_mode: 1.0,
+            punch_gain: 3.0,
+            punch_window: 30.0,
+            punch_every_s: 5.0,
             gamma: 0.998,
             arrow_self_dmg: 0.35,
             rival_prob: 0.5,
@@ -205,6 +247,11 @@ impl Default for Params {
             w_away: 0.01,
             w_idle: 0.03,
             w_spin: 0.08,
+            silent_aim: 1.0,
+            wave_s_min: 15.0,
+            wave_s_max: 20.0,
+            w_dmg_rival: 0.0,
+            gapple_waste_abs: 2.0,
         }
     }
 }
@@ -236,6 +283,8 @@ params_table!(
     mob_kb_extra_max, mob_speed_min, mob_speed_max, slow_prob, blind_prob, proj_dmg_max, proj_punch_max,
     extreme_share, gapples_min, gapples_max, pearls_max, potions_max, start_hurt, w_claim, w_kill, w_wave,
     w_reset, w_dmg, w_hurt, w_death, w_tp, w_waste, w_shape, w_punch, gamma, arrow_self_dmg, rival_prob, rivals_max, w_rival, w_turn, w_flip, w_away, w_idle, w_spin,
+    silent_aim, wave_s_min, wave_s_max, w_dmg_rival, gapple_waste_abs, punch_mode, punch_gain, punch_window,
+    punch_every_s,
 );
 
 /// What the client remembers of a chest it has seen: the hologram's last
@@ -272,6 +321,29 @@ pub struct Env {
     idle_from: [f64; 3],
     idle_tick: u64,
     last_hit: u64,
+    punch: PunchWatch,
+}
+
+/// What the Punch pay of `punch_mode` 1 keeps track of.
+#[derive(Clone, Debug)]
+struct PunchWatch {
+    /// Per chest: the closest the player has come to it since its state (as
+    /// the client knows it) last changed, and that state.
+    best: Vec<f64>,
+    state: Vec<u8>,
+    /// The self-hit being watched: its tick, its chest, the distance then and
+    /// the closest the player had come to that chest before it.
+    at: i64,
+    chest: usize,
+    d0: f64,
+    best0: f64,
+    paid_at: i64,
+}
+
+impl Default for PunchWatch {
+    fn default() -> Self {
+        PunchWatch { best: Vec::new(), state: Vec::new(), at: -1, chest: 0, d0: 0.0, best0: 0.0, paid_at: -1_000_000 }
+    }
 }
 
 fn lerp(a: f64, b: f64, t: f64) -> f64 {
@@ -347,6 +419,11 @@ pub fn new_game(p: &Params, rng: &mut Rng) -> (Game, f64, f64, bool, i64) {
         slow_prob: if extreme { (p.slow_prob * 2.5).min(1.0) } else { p.slow_prob },
         blind_prob: if extreme { (p.blind_prob * 2.5).min(1.0) } else { p.blind_prob },
         effect_ticks: (40, 120),
+        // Set below, after every other draw, so that the rest of an episode is
+        // drawn as before.
+        wave_ticks: WAVE_TICKS,
+        silent_aim: p.silent_aim >= 0.5,
+        gapple_waste_abs: p.gapple_waste_abs as f32,
     };
     let holo = cfg.holo_range;
     let start = PlayerStart {
@@ -359,6 +436,9 @@ pub fn new_game(p: &Params, rng: &mut Rng) -> (Game, f64, f64, bool, i64) {
     };
     let seed = rng.next_u64();
     let ep = rng.range(p.ep_ticks_min, p.ep_ticks_max) as i64;
+    let mut cfg = cfg;
+    let wave_s = if p.wave_s_max > p.wave_s_min { rng.range(p.wave_s_min, p.wave_s_max) } else { p.wave_s_min };
+    cfg.wave_ticks = ((wave_s * 20.0).round() as i64).max(1);
     let mut g = Game::new(map.world, &map.chests, map.spawn, cfg, Rng::new(seed), &timers, start);
     if rng.chance(p.rival_prob) {
         let k = 1 + (rng.f64() * p.rivals_max) as usize;
@@ -398,7 +478,7 @@ impl Env {
         let mut rng = Rng::new(seed);
         let (g, ping, holo, extreme, ep) = new_game(&p, &mut rng);
         let n = g.chests.len();
-        let mut e = Env { p, rng, g, known: vec![Known::default(); n], ticks: 0, ep_ticks: ep, ping_ms: ping, holo_range: holo, extreme, last_hp: 20.0, since_hurt: 100, phi: 0.0, stats: [0.0; STATS_DIM], teacher_ate: -1000, next_seed: None, last_dyaw: 0.0, spin: 0.0, idle_from: [0.0; 3], idle_tick: 0, last_hit: 0 };
+        let mut e = Env { p, rng, g, known: vec![Known::default(); n], ticks: 0, ep_ticks: ep, ping_ms: ping, holo_range: holo, extreme, last_hp: 20.0, since_hurt: 100, phi: 0.0, stats: [0.0; STATS_DIM], teacher_ate: -1000, next_seed: None, last_dyaw: 0.0, spin: 0.0, idle_from: [0.0; 3], idle_tick: 0, last_hit: 0, punch: PunchWatch::default() };
         e.last_hp = e.g.sp.hp;
         e.update_known();
         e.phi = e.potential();
@@ -423,6 +503,7 @@ impl Env {
         self.idle_from = self.g.cp.l.body.pos;
         self.idle_tick = 0;
         self.last_hit = 0;
+        self.punch = PunchWatch::default();
         self.since_hurt = 100;
         self.teacher_ate = -1000;
         self.update_known();
@@ -488,6 +569,66 @@ impl Env {
             }
         }
         best.map(|b| b.1)
+    }
+
+    /// Horizontal distance from the player to chest `ci`.
+    fn chest_dist(&self, ci: usize) -> f64 {
+        let c = self.g.chests[ci].center();
+        let p = self.g.cp.l.body.pos;
+        ((c[0] - p[0]).powi(2) + (c[2] - p[2]).powi(2)).sqrt()
+    }
+
+    /// The Punch pay of `punch_mode` 1 this tick: 1 when a watched self-hit
+    /// has now carried the player `punch_gain` blocks closer to its chest than
+    /// sprinting would have, and closer than the player had come before.
+    fn punch_pay(&mut self, ev: &Events) -> u32 {
+        let t = self.ticks;
+        let n = self.g.chests.len();
+        let dist: Vec<f64> = (0..n).map(|ci| self.chest_dist(ci)).collect();
+        let focus = self.focus();
+        // Ground speed of a sprint (with jumps or not) at this episode's Speed
+        // level, measured on flat ground: 0.34 blocks a tick with Speed I, 0.56 with Speed V
+        // (Cfg::speed_amp is the amplifier: 0 is Speed I, -1 none).
+        let walk = 0.28 + 0.056 * (self.g.cfg.speed_amp.max(-1) + 1) as f64;
+        let (gain, window, every) = (self.p.punch_gain, self.p.punch_window, self.p.punch_every_s * 20.0);
+        let w = &mut self.punch;
+        if w.best.len() != n {
+            w.best = vec![f64::INFINITY; n];
+            w.state = vec![255; n];
+        }
+        let mut paid = 0;
+        if ev.pearls > 0 {
+            w.at = -1;
+        }
+        if w.at >= 0 {
+            let d = dist[w.chest];
+            let dt = (t - w.at) as f64;
+            if dt > window {
+                w.at = -1;
+            } else if (w.d0 - d) - walk * dt >= gain && d <= w.best0 - gain && (t - w.paid_at) as f64 >= every {
+                paid = 1;
+                w.paid_at = t;
+                w.at = -1;
+            }
+        }
+        if ev.self_punch > 0 && w.at < 0 && ev.pearls == 0 {
+            if let Some(ci) = focus {
+                w.at = t;
+                w.chest = ci;
+                w.d0 = dist[ci];
+                w.best0 = w.best[ci].min(dist[ci]);
+            }
+        }
+        for ci in 0..n {
+            let st = if self.known[ci].seen { self.known[ci].state } else { 254 };
+            if st != w.state[ci] {
+                w.state[ci] = st;
+                w.best[ci] = dist[ci];
+            } else {
+                w.best[ci] = w.best[ci].min(dist[ci]);
+            }
+        }
+        paid
     }
 
     fn potential(&self) -> f64 {
@@ -660,7 +801,7 @@ impl Env {
                 // Time its wave has left, and whether that wave is the one
                 // closest to resetting.
                 let kn = &self.known[cidx];
-                let left = |k: &Known| if k.seen && k.state == 2 { (WAVE_TICKS - (v.tick - k.active_seen_at)) as f64 / WAVE_TICKS as f64 } else { 1.0 };
+                let left = |k: &Known| if k.seen && k.state == 2 { (WAVE_OBS_TICKS - (v.tick - k.active_seen_at)) as f64 / WAVE_OBS_TICKS as f64 } else { 1.0 };
                 let mine = left(kn);
                 ww.put(mine);
                 let oldest = self.known.iter().map(|k| left(k)).fold(1.0, f64::min);
@@ -694,7 +835,7 @@ impl Env {
                 let est = self.est_secs(ci);
                 ww.put(if kn.seen { est / 180.0 } else { 1.0 });
                 ww.put(if kn.seen { (1.0 + est).ln() / 5.2 } else { 1.0 });
-                let window = if kn.seen && kn.state == 2 { (WAVE_TICKS - (v.tick - kn.active_seen_at)) as f64 / WAVE_TICKS as f64 } else { 0.0 };
+                let window = if kn.seen && kn.state == 2 { (WAVE_OBS_TICKS - (v.tick - kn.active_seen_at)) as f64 / WAVE_OBS_TICKS as f64 } else { 0.0 };
                 ww.put(window);
                 let near = v.mobs.iter().filter(|m| ((m.pos[0] - cc[0]).powi(2) + (m.pos[2] - cc[2]).powi(2)).sqrt() < g.cfg.leash_r + 2.0).count();
                 ww.put(near as f64 / 5.0);
@@ -809,7 +950,7 @@ impl Env {
                     putp((ch.state as u8 == s) as i32 as f64);
                 }
                 putp(((ch.ready_at - g.t).max(0) as f64 / 3600.0).min(1.0));
-                putp(if ch.state == ChestState::Active { (WAVE_TICKS - (g.t - ch.active_since)) as f64 / WAVE_TICKS as f64 } else { 0.0 });
+                putp(if ch.state == ChestState::Active { (g.cfg.wave_ticks - (g.t - ch.active_since)) as f64 / g.cfg.wave_ticks as f64 } else { 0.0 });
                 putp(ch.mobs.iter().filter(|&&m| g.mobs[m].alive).count() as f64 / 5.0);
             } else {
                 for _ in 0..7 {
@@ -854,9 +995,11 @@ impl Env {
             self.since_hurt = (self.since_hurt + 1).min(1000);
         }
         self.last_hp = hp;
+        let punch_paid = if self.p.punch_mode >= 0.5 { self.punch_pay(&ev) } else { 0 };
         let p = &self.p;
         let mut r = p.w_claim * ev.claims as f64 + p.w_kill * ev.kills as f64 + p.w_wave * ev.waves as f64 - p.w_reset * ev.resets as f64
-            + p.w_dmg * ev.dmg_dealt as f64
+            + p.w_dmg * (ev.dmg_dealt - ev.dmg_rival) as f64
+            + p.w_dmg_rival * ev.dmg_rival as f64
             - p.w_hurt * ev.dmg_taken as f64
             - p.w_tp * ev.leash_tps as f64
             - p.w_waste * (ev.gapple_waste + ev.potion_waste) as f64
@@ -882,9 +1025,11 @@ impl Env {
             if nearest_active.is_finite() && nearest_active > 8.0 {
                 r -= p.w_away;
             }
-            // A Punch shot at oneself pays when it carries the player toward a far chest:
-            // no wave running close by and the nearest chest to work on more than 12 blocks off.
-            if ev.self_punch > 0 && !(nearest_active <= 8.0) {
+            if p.punch_mode >= 0.5 {
+                r += p.w_punch * punch_paid as f64;
+            } else if ev.self_punch > 0 && !(nearest_active <= 8.0) {
+                // Run 3e: a Punch shot at oneself pays when it carries the player toward a far chest:
+                // no wave running close by and the nearest chest to work on more than 12 blocks off.
                 let mut nearest_goal = f64::INFINITY;
                 for ci in 0..self.g.chests.len() {
                     let k = &self.known[ci];
@@ -940,6 +1085,7 @@ impl Env {
         s[17] += ev.potion_waste as f64;
         s[18] += ev.pearls as f64;
         s[19] = s[19].max(ev.max_simul as f64);
+        s[20] += punch_paid as f64;
         if done != 0 {
             s[0] += 1.0;
             s[11] += self.g.cp.clicks as f64;
@@ -1123,7 +1269,8 @@ impl Env {
         let mut target: Option<(f64, usize)> = None;
         for (i, m) in v.mobs.iter().enumerate() {
             let d = ((m.pos[0] - pos[0]).powi(2) + (m.pos[1] - pos[1]).powi(2) + (m.pos[2] - pos[2]).powi(2)).sqrt();
-            if d > 12.0 {
+            // With the aimbot, another player's mobs cannot be hit: leave them.
+            if d > 12.0 || (g.cfg.silent_aim && m.rival) {
                 continue;
             }
             // Its chest, and how long that wave has been on.
@@ -1284,7 +1431,7 @@ impl Env {
             if i > 0 {
                 s.push(',');
             }
-            s.push_str(&format!("[{},{},{},{},{},{}]", c.block[0], c.block[1], c.block[2], c.state as i32, c.shown_secs(g.t), if c.state == ChestState::Active { WAVE_TICKS - (g.t - c.active_since) } else { 0 }));
+            s.push_str(&format!("[{},{},{},{},{},{}]", c.block[0], c.block[1], c.block[2], c.state as i32, c.shown_secs(g.t), if c.state == ChestState::Active { g.cfg.wave_ticks - (g.t - c.active_since) } else { 0 }));
         }
         s.push_str("],\"projs\":[");
         let mut first = true;
@@ -1304,5 +1451,53 @@ impl Env {
         }
         s.push_str(&format!("],\"claims\":{},\"kills\":{},\"resets\":{}}}", self.stats[2], self.stats[3], self.stats[5]));
         s
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::world::World;
+
+    /// A player on flat ground sprinting along +z (or -z) with a chest 70
+    /// blocks up +z; with `shoot`, a Punch II shot at itself on the way.
+    fn run(shoot: bool, away: bool, p: Params) -> (f64, f64) {
+        let mut e = Env::new(p, 5);
+        let mut cfg = e.g.cfg.clone();
+        cfg.speed_amp = 1;
+        cfg.punch = 2.0;
+        cfg.up = 4;
+        cfg.down = 4;
+        cfg.jitter = 0;
+        let start = PlayerStart { yaw: if away { 180.0 } else { 0.0 }, hp: 20.0, gapples: 0, pearls: 0, potions: 0, arrows: 64 };
+        e.g = Game::new(World::flat(64, 32, 400, 8), &[[30, 8, 150]], [30.5, 8.0, 80.5], cfg, Rng::new(5), &[99999], start);
+        e.known = vec![Known::default(); 1];
+        e.holo_range = 500.0;
+        e.punch = PunchWatch::default();
+        e.stats = [0.0; STATS_DIM];
+        let (y0, p0, p_dn, p_up) = (bin_of(&YAW_BINS, 0.0), bin_of(&PITCH_BINS, 0.0), bin_of(&PITCH_BINS, -7.0), bin_of(&PITCH_BINS, 7.0));
+        for t in 0..120 {
+            let mut a = [2, 1, 0, 1, y0, p0, 0, 0, if t == 0 { 2 } else { 0 }];
+            if shoot && (20..25).contains(&t) {
+                a[7] = 1;
+                a[5] = p_dn;
+            } else if t >= 25 && e.g.cp.l.pitch < 0.0 {
+                a[5] = p_up;
+            }
+            e.step(&a);
+        }
+        (e.stats[12], e.stats[20])
+    }
+
+    #[test]
+    fn punch_pays_only_for_travel_toward_the_chest() {
+        let (hits, paid) = run(true, false, Params::default());
+        assert_eq!((hits, paid), (1.0, 1.0), "a boost toward the chest");
+        assert_eq!(run(false, false, Params::default()), (0.0, 0.0), "sprinting alone");
+        let (hits, paid) = run(true, true, Params::default());
+        assert_eq!((hits, paid), (1.0, 0.0), "a boost away from the chest");
+        let mut p = Params::default();
+        p.punch_gain = 20.0;
+        assert_eq!(run(true, false, p).1, 0.0, "a boost that gains less than the bar");
     }
 }

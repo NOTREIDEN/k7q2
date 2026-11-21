@@ -138,10 +138,10 @@ def main():
     ap.add_argument("--round-minutes", type=float, default=15)
     ap.add_argument("--share-dir", default="")
     ap.add_argument("--sync-cmd", default="", help="shell command run at each exchange; {round} is the round number")
-    ap.add_argument("--vf-warmup", type=int, default=0, help="iterations at the start that train only the value")
+    ap.add_argument("--vf-warmup", type=int, default=0, help="iterations at the start of this run that train only the value")
     ap.add_argument("--ref", default="", help="checkpoint the policy is kept near (KL), e.g. the imitation start")
     ap.add_argument("--ref-coef", type=float, default=0.0, help="weight of KL(reference || policy); halves every --ref-half iterations")
-    ap.add_argument("--ref-half", type=float, default=0.0, help="iterations over which the KL weight halves (0: constant)")
+    ap.add_argument("--ref-half", type=float, default=0.0, help="iterations of this run over which the KL weight halves (0: constant)")
     ap.add_argument("--eval-episodes", type=int, default=0, help="machine 0 runs the fixed test with this many episodes a kind at each round (0: off)")
     ap.add_argument("--plr", type=float, default=0.0, help="share of episodes replayed from the level buffer (0: off)")
     args = ap.parse_args()
@@ -164,6 +164,10 @@ def main():
         print(f"start from {args.init}: {samples/1e6:.1f}M samples, stage {stage}", flush=True)
     else:
         policy = None
+    # The KL weight halves, and the value warm-up counts, with the iterations of
+    # this run, not with those of the checkpoint (2865 in start2.pt, where
+    # --ref-half 400 had the weight at 0.03 / 2^7 from the start).
+    iters0 = iters
     if args.stage >= 0:
         stage = args.stage
     stage = min(stage, args.max_stage)
@@ -227,8 +231,8 @@ def main():
         # The last action is chosen so that its value closes the sums.
         stream.choose(policy, obs, priv)
         t_roll = time.time() - t_it
-        cfg["pi_coef"] = 0.0 if iters < args.vf_warmup else 1.0
-        cfg["ref_coef"] = args.ref_coef * (0.5 ** (iters / args.ref_half) if args.ref_half > 0 else 1.0)
+        cfg["pi_coef"] = 0.0 if iters - iters0 < args.vf_warmup else 1.0
+        cfg["ref_coef"] = args.ref_coef * (0.5 ** ((iters - iters0) / args.ref_half) if args.ref_half > 0 else 1.0)
         st = ppo_update(policy, opt, [stream], vs, cfg)
         if plr is not None:
             # Score of a level: its mean positive advantage over the episode.
@@ -264,10 +268,11 @@ def main():
                 "taken_per_min": round(acc["dmg_taken"] / max(mins, 1e-9), 1),
                 "tp_per_kill": round(acc["leash_tps"] / max(acc["kills"], 1), 2),
                 "punch_per_min": round(acc["self_punch"] / max(mins, 1e-9), 2),
+                "punch_paid_per_min": round(acc.get("punch_paid", 0) / max(mins, 1e-9), 2),
                 "gapple_waste": round(acc["gapple_waste"] / max(acc["gapples"], 1), 2),
                 "max_simul": acc.get("max_simul", 0),
                 "sps": round(st["samples"] / (time.time() - t_it)), "roll_s": round(t_roll, 1),
-                "ent": round(st["entropy"], 3), "kl": round(st["kl"], 4), "kl_ref": round(st["kl_ref"], 3), "v_loss": round(st["v_loss"], 3),
+                "ent": round(st["entropy"], 3), "kl": round(st["kl"], 4), "kl_ref": round(st["kl_ref"], 3), "ref_coef": round(cfg.get("ref_coef", 0.0), 5), "v_loss": round(st["v_loss"], 3),
                 "rew": round(st["mean_step_reward"], 4),
             }
             if plr is not None:

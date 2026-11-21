@@ -126,6 +126,7 @@ fn main() {
         kind_weights: [1.0; MOB_KINDS], mob_hp: (20.0, 20.0), mob_dmg: (1.0, 1.0), mob_kb_resist: (0.0, 0.0),
         mob_kb_extra: (0.0, 0.0), mob_speed: (0.23, 0.23), mob_attack_cd: (20, 20), ranged_cd: (20, 60),
         proj_dmg: (1.0, 1.0), proj_punch: (0.0, 0.0), slow_prob: 0.0, blind_prob: 0.0, effect_ticks: (40, 80),
+        wave_ticks: 300, silent_aim: true, gapple_waste_abs: 2.0,
     };
     let mut best = 0.0f64;
     for draw in 3..12 {

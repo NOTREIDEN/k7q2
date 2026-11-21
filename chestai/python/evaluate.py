@@ -30,10 +30,10 @@ SUITE = {
 I = {k: i for i, k in enumerate(STAT_NAMES)}
 
 
-def run(policy, kind, episodes, seed, teacher=False):
+def run(policy, kind, episodes, seed, teacher=False, params=None):
     st, extra = SUITE[kind]
     env = VecEnv(episodes, seed=seed)
-    for k, v in stage_params(st, extra).items():
+    for k, v in stage_params(st, {**extra, **(params or {})}).items():
         env.set_param(k, v)
     obs, priv = env.reset()
     env.take_stats()
@@ -66,6 +66,8 @@ def run(policy, kind, episodes, seed, teacher=False):
         "deaths_per_ep": round(float(s[:, I["deaths"]].mean()), 3),
         "kills_per_min": round(float((s[:, I["kills"]] / mins).mean()), 2),
         "taken_per_min": round(float((s[:, I["dmg_taken"]] / mins).mean()), 1),
+        "punch_per_min": round(float((s[:, I["self_punch"]] / mins).mean()), 2),
+        "punch_paid_per_min": round(float((s[:, I["punch_paid"]] / mins).mean()), 2),
     }
 
 
@@ -76,7 +78,9 @@ def main():
     ap.add_argument("--teacher", action="store_true")
     ap.add_argument("--kinds", default=",".join(SUITE))
     ap.add_argument("--threads", type=int, default=0)
+    ap.add_argument("--param", action="append", default=[], help="simulator parameter name=value, e.g. silent_aim=0 for the old game")
     args = ap.parse_args()
+    params = {k: float(v) for k, v in (kv.split("=") for kv in args.param)}
     if args.threads:
         torch.set_num_threads(args.threads)
     pol = None
@@ -86,7 +90,7 @@ def main():
     out = {}
     for j, kind in enumerate(args.kinds.split(",")):
         # Seeds far from the ones training draws from the clock.
-        out[kind] = run(pol, kind, args.episodes, seed=900000 + 17 * j, teacher=args.teacher)
+        out[kind] = run(pol, kind, args.episodes, seed=900000 + 17 * j, teacher=args.teacher, params=params)
         print(kind, json.dumps(out[kind]), flush=True)
     print(json.dumps(out))
 

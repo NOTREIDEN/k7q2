@@ -14,7 +14,10 @@ use crate::mth::{self, Rng};
 use crate::world::{RayHit, World};
 use std::collections::VecDeque;
 
-/// Ticks in 10 s: the time a wave has before its chest resets.
+/// Ticks in 10 s: the time a wave had before its chest reset in the first
+/// simulator. The time a wave has is now `Cfg::wave_ticks`, drawn per episode
+/// (real servers reset after about 15 to 20 s); this stays as the scale of the
+/// observation's "wave time left" (Obs.java has the same constant).
 pub const WAVE_TICKS: i64 = 200;
 /// Ticks in 3 min: the cooldown of a chest after its reward is claimed.
 pub const CLAIM_CD_TICKS: i64 = 3600;
@@ -198,6 +201,9 @@ pub struct MobView {
     pub mounted: bool,
     pub hw: f64,
     pub h: f64,
+    /// Of a wave another player set off. The client's aimbot (SilentAim)
+    /// is told which mobs are the player's own and leaves these alone.
+    pub rival: bool,
 }
 
 /// What the client sees of the server in one tick.
@@ -230,6 +236,8 @@ pub struct Events {
     pub waves: u32,
     pub resets: u32,
     pub dmg_dealt: f32,
+    /// The part of `dmg_dealt` that went to mobs of another player's wave.
+    pub dmg_rival: f32,
     pub dmg_taken: f32,
     pub leash_tps: u32,
     pub hits: u32,
@@ -276,6 +284,15 @@ pub struct Cfg {
     pub slow_prob: f64,
     pub blind_prob: f64,
     pub effect_ticks: (i32, i32),
+    /// Ticks a wave has to be killed before its chest resets.
+    pub wave_ticks: i64,
+    /// Hits as the client's aimbot (SilentAim) lands them: with the sword in
+    /// hand, the nearest own mob within entity reach and in sight is hit at
+    /// `cps`, wherever the view points; the agent's attack button then only
+    /// claims a chest under the crosshair.
+    pub silent_aim: bool,
+    /// A golden apple eaten while this much absorption is left is a waste.
+    pub gapple_waste_abs: f32,
 }
 
 #[derive(Clone, Debug)]
@@ -319,6 +336,8 @@ pub struct ClientPlayer {
     pub using: bool,
     pub use_ticks: i32,
     pub tokens: f64,
+    /// Click tokens of the aimbot, which clicks on its own at `cps`.
+    pub aim_tokens: f64,
     /// Slot to go back to on the next tick after a pearl or potion throw.
     pub back_to: Option<u8>,
     pub clicks: u32,
@@ -417,7 +436,7 @@ impl Game {
             fall_distance: 0.0,
             velocity_changed: false,
         };
-        let cp = ClientPlayer { l, slot: 0, using: false, use_ticks: 0, tokens: 1.0, back_to: None, clicks: 0 };
+        let cp = ClientPlayer { l, slot: 0, using: false, use_ticks: 0, tokens: 1.0, aim_tokens: 1.0, back_to: None, clicks: 0 };
         let mut g = Game {
             rivals: Vec::new(),
             world,
@@ -492,6 +511,51 @@ impl Game {
         (None, chest)
     }
 
+    /// The mob the aimbot hits now: the nearest own (not another player's
+    /// wave) mob the client sees whose box is within entity reach of the eye
+    /// and in sight, whatever the view. Its id and the point aimed at.
+    pub fn silent_target(&self) -> Option<(u32, V3)> {
+        let l = &self.cp.l;
+        let eye = [l.body.pos[0], l.body.pos[1] + EYE_HEIGHT, l.body.pos[2]];
+        let mut best: Option<(f64, u32, V3)> = None;
+        for m in &self.view.mobs {
+            if m.rival {
+                continue;
+            }
+            let bb = Aabb::new([m.pos[0] - m.hw, m.pos[1], m.pos[2] - m.hw], [m.pos[0] + m.hw, m.pos[1] + m.h, m.pos[2] + m.hw]);
+            let cp = bb.closest_point(eye);
+            let d = dist(eye, cp);
+            if d > ENTITY_REACH || best.map_or(false, |b| d >= b.0) {
+                continue;
+            }
+            let mid = [m.pos[0], m.pos[1] + m.h * 0.5, m.pos[2]];
+            // In sight: the closest point or the middle of the box (the
+            // closest point can lie on the face of the ground block).
+            if self.world.blocked(eye, cp) && self.world.blocked(eye, mid) {
+                continue;
+            }
+            best = Some((d, m.id, mid));
+        }
+        best.map(|b| (b.1, b.2))
+    }
+
+    /// The client's half of a blow at mob `id`, the knockback going along `yaw`.
+    fn client_attack(&mut self, id: u32, yaw: f32) {
+        let l = &mut self.cp.l;
+        let crit = l.body.fall_distance > 0.0 && !l.body.on_ground && !self.world.in_water(&l.body.bb) && l.body.motion[1] < 0.0;
+        let sprint = l.sprinting;
+        if sprint {
+            // The client's half of the sprint hit: slowed and the
+            // sprint dropped (`attackTargetEntityWithCurrentItem`).
+            l.body.motion[0] *= 0.6;
+            l.body.motion[2] *= 0.6;
+            l.sprinting = false;
+            l.attr.sprint = false;
+        }
+        let slot = self.cp.slot;
+        self.send_up(C2S::Attack { mob: id, crit, sprint, yaw, slot });
+    }
+
     /// One client tick with the controls the agent chose.
     pub fn client_tick(&mut self, inp: &Input) {
         // Packets from the server that have arrived.
@@ -554,22 +618,26 @@ impl Game {
             self.cp.tokens -= 1.0;
             self.cp.clicks += 1;
             if let Some(id) = pick_mob {
-                let l = &mut self.cp.l;
-                let crit = l.body.fall_distance > 0.0 && !l.body.on_ground && !self.world.in_water(&l.body.bb) && l.body.motion[1] < 0.0;
-                let sprint = l.sprinting;
-                let yaw = l.yaw;
-                if sprint {
-                    // The client's half of the sprint hit: slowed and the
-                    // sprint dropped (`attackTargetEntityWithCurrentItem`).
-                    l.body.motion[0] *= 0.6;
-                    l.body.motion[2] *= 0.6;
-                    l.sprinting = false;
-                    l.attr.sprint = false;
+                // With the aimbot on, the agent's own click on a mob does nothing.
+                if !self.cfg.silent_aim {
+                    let yaw = self.cp.l.yaw;
+                    self.client_attack(id, yaw);
                 }
-                let slot = self.cp.slot;
-                self.send_up(C2S::Attack { mob: id, crit, sprint, yaw, slot });
             } else if let Some(c) = pick_chest {
                 self.send_up(C2S::Claim { chest: c });
+            }
+        }
+        if self.cfg.silent_aim {
+            self.cp.aim_tokens = (self.cp.aim_tokens + self.cfg.cps / 20.0).min(1.0);
+            if self.cp.slot == 0 && !self.cp.using && throw.is_none() && self.cp.aim_tokens >= 1.0 {
+                if let Some((id, at)) = self.silent_target() {
+                    self.cp.aim_tokens -= 1.0;
+                    self.cp.clicks += 1;
+                    // The sprint push goes from the player toward the mob.
+                    let p = self.cp.l.body.pos;
+                    let yaw = ((at[2] - p[2]).atan2(at[0] - p[0]) * 180.0 / std::f64::consts::PI) as f32 - 90.0;
+                    self.client_attack(id, yaw);
+                }
             }
         }
         // Right button.
@@ -808,7 +876,11 @@ impl Game {
         }
         let hp0 = m.hp;
         m.hp -= applied;
-        self.ev.dmg_dealt += applied.min(hp0.max(0.0));
+        let dealt = applied.min(hp0.max(0.0));
+        self.ev.dmg_dealt += dealt;
+        if self.chests[m.chest].rival_wave {
+            self.ev.dmg_rival += dealt;
+        }
         if push && !m.mounted && rng_v >= m.st.kb_resist {
             let (dx, dz) = (from[0] - m.l.body.pos[0], from[2] - m.l.body.pos[2]);
             let f = (dx * dx + dz * dz).sqrt().max(1e-4);
@@ -1359,7 +1431,7 @@ impl Game {
                         self.chests[ci].ready_at = self.t + CLAIM_CD_TICKS;
                     } else if !alive {
                         self.chests[ci].state = ChestState::Claimable;
-                    } else if self.t - self.chests[ci].active_since >= WAVE_TICKS {
+                    } else if self.t - self.chests[ci].active_since >= self.cfg.wave_ticks {
                         for k in 0..self.chests[ci].mobs.len() {
                             let m = self.chests[ci].mobs[k];
                             self.mobs[m].alive = false;
@@ -1429,7 +1501,7 @@ impl Game {
                 if sp.gapples > 0 {
                     sp.gapples -= 1;
                     self.ev.gapples += 1;
-                    if sp.hp >= 20.0 && sp.absorption >= 4.0 && t < sp.regen_until {
+                    if (sp.hp >= 20.0 && sp.absorption >= 4.0 && t < sp.regen_until) || sp.absorption >= self.cfg.gapple_waste_abs {
                         self.ev.gapple_waste += 1;
                     }
                     sp.absorption = 4.0;
@@ -1468,6 +1540,7 @@ impl Game {
                     mounted: m.mounted,
                     hw: m.l.body.hw,
                     h: m.l.body.h,
+                    rival: self.chests[m.chest].rival_wave,
                 })
                 .collect(),
             projs: self.projs.iter().map(|p| (p.kind, p.owner, p.pos, p.motion)).collect(),
