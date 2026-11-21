@@ -1,1 +1,1 @@
--Dchestai.arena.boss=true -Dchestai.boss=false
+-Dchestai.arena.wave=600 -Dchestai.wave.secs=30

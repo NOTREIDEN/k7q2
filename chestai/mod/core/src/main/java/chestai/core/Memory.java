@@ -57,6 +57,8 @@ public final class Memory {
         public boolean waveFromStart;
         /** The most mobs its wave on had at once. */
         public int wavePeak;
+        /** Its running wave was on at once with another (its time to win is then no measure of a kill). */
+        public boolean overlap;
         /** How long its last wave that ran out of time (reset, mobs alive) had been on, in seconds; -1: none seen. */
         public double resetSecs = -1;
 
@@ -90,6 +92,9 @@ public final class Memory {
      * of it), the shortest a wave ran before it reset, how many of each were seen, and the last one.
      */
     public double spawnR = -1, resetMin = -1, lastSpawnD, lastResetSecs;
+    /** A reach seen once farther than spawnR by more than SPAWN_FAR blocks, waiting to be seen again (-1: none). */
+    public double spawnFar = -1;
+    private static final double SPAWN_FAR = 1.5;
     public int spawnObs, resetObs;
     public Known lastSpawnK, lastResetK;
     /** The most mobs a wave seen from its start had at once; the waves of the agent's won from their start, their mobs, and their time all together. */
@@ -292,7 +297,7 @@ public final class Memory {
             }
             // One of the agent's seen from its start won: how long it took, for how many mobs.
             if (k.seen && k.state == Frame.ACTIVE && h.state == Frame.CLAIMABLE && k.waveAt >= 0 && k.waveFromStart && k.ours && !k.contestedWave
-                    && k.wavePeak > 0) {
+                    && k.wavePeak > 0 && !k.overlap) {
                 clearSecs += (f.tick - waveStart(k)) / 20.0;
                 clearMobs += k.wavePeak;
                 clears++;
@@ -425,11 +430,21 @@ public final class Memory {
                     // Come by the player (first seen near it) with the chest ready before: its wave's start.
                     k.waveFromStart = sp != null && k.readyAt >= 0 && (k.state == Frame.READY || k.state == Frame.ACTIVE);
                     k.wavePeak = 0;
+                    k.overlap = false;
                     double d = dist(f.x, f.y, f.z, k);
                     if (k.waveFromStart && sp.tick == t && t - k.readyAt > 20 && !k.reserved && !rivalWithin(f, k, d + 2.0)) {
                         // Ready a second or more and only now come (its first mob seen this tick): the player
                         // just got within reach of it.
-                        spawnR = Math.max(spawnR, d);
+                        // A reach farther than seen so far (by more than SPAWN_FAR) counts only once seen
+                        // twice about as far: one wave set off by another way (a mob of the field taken for
+                        // one of it, the hologram read late) would have the player wait out of reach.
+                        double base = spawnR < 0 ? 12.0 : spawnR;
+                        if (d <= base + SPAWN_FAR || (spawnFar > 0 && Math.abs(d - spawnFar) <= SPAWN_FAR)) {
+                            spawnR = Math.max(spawnR, d > base + SPAWN_FAR ? Math.min(d, spawnFar) : d);
+                            spawnFar = -1;
+                        } else {
+                            spawnFar = d;
+                        }
                         spawnObs++;
                         lastSpawnD = d;
                         lastSpawnK = k;
@@ -497,6 +512,13 @@ public final class Memory {
             mobFirst.keySet().retainAll(mobSeen.keySet());
         }
         for (Known k : chests) {
+            if (k.waveAt >= 0 && k.waveLeft > 0 && !k.contestedWave) {
+                for (Known j : chests) {
+                    if (j != k && j.waveAt >= 0 && j.waveLeft > 0 && !j.contestedWave) {
+                        k.overlap = true;
+                    }
+                }
+            }
             if (k.waveAt >= 0 && k.waveLeft > k.wavePeak) {
                 k.wavePeak = k.waveLeft;
                 if (k.waveFromStart) {
