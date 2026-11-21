@@ -216,6 +216,8 @@ final class Coach {
     private static final double BOSS_R = 30.0, BOSS_KEEP_R = 40.0, BOSS_DY = 12.0;
     private static final int BOSS_HOLD_TICKS = 60, BOSS_UNREACH_TICKS = 200;
     private int bossId = -1;
+    /** Health and absorption (of 20) at least to go for a boss. */
+    private static final double BOSS_MIN_LIFE = 15.0;
     private long bossAt = -10000;
     private double bossX, bossY, bossZ;
     private boolean bossFight;
@@ -1636,7 +1638,11 @@ final class Coach {
                 boss = m;
             }
         }
-        if (boss != null && lock < 0 && (!outOfHeals || boss.id == bossId) && !cand.contains(boss)) {
+        // Gone for only with health and heals to spare (it hits hard: in the arena seeking it cost seven
+        // deaths more); low or with nothing to heal, only fought when it is at the sword anyway.
+        boolean bossHeals = (lay.real[Pilot.POTION] >= 0 && lay.potions > 0) || (lay.real[Pilot.GAPPLE] >= 0 && lay.gapples >= 4);
+        boolean bossOk = (hp + f.absorption >= BOSS_MIN_LIFE && bossHeals) || (boss != null && reach(f, boss) <= 4.0);
+        if (boss != null && lock < 0 && bossOk && (!outOfHeals || boss.id == bossId) && !cand.contains(boss)) {
             cand.add(boss);
         }
         for (Frame.Proj p : f.projs) {
