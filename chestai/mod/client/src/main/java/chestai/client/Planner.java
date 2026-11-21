@@ -123,6 +123,25 @@ final class Planner {
         return true;
     }
 
+    /**
+     * Where a thrown pearl moving from a to b first hits a block, as the game's own throwable sees it
+     * (EntityThrowable: rayTraceBlocks with no liquids): leaves, fences, glass, tall grass, anything
+     * with a box stops it. {x, y, z of the block hit, side hit (0 down .. 5 east)}, or null for none.
+     */
+    int[] pearlHit(double ax, double ay, double az, double bx, double by, double bz) {
+        net.minecraft.util.MovingObjectPosition mo = w.rayTraceBlocks(new Vec3(ax, ay, az), new Vec3(bx, by, bz));
+        if (mo == null || mo.typeOfHit != net.minecraft.util.MovingObjectPosition.MovingObjectType.BLOCK || mo.getBlockPos() == null) {
+            return null;
+        }
+        BlockPos p = mo.getBlockPos();
+        return new int[] {p.getX(), p.getY(), p.getZ(), mo.sideHit == null ? -1 : mo.sideHit.getIndex()};
+    }
+
+    /** Whether the block there is leaves (a pearl landing on a tree top puts the player in them). */
+    boolean leaves(int x, int y, int z) {
+        return w.getBlockState(new BlockPos(x, y, z)).getBlock().getMaterial() == net.minecraft.block.material.Material.leaves;
+    }
+
     boolean water(int x, int y, int z) {
         return cell(x, y, z) == MapStore.WATER;
     }

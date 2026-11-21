@@ -202,6 +202,10 @@ final class Coach {
      * the chest's own level.
      */
     static final boolean MOVE2 = !"false".equals(System.getProperty("chestai.move2"));
+    /** Pearls traced against the real blocks (leaves, walls, builds in the air), as the game throws them. */
+    /** Turns while waiting, claiming and guarding at a normal speed, not a slow look. */
+    static final boolean TURN2 = !"false".equals(System.getProperty("chestai.turn2"));
+    static final boolean PEARL2 = !"false".equals(System.getProperty("chestai.pearl2"));
     /**
      * The second movement round (-Dchestai.move3=true): in water up only for air, at a bank or a way
      * up, or over deep water (on a shallow bottom walked, as Depth Strider lets it); a jump timed to a
@@ -212,7 +216,7 @@ final class Coach {
     private static final double BOOST3_PITCH = -87.5;
     private static final int BOOST3_DRAW = Integer.getInteger("chestai.boost3.draw", 5);
     /** Ticks a boost must save over walking (-Dchestai.boost3.margin; very low to try the shot itself). */
-    private static final double BOOST3_MARGIN = Double.parseDouble(System.getProperty("chestai.boost3.margin", "8"));
+    private static final double BOOST3_MARGIN = Double.parseDouble(System.getProperty("chestai.boost3.margin", "2"));
     /** Set by go() under MOVE3: the jump in water is its own (not held all the time). */
     private boolean swimSet;
     /** Across this tick (blocks), from the last one. */
@@ -977,6 +981,37 @@ final class Coach {
         double x = f.x, y = eyeY(f) - 0.1, z = f.z;
         double mx = -Math.sin(yr) * Math.cos(pr) * 1.5, my = -Math.sin(pr) * 1.5, mz = Math.cos(yr) * Math.cos(pr) * 1.5;
         int[] air = null;
+        if (PEARL2) {
+            // The pearl's path as the game moves it (drag 0.99, gravity 0.03 a tick), each tick's
+            // stretch traced against the real blocks: only a landing on the top face of a block that
+            // is not leaves, with room to stand and for the head round it, counts. A hit on a side
+            // (a wall, a trunk, the leaves of a tree on the way) is no throw at all.
+            for (int i = 0; i < 100; i++) {
+                if (y + my < 0 || !planner.loaded((int) Math.floor(x + mx), (int) Math.floor(z + mz))) {
+                    return null;
+                }
+                int[] hit = planner.pearlHit(x, y, z, x + mx, y + my, z + mz);
+                if (hit != null) {
+                    int hx = hit[0], hy = hit[1], hz = hit[2];
+                    if (hit[3] != 1 || planner.leaves(hx, hy, hz) || !planner.stand(hx, hy + 1, hz)) {
+                        return null;
+                    }
+                    for (int[] d : new int[][] {{1, 0}, {-1, 0}, {0, 1}, {0, -1}}) {
+                        if (!planner.open(hx + d[0], hy + 2, hz + d[1]) || planner.leaves(hx + d[0], hy + 2, hz + d[1])) {
+                            return null;
+                        }
+                    }
+                    return new int[] {hx, hy + 1, hz, i + 1};
+                }
+                x += mx;
+                y += my;
+                z += mz;
+                mx *= 0.99;
+                my = my * 0.99 - 0.03;
+                mz *= 0.99;
+            }
+            return null;
+        }
         for (int i = 0; i < 100; i++) {
             for (int s = 1; s <= 6; s++) {
                 double px = x + mx * s / 6.0, py = y + my * s / 6.0, pz = z + mz * s / 6.0;
@@ -3297,16 +3332,18 @@ final class Coach {
             g = 0.95;
             capY = 36.0;
             capP = 20.0;
-        } else if (mode == TRAVEL || mode == EXPLORE) {
+        } else if (mode == TRAVEL || mode == EXPLORE || (TURN2 && (mode == CLAIM || mode == GUARD))) {
+            // (Claiming and guarding at travel speed too with turn2: the claim's aim was the slow default.)
             g = 0.8;
             capY = 26.0;
             capP = 14.0;
         }
         if (mode == WAIT && heal == HEAL_NONE) {
-            // Waiting: a slow look over to the chest, then the view is left alone.
-            g = 0.15;
-            capY = 3.0;
-            capP = 2.0;
+            // Waiting: a look over to the chest, then the view is left alone. (It was a slow 3 degrees
+            // a tick: seconds of turning that looked odd; -Dchestai.turn2=false for that.)
+            g = TURN2 ? 0.5 : 0.15;
+            capY = TURN2 ? 14.0 : 3.0;
+            capP = TURN2 ? 9.0 : 2.0;
             if (Math.abs(ey) < 20.0) {
                 ey = 0.0;
             }
