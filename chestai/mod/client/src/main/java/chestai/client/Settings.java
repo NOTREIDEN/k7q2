@@ -7,6 +7,8 @@ import java.io.IOException;
 import java.io.InputStream;
 import java.io.InputStreamReader;
 import java.io.OutputStream;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Locale;
@@ -41,16 +43,14 @@ public final class Settings {
     public double searchRadius = 160.0;
     /** The blocks of every chunk seen kept on disk, for planning ways. */
     public boolean map = true;
-    /** Click on the mobs; when not, the player only goes to them and aims (something else does the hitting). */
-    public boolean hit = false;
     /** A golden apple when hurt, so the absorption is kept full; with appleKeep or fewer left, only at appleHp. */
     public boolean appleOnHit = true;
     public int appleKeep = 8;
     public double appleHitHp = 16.0;
     /** In a fight with a mob in reach: jump (critical blows on the way down) and do not sprint (no knockback far away). */
-    public boolean fightJump = true;
-    /** The bow at a mob shooting from where it cannot be got to on foot (up a step, across water). */
-    public boolean bowMobs = true;
+    public boolean fightJump;
+    /** The bow at a mob shooting from where it cannot be got to on foot (up a step, across water): never, the bow is for travelling with Punch. */
+    public final boolean bowMobs = false;
     /** Out of golden apples and potions: no new waves (sin_curas=parar). */
     public boolean healStop = true;
     public int healKeep = 4;
@@ -81,13 +81,13 @@ public final class Settings {
 
     /** The lines of the settings added after MORE. */
     static final String MORE2 = ""
-        + "# si: hace click a los mobs. no: solo se mueve hacia ellos y los apunta, sin pegar.\n"
-        + "pegar=si\n";
+        + "# Chest AI se mueve y orienta la mira. SilentAim gestiona los golpes.\n"
+        + "pegar=no\n";
 
-    /** The settings' version: at 2 the hitting is on by default. */
+    /** The settings' version: at 4 SilentAim does the hitting, and there is no jumping in a fight and no bow at mobs. */
     static final String VERSION = ""
         + "# Version de los ajustes (no tocar).\n"
-        + "ajustes_version=2\n";
+        + "ajustes_version=4\n";
 
     /** The lines of the settings added after MORE3. */
     static final String MORE4 = ""
@@ -95,12 +95,12 @@ public final class Settings {
         + "manzana_golpe_vida=16\n"
         + "\n"
         + "# si: en la pelea, con un mob al alcance, salta (los golpes al caer son criticos) y no sprinta (no los empuja lejos).\n"
-        + "pelea_saltando=si\n";
+        + "pelea_saltando=no\n";
 
     /** The lines of the settings added after MORE4. */
     static final String MORE5 = ""
-        + "# si: con arco y flechas, le tira con el arco a un mob que le tira flechas desde donde no se llega caminando.\n"
-        + "arco_a_mobs=si\n";
+        + "# El arco se usa para viajar con Punch.\n"
+        + "arco_a_mobs=no\n";
 
     /** The lines of the settings added after MORE5. */
     static final String MORE6 = ""
@@ -190,18 +190,15 @@ public final class Settings {
         s.appleKeep = (int) Math.round(number(p.getProperty("manzana_reserva"), 8.0));
         s.appleHitHp = Math.min(number(p.getProperty("manzana_golpe_vida"), 16.0), 20.0);
         // -Dchestai.fight.jump=false, for the arena's other way of fighting.
-        s.fightJump = yes(System.getProperty("chestai.fight.jump", p.getProperty("pelea_saltando")), true);
+        s.fightJump = yes(System.getProperty("chestai.fight.jump", p.getProperty("pelea_saltando")), false);
         s.foodFull = yes(p.getProperty("comida_llena"), true);
         s.bow = yes(p.getProperty("arco_punch"), true);
-        s.bowMobs = yes(System.getProperty("chestai.bow.mobs", p.getProperty("arco_a_mobs")), true);
         String sc = p.getProperty("sin_curas");
         s.healStop = sc == null || !sc.trim().toLowerCase(Locale.ROOT).startsWith("s");
         s.healKeep = (int) Math.round(number(p.getProperty("curas_reserva"), 4.0));
         s.search = yes(p.getProperty("buscar_cofres"), true);
         s.searchRadius = number(p.getProperty("buscar_radio"), 160.0);
         s.map = yes(p.getProperty("mapa"), true);
-        // -Dchestai.pegar=si, for the self test and the arena, where nothing else hits.
-        s.hit = yes(System.getProperty("chestai.pegar", p.getProperty("pegar")), true);
         t = p.getProperty("ignorar");
         if (t != null) {
             for (String n : t.split(",")) {
@@ -250,34 +247,18 @@ public final class Settings {
         } finally {
             in0.close();
         }
-        if (old.getProperty("ajustes_version") == null) {
-            // A file from before hitting was on by default: its pegar=no was the old default, set to si once.
-            byte[] b = new byte[(int) f.length()];
-            InputStream in1 = new FileInputStream(f);
-            try {
-                int n = 0;
-                while (n < b.length) {
-                    int r = in1.read(b, n, b.length - n);
-                    if (r < 0) {
-                        break;
-                    }
-                    n += r;
-                }
-            } finally {
-                in1.close();
-            }
-            String text = new String(b, "UTF-8").replaceAll("(?m)^([ \\t]*pegar[ \\t]*[=:][ \\t]*)no[ \\t]*$", "$1si");
+        String version = old.getProperty("ajustes_version");
+        if (version == null || "1".equals(version) || "2".equals(version) || "3".equals(version)) {
+            // A file from before SilentAim: pegar, arco_a_mobs and pelea_saltando set to no once,
+            // and its version line taken out for the new one at the end.
+            String text = new String(Files.readAllBytes(f.toPath()), StandardCharsets.UTF_8)
+                .replaceAll("(?m)^([ \\t]*(?:pegar|arco_a_mobs|pelea_saltando)[ \\t]*[=:][ \\t]*)[^\r\n]*", "$1no")
+                .replaceAll("(?m)^[ \\t]*ajustes_version[ \\t]*[=:][^\r\n]*(?:\r?\n)?", "");
             if (!text.endsWith("\n")) {
                 text += "\n";
             }
             text += "\n" + VERSION;
-            OutputStream out1 = new FileOutputStream(f);
-            try {
-                out1.write(text.getBytes("UTF-8"));
-            } finally {
-                out1.close();
-            }
-            old.load(new InputStreamReader(new java.io.ByteArrayInputStream(text.getBytes("UTF-8")), "UTF-8"));
+            Files.write(f.toPath(), text.getBytes(StandardCharsets.UTF_8));
         }
         String add = (old.getProperty("pocion_vida") == null ? "\n" + MORE : "") + (old.getProperty("pegar") == null ? "\n" + MORE2 : "")
             + (old.getProperty("comida_llena") == null ? "\n" + MORE3 : "")
@@ -287,7 +268,14 @@ public final class Settings {
         if (add.length() > 0) {
             OutputStream out = new FileOutputStream(f, true);
             try {
-                out.write(add.getBytes("UTF-8"));
+                // Only the settings the file does not have yet (and every comment line).
+                for (String line : add.split("\n")) {
+                    int eq = line.indexOf('=');
+                    if (eq >= 0 && !line.startsWith("#") && old.containsKey(line.substring(0, eq))) {
+                        continue;
+                    }
+                    out.write((line + "\n").getBytes("UTF-8"));
+                }
             } finally {
                 out.close();
             }

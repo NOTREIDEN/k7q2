@@ -20,9 +20,14 @@ public final class Memory {
         public boolean seen;
         public long tick;
         public int state, secs;
+        /** When its countdown last showed a new number (or started), for counting it down between holograms; -1 with none. */
+        private long countdownAt = -1;
         public long activeSeenAt;
         /** Ticks spent trying to claim it since it was last not claimable; left aside until skipUntil when that runs long. */
         public int claimTicks;
+        /** The claim clicks tried on it, and when the last one was. */
+        public int claimAttempts;
+        public long lastClaimAttempt = -1000;
         public long skipUntil = -1;
         /** When its hologram was last read; what it says since then is a guess from its mobs. */
         public long holoTick = -100000;
@@ -30,6 +35,8 @@ public final class Memory {
         /** Its wave's mobs still alive (by their spawning next to it), and when the first came. */
         public int waveLeft;
         public long waveAt = -1;
+        /** Whether another player fights its wave (its claim is not the agent's), and whether another player stands by it. */
+        public boolean contestedWave, reserved;
         /** The longest wait to the next wave its hologram has said, for a guess when none shows. */
         public int cdSecs;
         /** Waits at it for a wave on a guess that brought none: each makes the next guess twice as long. */
@@ -62,11 +69,29 @@ public final class Memory {
     /** Each mob seen (entity id) and when last; each wave mob and the chest it came from. */
     private final Map<Integer, Long> mobSeen = new HashMap<Integer, Long>();
     private final Map<Integer, Known> waveMob = new HashMap<Integer, Known>();
+    /** Mobs first seen near the player with no chest yet to give them to, and where they were then. */
+    private final Map<Integer, SpawnSighting> unmatchedSpawns = new HashMap<Integer, SpawnSighting>();
 
     /** No hologram read for its chest this long: its state is taken from its mobs. */
     public static final int HOLO_STALE = 100;
     /** A mob first seen this close to the player and to a chest spawned there: that chest's wave. */
     private static final double SPAWN_SEEN_R = 32.0, SPAWN_R = 10.0;
+    /** How long where a mob was first seen is kept for a chest found later (its hologram read late). */
+    private static final int SPAWN_SIGHTING_TICKS = 100;
+
+    /** Where a mob was first seen, and whether another player was on it since. */
+    private static final class SpawnSighting {
+        final double x, y, z;
+        final long tick;
+        boolean contested;
+
+        SpawnSighting(Frame.Mob m, long t) {
+            this.x = m.x;
+            this.y = m.y;
+            this.z = m.z;
+            this.tick = t;
+        }
+    }
 
     /** Whether this mob is of a wave of a known chest (it came out next to it). */
     public boolean waveMob(int id) {
@@ -80,14 +105,23 @@ public final class Memory {
 
     /** The index of the chest at this block, added if new. */
     public int chest(int x, int y, int z) {
+        int i = indexOfChest(x, y, z);
+        if (i >= 0) {
+            return i;
+        }
+        chests.add(new Known(x, y, z));
+        return chests.size() - 1;
+    }
+
+    /** The index of the chest at this block, or -1. */
+    public int indexOfChest(int x, int y, int z) {
         for (int i = 0; i < chests.size(); i++) {
             Known k = chests.get(i);
             if (k.x == x && k.y == y && k.z == z) {
                 return i;
             }
         }
-        chests.add(new Known(x, y, z));
-        return chests.size() - 1;
+        return -1;
     }
 
     /** The chest within {@code r} blocks (and 3 up or down) of this block, the nearest, or -1. */
@@ -108,13 +142,27 @@ public final class Memory {
 
     /** Take in what this tick showed. The first frame only sets the health to compare with. */
     public void update(Frame f, boolean first) {
+        for (Known k : chests) {
+            k.reserved = rivalNearChest(f, k);
+        }
         for (Frame.Holo h : f.holos) {
             Known k = chests.get(h.chest);
             if (h.state == Frame.ACTIVE && (!k.seen || k.state != h.state)) {
                 k.activeSeenAt = f.tick;
             }
+            // Its wave over and no one else's any more.
+            if (k.waveLeft == 0 && (h.state == Frame.READY || h.state == Frame.COOLDOWN)) {
+                k.contestedWave = false;
+            }
             if (h.state == Frame.COOLDOWN && h.secs > k.cdSecs && h.secs < 3600) {
                 k.cdSecs = h.secs;
+            }
+            // A countdown that shows the same number a while (a hologram that is not
+            // redrawn every second) keeps counting from when the number came.
+            if (h.state != Frame.COOLDOWN) {
+                k.countdownAt = -1;
+            } else if (k.state != Frame.COOLDOWN || k.guessed || h.secs != k.secs || k.countdownAt < 0) {
+                k.countdownAt = f.tick;
             }
             k.seen = true;
             k.tick = f.tick;
@@ -137,16 +185,17 @@ public final class Memory {
     }
 
     /**
-     * The known chest within r blocks across (and dy up or down) of this point, the nearest, or null.
-     * Only one known to be a farm chest (a hologram said so) unless the server shows none.
+     * The known chest within r blocks across (and dy up or down) of this point, the nearest (up and down
+     * too), or null. Only one known to be a farm chest (a hologram said so) unless the server shows none.
      */
-    private Known chestNear(double x, double y, double z, double r, double dy, boolean anyChest) {
+    private Known chestNear(double x, double y, double z, double r, double maxDy, boolean anyChest) {
         Known best = null;
-        double bd = r * r;
+        double bd = Double.POSITIVE_INFINITY;
         for (Known k : chests) {
-            double dx = k.cx() - x, dz = k.cz() - z;
-            double d = dx * dx + dz * dz;
-            if ((anyChest || (k.seen && k.holoTick > -100000)) && Math.abs(k.y - y) <= dy && d <= bd) {
+            double dx = k.cx() - x, dz = k.cz() - z, dy = k.y - y;
+            double across = dx * dx + dz * dz;
+            double d = across + dy * dy;
+            if ((anyChest || (k.seen && k.holoTick > -100000)) && Math.abs(dy) <= maxDy && across <= r * r && d < bd) {
                 bd = d;
                 best = k;
             }
@@ -162,19 +211,31 @@ public final class Memory {
      */
     private void waves(Frame f) {
         long t = f.tick;
+        unmatchedSpawns.values().removeIf(sp -> t - sp.tick > SPAWN_SIGHTING_TICKS);
         Set<Integer> here = new HashSet<Integer>();
         for (Frame.Mob m : f.mobs) {
             here.add(m.id);
             Long seen = mobSeen.put(m.id, t);
+            // Another player on it (it hit it last, or stands by it): its wave is not the agent's to claim.
+            m.contested = m.hitByOtherPlayer || rivalNear(f, m);
             if (waveMob.containsKey(m.id)) {
+                if (m.contested) {
+                    waveMob.get(m.id).contestedWave = true;
+                }
                 continue;
             }
             Known k = null;
-            double dp = Math.hypot(m.x - f.x, m.z - f.z);
-            if (seen == null && dp < SPAWN_SEEN_R) {
+            // Where it was first seen counts, for a while, if its chest is only known later.
+            if (seen == null && Math.hypot(m.x - f.x, m.z - f.z) < SPAWN_SEEN_R) {
+                unmatchedSpawns.put(m.id, new SpawnSighting(m, t));
+            }
+            SpawnSighting sp = unmatchedSpawns.get(m.id);
+            if (sp != null) {
+                sp.contested |= m.contested;
                 // (Any chest found about, with no hologram read anywhere for five minutes.)
-                k = chestNear(m.x, m.y, m.z, SPAWN_R, 4.0, t - holoWorkAt > 6000);
-            } else {
+                k = chestNear(sp.x, sp.y, sp.z, SPAWN_R, 4.0, t - holoWorkAt > 6000);
+            }
+            if (k == null) {
                 Known a = chestNear(m.x, m.y, m.z, 12.0, 6.0, false);
                 if (a != null && a.seen && a.state == Frame.ACTIVE && t - a.holoTick < 40) {
                     k = a;
@@ -183,10 +244,24 @@ public final class Memory {
             if (k != null) {
                 waveMob.put(m.id, k);
                 k.idleWaits = 0;
+                unmatchedSpawns.remove(m.id);
                 if (k.waveAt < 0) {
-                    k.waveAt = t;
+                    if (k.state != Frame.CLAIMABLE) {
+                        k.contestedWave = false;
+                    }
+                    k.waveAt = sp == null ? t : sp.tick;
+                }
+                k.contestedWave |= m.contested || (sp != null && sp.contested);
+                // A chest with a wave is not left aside before its hologram is read.
+                if (!k.seen) {
+                    k.skipUntil = -1;
                 }
             }
+        }
+        // Every mob of a wave another player has is theirs.
+        for (Frame.Mob m : f.mobs) {
+            Known k = waveMob.get(m.id);
+            m.contested |= k != null && (k.contestedWave || k.reserved);
         }
         for (Known k : chests) {
             k.waveLeft = 0;
@@ -237,13 +312,41 @@ public final class Memory {
                 // Its wave's mobs all dead: with no hologram to say so, the chest is clicked to claim it.
                 k.waveAt = -1;
                 if (noHolo && k.state == Frame.ACTIVE) {
-                    k.state = Frame.CLAIMABLE;
-                    k.tick = t;
-                    k.claimTicks = 0;
-                    k.guessed = true;
+                    if (k.contestedWave || k.reserved) {
+                        // Another player's wave: they claim it, the chest waits for its next one.
+                        claimedGuess(k, t);
+                        k.contestedWave = false;
+                    } else {
+                        k.state = Frame.CLAIMABLE;
+                        k.tick = t;
+                        k.claimTicks = 0;
+                        k.guessed = true;
+                    }
                 }
             }
         }
+    }
+
+    /** Another player within 6 blocks of the mob. */
+    private static boolean rivalNear(Frame f, Frame.Mob m) {
+        for (double[] r : f.rivals) {
+            double dx = r[0] - m.x, dy = r[1] - m.y, dz = r[2] - m.z;
+            if (dx * dx + dy * dy + dz * dz <= 36.0) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /** Another player within 12 blocks across (and four up or down) of the chest. */
+    private static boolean rivalNearChest(Frame f, Known k) {
+        for (double[] r : f.rivals) {
+            double dx = r[0] - k.cx(), dz = r[2] - k.cz();
+            if (Math.abs(r[1] - k.y) <= 4.0 && dx * dx + dz * dz <= 144.0) {
+                return true;
+            }
+        }
+        return false;
     }
 
     /** A guessed claim done (clicked a while): the wait to the next wave, as long as the hologram said before, else a guess. */
@@ -251,6 +354,7 @@ public final class Memory {
         k.state = Frame.COOLDOWN;
         k.secs = (k.cdSecs > 0 ? k.cdSecs : 30) << Math.min(k.idleWaits, 4);
         k.tick = t;
+        k.countdownAt = t;
         k.claimTicks = 0;
         k.guessed = true;
     }
@@ -262,7 +366,8 @@ public final class Memory {
             return 999.0;
         }
         if (k.state == Frame.COOLDOWN) {
-            return Math.max(k.secs - (now - k.tick) / 20.0, 0.0);
+            long from = k.countdownAt >= 0 ? k.countdownAt : k.tick;
+            return Math.max(k.secs - (now - from) / 20.0, 0.0);
         }
         return 0.0;
     }

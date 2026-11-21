@@ -19,10 +19,9 @@ import chestai.core.Pilot;
  * group and the player sprints straight at it without swinging; with one
  * in reach it is aimed at and hit while the player keeps pushing into the
  * group.</li>
- * <li>Chests: one goal is picked (a claim first, then a wave that can be
- * started, then the one that comes soonest) and kept unless another is
- * clearly better; with a second chest close by the player stands between
- * them so that both waves come. The way there is planned through the
+ * <li>Chests: one goal is picked (a claim first, then a wave of its own on,
+ * then one ready or counting down, the soonest there) and kept unless
+ * another is clearly better; none another player has. The way there is planned through the
  * blocks (round walls, houses, trees, up and down hills, through water)
  * and walked facing forward at a sprint; far over open ground a Punch
  * arrow shot up carries the player along.</li>
@@ -43,8 +42,8 @@ final class Coach {
     private static final double LOCK_R = 40.0;
     /** Reach of the sword, from the eyes to the mob's box. */
     private static final double REACH = 3.0;
-    /** Two chests this close: stand between them, so that both waves come. */
-    private static final double PAIR_R = 22.0;
+    /** How much sooner (in seconds) another chest of the same priority must be to be gone for instead. */
+    private static final double GOAL_SWITCH_MARGIN = 0.75;
     /** Ticks between two potions. */
     private static final int POT_GAP = 22;
     /** The Punch boost: from this far, the view this high, the bow drawn this many ticks. */
@@ -58,6 +57,16 @@ final class Coach {
     private static final int BOOST_DRAW = Integer.getInteger("chestai.boost.draw", 5);
     /** In a fight with a mob in reach: jump (blows on the way down are critical), and walk (no sprint knockback). */
     private boolean fightJump, fightWalk;
+    /**
+     * Pushing at a mob without getting anywhere (slowness, a block under the feet the way does not
+     * show): after this many ticks on the spot, a sprint jump forward, at most every RECOVERY_JUMP_GAP ticks.
+     */
+    private static final int STALLED_COMBAT_TICKS = 8;
+    private static final int RECOVERY_JUMP_GAP = 13;
+    private int stalledCombatTicks;
+    private boolean requestedCombatMove;
+    private double lastCombatX, lastCombatZ;
+    private long lastRecoveryJump = -1000;
     /**
      * When the last hits came (not its own arrow), and whether they come often (three in three
      * seconds: an area blow, arrows one after another): then on the ground and sprinting, as
@@ -94,8 +103,21 @@ final class Coach {
      * off it, keeping the view on the mob, so a knock does not throw the player in. NaN when not.
      */
     private double rimX = Double.NaN, rimZ;
-    /** Clicks on a chest to claim it (with nothing to say it was claimed), and since when waiting at one. */
-    private int claimClicks;
+    /**
+     * The fight is by a drop (the player or the mob on its rim), and a blow from here would knock
+     * the mob off it: no blow until the player is round on a spot that knocks it back in.
+     */
+    private boolean edgeFight, avoidOutwardHit;
+    /** With a mob up where the player is, those more than this far below are left for later. */
+    private static final double MAX_UPPER_DROP = 2.5;
+    /**
+     * A claim click at most every CLAIM_RETRY_TICKS ticks; a guessed claim taken as done after
+     * GUESS_CLAIM_ATTEMPTS clicks and CLAIM_CONFIRM_TICKS ticks since the last.
+     */
+    private static final int CLAIM_RETRY_TICKS = 8;
+    private static final int GUESS_CLAIM_ATTEMPTS = 4;
+    private static final int CLAIM_CONFIRM_TICKS = 12;
+    /** Since when waiting at a chest. */
     private long waitSince = -1;
     private double apprBest = 1e9;
     private long apprAt = -1000, apprLast = -1000;
@@ -171,7 +193,11 @@ final class Coach {
     private static final boolean DEAD_END = !"false".equals(System.getProperty("chestai.deadend"));
     private int deadEnds;
     private long deadAt = -10000, pearlAt = -10000, pearlUntil = -1;
+    /** A chest at least this far across is gone to by a pearl, when one lands near it. */
+    private static final double CHEST_PEARL_DISTANCE = 32.0;
     private double pearlYaw, pearlPitch;
+    /** Ticks the pearl thrown flies, by where it was worked out to land. */
+    private int pearlFlightTicks;
     private boolean pearlThrown;
     /** Never quite still: a short tap of a side key now and then (an anti-AFK), out exploring with nothing to do. */
     private int lastMode = NONE, tapDir = 1;
@@ -181,6 +207,84 @@ final class Coach {
     Coach(Settings s, Planner planner) {
         this.s = s;
         this.planner = planner;
+    }
+
+    /**
+     * The mob for SilentAim this tick: the one fought, aimed at, with the sword in the hand and
+     * nothing else for the right button; -1 for none (healing, a pearl, a claim, a blow that would
+     * knock it off a drop).
+     */
+    int silentTarget(Pilot.Keys k) {
+        if (mode != FIGHT || target < 0 || !aimSet || avoidOutwardHit || heal != HEAL_NONE || k.slot != Pilot.SWORD || k.useHeld
+                || k.throwIt || k.claim) {
+            return -1;
+        }
+        return target;
+    }
+
+    /**
+     * The player turns the view while SilentAim fights: the keys walk to where the agent was going,
+     * whichever way the player now looks (no sprint backwards).
+     */
+    void steerWhileLooking(Frame f, Pilot.Keys k) {
+        if (k.forward <= 0 || rimX == rimX) {
+            return;
+        }
+        double a = Math.toRadians(yawTo(f, tx, tz));
+        double fw = Math.cos(a), side = -Math.sin(a);
+        k.forward = fw > 0.35 ? 1 : (fw < -0.35 ? -1 : 0);
+        k.strafe = side > 0.35 ? 1 : (side < -0.35 ? -1 : 0);
+        k.sprint = k.sprint && k.forward > 0;
+    }
+
+    /**
+     * The last word on the keys in a fight: by a drop no sprint and no jump; stalled against a
+     * mob (or deep in slowness) a sprint jump forward where the ground there holds; and no step
+     * at all where the ground ahead does not let the player walk straight.
+     */
+    void limitCombatMovement(Frame f, Pilot.Keys k) {
+        boolean moving = k.forward != 0 || k.strafe != 0;
+        boolean combatMove = (mode == FIGHT || mode == APPROACH) && aimSet && move && moving;
+        stalledCombatTicks = combatMove && requestedCombatMove && f.onGround && hd(f.x, f.z, lastCombatX, lastCombatZ) < 0.035 ? stalledCombatTicks + 1 : 0;
+        requestedCombatMove = combatMove;
+        lastCombatX = f.x;
+        lastCombatZ = f.z;
+        if ((mode != FIGHT && mode != APPROACH && mode != GUARD) || !f.onGround || !moving || inWater(f)) {
+            return;
+        }
+        int x = (int) Math.floor(f.x), y = (int) Math.floor(f.y + 0.01), z = (int) Math.floor(f.z);
+        boolean edge = edgeFight || planner.brink(x, y, z);
+        double yr = Math.toRadians(f.yaw + k.dyaw);
+        if (edge) {
+            k.sprint = false;
+            k.jump = false;
+        } else if (combatMove && heal == HEAL_NONE && !k.useHeld && !k.throwIt && f.food > 6
+                && (f.slowAmp >= 6 || stalledCombatTicks >= STALLED_COMBAT_TICKS) && f.tick - lastRecoveryJump >= RECOVERY_JUMP_GAP
+                && Math.abs(wrap(yawTo(f, tx, tz) - k.dyaw)) <= 18.0 && planner.open(x, y + 2, z) && recoveryFooting(f, yr, y)) {
+            k.forward = 1;
+            k.strafe = 0;
+            k.sprint = true;
+            k.jump = true;
+            lastRecoveryJump = f.tick;
+        }
+        // Where the keys take the player in the next tick or so.
+        double mx = -Math.sin(yr) * k.forward + Math.cos(yr) * k.strafe;
+        double mz = Math.cos(yr) * k.forward + Math.sin(yr) * k.strafe;
+        double scale = (k.sprint ? 1.05 : 0.75) / Math.hypot(mx, mz);
+        if (!planner.straight(f.x, f.y, f.z, f.x + mx * scale, f.z + mz * scale)) {
+            k.forward = 0;
+            k.strafe = 0;
+            k.sprint = false;
+            k.jump = false;
+        }
+    }
+
+    /** Whether a sprint jump along yr comes down on ground to stand on (at y or one up), with head room, off any rim. */
+    private boolean recoveryFooting(Frame f, double yr, int y) {
+        double ax = f.x - Math.sin(yr) * 1.35, az = f.z + Math.cos(yr) * 1.35;
+        int x = (int) Math.floor(ax), z = (int) Math.floor(az);
+        int ly = planner.stand(x, y, z) ? y : y + 1;
+        return planner.stand(x, ly, z) && planner.open(x, ly + 2, z) && !planner.brink(x, ly, z) && planner.straight(f.x, f.y, f.z, ax, az);
     }
 
     private static double wrap(double a) {
@@ -277,46 +381,53 @@ final class Coach {
         return new double[] {x / n, y / n, z / n};
     }
 
-    /** Seconds to a chest's next wave, by memory. */
-    private static double est(Memory mem, int ci, long now) {
-        return mem.estSecs(ci, now);
-    }
-
-    /** How good a chest is to go to now: lower is better. */
+    /**
+     * How soon (in seconds) a chest can be farmed if gone to now: the way there (up and down
+     * counting double), or its countdown if that is longer; lower is better. Infinite for one
+     * that is not to be gone to.
+     */
     private double score(Frame f, Memory mem, int ci) {
         Memory.Known k = mem.chests.get(ci);
         if (outOfHeals && !(k.seen && k.state == Frame.CLAIMABLE)) {
             // Down to the last apples and potions: no new wave (one still to claim, yes).
-            return 1e9;
+            return Double.POSITIVE_INFINITY;
         }
-        if (f.tick < k.skipUntil) {
-            // Tried long and not claimed (no chest block to click, walled in): another for now.
-            return 1e9;
-        }
-        for (double[] r : f.rivals) {
-            if (hd(r[0], r[2], k.cx(), k.cz()) <= 14.0) {
-                // Someone else's to farm.
-                return 1e9;
-            }
+        if (k.contestedWave || k.reserved || f.tick < k.skipUntil) {
+            // Someone else's to farm, or tried long and not claimed (no chest block to click, walled in): another for now.
+            return Double.POSITIVE_INFINITY;
         }
         double d = hd(k.cx(), k.cz(), f.x, f.z);
-        double eta = d / 5.6;
-        if (!k.seen) {
-            return 150.0 + d * 0.5;
+        double eta = Math.hypot(d, (k.y - f.y) * 2.0) / 5.6;
+        if (k.seen && k.state == Frame.COOLDOWN) {
+            return Math.max(mem.estSecs(ci, f.tick), eta) + eta * 0.1;
         }
+        return eta;
+    }
+
+    /**
+     * Which chests come first (lower first): a claim (its hologram read lately, or a guess of the
+     * last half minute), then a wave of its own on near by, then one ready or counting down as its
+     * hologram says lately; the rest (unseen, or not read for long) last.
+     */
+    private static int goalPriority(Frame f, Memory.Known k, double secs) {
+        if (!k.seen) {
+            return 3;
+        }
+        boolean fresh = f.tick - k.holoTick <= Memory.HOLO_STALE;
         switch (k.state) {
             case Frame.CLAIMABLE:
-                return d * 0.1;
-            case Frame.READY:
-                return 40.0 + d * 0.3;
+                return fresh || (k.guessed && f.tick - k.tick <= 600) ? 0 : 3;
             case Frame.ACTIVE:
-                return d < 40.0 ? 30.0 + d * 0.3 : 1e5;
+                return k.waveLeft > 0 && f.tick - k.tick < 200 && hd(k.cx(), k.cz(), f.x, f.z) < LOCK_R ? 1 : 3;
+            case Frame.READY:
+                return fresh ? 2 : 3;
+            case Frame.COOLDOWN:
             default:
-                return 80.0 + Math.max(est(mem, ci, f.tick) - eta, 0.0) + d * 0.2;
+                return fresh || secs > 0 ? 2 : 3;
         }
     }
 
-    private static String why(Memory.Known k) {
+    private static String why(Memory.Known k, double secs) {
         if (!k.seen) {
             return "sin ver";
         }
@@ -328,30 +439,33 @@ final class Coach {
             case Frame.ACTIVE:
                 return "oleada";
             default:
-                return k.secs + "s";
+                return (int) Math.ceil(secs) + "s";
         }
     }
 
     /** Picks the chest to go for, keeping the one picked unless another is clearly better. */
     private int chooseGoal(Frame f, Memory mem) {
-        int cur = hasGoal ? mem.near(goalX, goalY, goalZ, 0.5) : -1;
-        if (cur >= 0 && f.tick - goalAt < 10) {
+        int cur = hasGoal ? mem.indexOfChest(goalX, goalY, goalZ) : -1;
+        if (cur >= 0 && f.tick - goalAt < 5 && Double.isFinite(score(f, mem, cur))) {
             return cur;
         }
+        // The first by priority, the soonest of those.
         int best = -1;
-        double bs = 1e8;
+        int bp = Integer.MAX_VALUE;
+        double bs = Double.POSITIVE_INFINITY;
         for (int i = 0; i < mem.chests.size(); i++) {
             double sc = score(f, mem, i);
-            if (sc < bs) {
+            int pr = goalPriority(f, mem.chests.get(i), mem.estSecs(i, f.tick));
+            if (Double.isFinite(sc) && (pr < bp || (pr == bp && sc < bs))) {
                 bs = sc;
+                bp = pr;
                 best = i;
             }
         }
-        if (cur >= 0) {
+        if (best >= 0 && cur >= 0 && goalPriority(f, mem.chests.get(cur), mem.estSecs(cur, f.tick)) == bp) {
             double cs = score(f, mem, cur);
-            if (cs < 1e5 && cs <= bs * 1.2 + 8.0) {
+            if (cs <= bs + GOAL_SWITCH_MARGIN) {
                 best = cur;
-                bs = cs;
             }
         }
         goalAt = f.tick;
@@ -359,33 +473,17 @@ final class Coach {
             hasGoal = false;
             return -1;
         }
+        if (best != cur) {
+            waitSince = -1;
+        }
         Memory.Known k = mem.chests.get(best);
         hasGoal = true;
         goalX = k.x;
         goalY = k.y;
         goalZ = k.z;
-        goalWhy = why(k);
+        goalWhy = why(k, mem.estSecs(best, f.tick));
         standX = k.cx();
         standZ = k.cz();
-        if (k.seen && k.state != Frame.CLAIMABLE) {
-            // A second chest close by whose wave comes about as soon: stand between the two.
-            double bestPair = 1e9;
-            for (int j = 0; j < mem.chests.size(); j++) {
-                Memory.Known o = mem.chests.get(j);
-                if (j == best || !o.seen) {
-                    continue;
-                }
-                double dd = hd(o.cx(), o.cz(), k.cx(), k.cz());
-                boolean along = o.state == Frame.READY || o.state == Frame.ACTIVE
-                    || (o.state == Frame.COOLDOWN && Math.abs(est(mem, j, f.tick) - est(mem, best, f.tick)) < 8.0);
-                if (dd > 2.0 && dd < PAIR_R && along && dd < bestPair) {
-                    bestPair = dd;
-                    standX = (k.cx() + o.cx()) / 2.0;
-                    standZ = (k.cz() + o.cz()) / 2.0;
-                    goalWhy = why(k) + "+par";
-                }
-            }
-        }
         return best;
     }
 
@@ -401,7 +499,8 @@ final class Coach {
         for (int i = 0; i < mem.chests.size(); i++) {
             Memory.Known k = mem.chests.get(i);
             double d = hd(k.cx(), k.cz(), f.x, f.z);
-            if (!k.seen || k.state != Frame.ACTIVE || f.tick - k.tick >= 200 || d >= LOCK_R || f.tick < k.skipUntil) {
+            if (k.contestedWave || k.reserved || !k.seen || k.state != Frame.ACTIVE || k.waveLeft == 0 || f.tick - k.tick >= 200 || d >= LOCK_R
+                    || f.tick < k.skipUntil) {
                 continue;
             }
             boolean sooner = lock < 0 || k.activeSeenAt < first - 20;
@@ -430,6 +529,9 @@ final class Coach {
         objective(gx, gy, gz, f.tick);
         swim = inWater(f);
         double d = hd(gx, gz, f.x, f.z);
+        // After a mob more than a step up or down: never straight at it, only along a way that gets there.
+        boolean approach = mode == APPROACH;
+        boolean steep = Math.abs(gy - f.y) > MAX_UPPER_DROP;
         // Stuck: the way is planned again from here.
         if (hd(lastX, lastZ, f.x, f.z) > 1.0) {
             lastX = f.x;
@@ -455,6 +557,7 @@ final class Coach {
             stuckZ = f.z;
             stuckAt = f.tick;
             path = null;
+            planner.clear();
             unstickUntil = f.tick + 10;
         }
         if (f.tick < unstickUntil) {
@@ -467,7 +570,7 @@ final class Coach {
             }
             unstickUntil = -1;
         }
-        if (d < 7.0 && planner.straight(f.x, f.y, f.z, gx, gz)) {
+        if (d < 7.0 && (!approach || !steep) && planner.straight(f.x, f.y, f.z, gx, gz)) {
             path = null;
             aim(gx, eyeY(f) - 0.4, gz);
             jumpUp = (f.collidedH && f.onGround) || swim;
@@ -486,7 +589,7 @@ final class Coach {
         }
         int[] endN = path == null ? null : path.get(path.size() - 1);
         boolean atEnd = partial && (endN == null || hd(endN[0] + 0.5, endN[2] + 0.5, f.x, f.z) < 1.6);
-        boolean away = hd(gx, gz, f.x, f.z) > tol + 2.5 || gy - f.y > 2.0;
+        boolean away = d > tol + 2.5 || gy - f.y > 2.0 || (approach && steep);
         if (atEnd && away) {
             if (endSince < 0) {
                 endSince = f.tick;
@@ -508,6 +611,7 @@ final class Coach {
                     pathAt = f.tick;
                     endSince = -1;
                     deadEndNow = false;
+                    atEnd = false;
                 }
             }
             if (deadEndNow && mode != APPROACH) {
@@ -515,6 +619,11 @@ final class Coach {
                 deadEnds = 2;
                 deadAt = f.tick;
             }
+        }
+        if (approach && (path == null || (atEnd && away))) {
+            // No way to the mob on foot: it is not walked at.
+            move = false;
+            return;
         }
         if (path == null) {
             aim(gx, eyeY(f) - 0.4, gz);
@@ -555,8 +664,9 @@ final class Coach {
 
     /**
      * Where an ender pearl thrown with this yaw and pitch comes down: the
-     * spot it lands in front of, or null if it flies on or hits nothing to
-     * stand on. As the game moves it: 1.5 blocks a tick, 1% drag, 0.03 down.
+     * spot it lands in front of and the ticks it flies, or null if it flies on,
+     * into blocks not loaded, or hits nothing to stand on. As the game moves
+     * it: 1.5 blocks a tick, 1% drag, 0.03 down.
      */
     private int[] pearlLands(Frame f, double yaw, double pitch) {
         double yr = Math.toRadians(yaw), pr = Math.toRadians(pitch);
@@ -567,7 +677,7 @@ final class Coach {
             for (int s = 1; s <= 6; s++) {
                 double px = x + mx * s / 6.0, py = y + my * s / 6.0, pz = z + mz * s / 6.0;
                 int bx = (int) Math.floor(px), by = (int) Math.floor(py), bz = (int) Math.floor(pz);
-                if (by < 0 || by > 255) {
+                if (by < 0 || by > 255 || !planner.loaded(bx, bz)) {
                     return null;
                 }
                 if (planner.open(bx, by, bz)) {
@@ -580,7 +690,7 @@ final class Coach {
                 // Down on top of something, or against its side with ground under: a spot to stand.
                 for (int dy = 0; dy >= -2; dy--) {
                     if (planner.stand(air[0], air[1] + dy, air[2])) {
-                        return new int[] {air[0], air[1] + dy, air[2]};
+                        return new int[] {air[0], air[1] + dy, air[2], i + 1};
                     }
                 }
                 return null;
@@ -595,32 +705,95 @@ final class Coach {
         return null;
     }
 
-    private double pearlScore(double x, double y, double z) {
-        return hd(x, z, pgx, pgz) + 1.2 * Math.max(0.0, pgy - y) + 0.3 * Math.max(0.0, y - pgy);
+    private static double pearlScore(double x, double y, double z, double gx, double gy, double gz) {
+        return hd(x, z, gx, gz) + 1.2 * Math.max(0.0, gy - y) + 0.3 * Math.max(0.0, y - gy);
     }
 
-    /** {yaw, pitch} of a pearl that lands clearly nearer the goal of the way, out of the hole the player is in, or null. */
-    private double[] pearlShot(Frame f) {
+    /**
+     * {yaw, pitch, flight ticks} of a pearl that lands clearly nearer (gx, gy, gz), safely: out of
+     * the hole the player is in (the goal of the way), or on the way to a far chest ({@code chest}:
+     * twelve blocks nearer at least, within 30 degrees of it, down too); or null.
+     */
+    private double[] pearlShot(Frame f, double gx, double gy, double gz, boolean chest) {
         planner.clear();
-        double toGoal = Math.toDegrees(Math.atan2(-(pgx - f.x), pgz - f.z));
+        double toGoal = Math.toDegrees(Math.atan2(-(gx - f.x), gz - f.z));
         // Below the goal counts more than across from it: out of a pit straight up is a way out.
-        double best = pearlScore(f.x, f.y, f.z) - 3.0;
+        double best = pearlScore(f.x, f.y, f.z, gx, gy, gz) - (chest ? 12.0 : 3.0);
         double[] out = null;
         int y0 = (int) Math.floor(f.y + 0.01);
-        for (int dyaw = -90; dyaw <= 90; dyaw += 15) {
+        int spread = chest ? 30 : 90;
+        for (int dyaw = -spread; dyaw <= spread; dyaw += 15) {
             for (int pitch = -75; pitch <= 25; pitch += 2) {
                 int[] l = pearlLands(f, toGoal + dyaw, pitch);
-                if (l == null || hd(l[0] + 0.5, l[2] + 0.5, f.x, f.z) < 3.0 || l[1] < y0 - 1 || planner.water(l[0], l[1], l[2])) {
+                if (l == null || hd(l[0] + 0.5, l[2] + 0.5, f.x, f.z) < 3.0 || (!chest && l[1] < y0 - 1)) {
                     continue;
                 }
-                double d = pearlScore(l[0] + 0.5, l[1], l[2] + 0.5);
-                if (d < best) {
+                double d = pearlScore(l[0] + 0.5, l[1], l[2] + 0.5, gx, gy, gz);
+                if (d < best && safePearlLanding(f, l)) {
                     best = d;
-                    out = new double[] {toGoal + dyaw, pitch};
+                    out = new double[] {toGoal + dyaw, pitch, l[3]};
                 }
             }
         }
         return out;
+    }
+
+    /** A landing out of water, off any rim, with no other player within twelve blocks (and four up or down). */
+    private boolean safePearlLanding(Frame f, int[] l) {
+        int x = l[0], y = l[1], z = l[2];
+        if (planner.water(x, y, z) || planner.water(x, y - 1, z) || planner.brink(x, y, z)) {
+            return false;
+        }
+        for (double[] r : f.rivals) {
+            if (Math.abs(r[1] - y) <= 4.0 && hd(r[0], r[2], x + 0.5, z + 0.5) <= 12.0) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    /** A pearl to throw, from {@link #pearlShot}: aimed at for up to two and a half seconds. */
+    private void startPearl(Frame f, double[] shot) {
+        pearlYaw = shot[0];
+        pearlPitch = shot[1];
+        pearlFlightTicks = (int) shot[2];
+        pearlUntil = f.tick + 50;
+        pearlThrown = false;
+    }
+
+    /** The view onto the pearl's yaw and pitch, and the pearl out once on them. */
+    private void aimPearl(Frame f, int[] a) {
+        mode = ESCAPE;
+        boosting = false;
+        if (pearlThrown) {
+            return;
+        }
+        double yr = Math.toRadians(pearlYaw);
+        aim(f.x - Math.sin(yr) * 30.0, eyeY(f), f.z + Math.cos(yr) * 30.0);
+        pitchAbs = pearlPitch;
+        if (Math.abs(yawTo(f, tx, tz)) < 1.5 && Math.abs(f.pitch - pearlPitch) < 1.5) {
+            a[8] = 1 + Pilot.PEARL;
+        }
+    }
+
+    /**
+     * On the way to a seen chest far across ({@code CHEST_PEARL_DISTANCE} or more), on the ground,
+     * with a pearl that may be thrown, not one in the last eight seconds: a pearl that lands near
+     * it, if there is one (looked for every two seconds at most). True when one is being thrown.
+     */
+    private boolean tryChestPearl(Frame f, Memory.Known k, boolean canPearl, int[] a) {
+        if (!k.seen || !canPearl || !f.onGround || f.headInWater || f.tick - pearlAt <= 160 || f.tick - pearlTryAt < 40
+                || hd(f.x, f.z, k.cx(), k.cz()) < CHEST_PEARL_DISTANCE) {
+            return false;
+        }
+        pearlTryAt = f.tick;
+        double[] shot = pearlShot(f, k.cx(), k.y, k.cz(), true);
+        if (shot == null) {
+            return false;
+        }
+        startPearl(f, shot);
+        aimPearl(f, a);
+        return true;
     }
 
     /** Points of a chest's box a click can be aimed at: its middle, its lid, and in from its corners. */
@@ -712,8 +885,8 @@ final class Coach {
 
     /** A drop of more than two blocks (or water) just ahead, where the player looks: no walking on blindly into it. */
     /**
-     * The mobs to fight: with a wave on, those by its chest (twelve blocks: its archers too), or none
-     * while they are out of sight and the chest is far (back to it first); else all close by.
+     * The mobs to fight: with a wave on, those by its chest (twelve blocks: its archers too), none
+     * of another player's, and with one up where the player is none far below; else all close by.
      */
     private List<Frame.Mob> focus(Frame f, Memory mem, int lock, List<Frame.Mob> cand, long t) {
         if (lock < 0) {
@@ -721,11 +894,15 @@ final class Coach {
         }
         Memory.Known k = mem.chests.get(lock);
         List<Frame.Mob> own = new ArrayList<Frame.Mob>();
+        boolean upper = hasUpperMob(f, cand);
         for (Frame.Mob m : f.mobs) {
+            if (m.contested || (upper && m.y < f.y - MAX_UPPER_DROP)) {
+                continue;
+            }
             Long gone = unreach.get(m.id), nohit = unhit.get(m.id);
             // By its chest, or one that came out of it wherever it is now (knocked away, after the player).
             boolean of = (hd(m.x, m.z, k.cx(), k.cz()) < 12.0 && Math.abs(m.y - k.y) <= 8.0)
-                || (mem.waveMobOf(m.id, k) && hd(m.x, m.z, f.x, f.z) < 30.0 && Math.abs(m.y - f.y) <= 10.0);
+                || (mem.waveMobOf(m.id, k) && hd(m.x, m.z, f.x, f.z) < 30.0);
             if (of && (gone == null || gone <= t || reach(f, m) <= REACH) && (nohit == null || nohit <= t)) {
                 own.add(m);
             }
@@ -736,7 +913,17 @@ final class Coach {
             }
             return own;
         }
-        return hd(k.cx(), k.cz(), f.x, f.z) > 12.0 ? own : cand;
+        return cand;
+    }
+
+    /** Whether one of these mobs is up where the player is (not more than MAX_UPPER_DROP below), close by. */
+    private static boolean hasUpperMob(Frame f, List<Frame.Mob> c) {
+        for (Frame.Mob m : c) {
+            if (m.y >= f.y - MAX_UPPER_DROP && hd(m.x, m.z, f.x, f.z) <= FIGHT_R) {
+                return true;
+            }
+        }
+        return false;
     }
 
     /**
@@ -803,33 +990,58 @@ final class Coach {
         return new double[] {near, when};
     }
 
-    /** The nearest spot two blocks or less off a rim the player stands on, into rimX and rimZ (NaN if not on one). */
-    private void rim(Frame f) {
+    /** Whether a blow from (fromX, fromZ) knocks the mob over a drop: no ground under it a step or two on, down to two below. */
+    private boolean knocksTowardDrop(Frame.Mob m, double fromX, double fromZ) {
+        double dx = m.x - fromX, dz = m.z - fromZ;
+        double d = Math.hypot(dx, dz);
+        if (d < 0.05) {
+            return false;
+        }
+        int y = (int) Math.floor(m.y + 0.01);
+        for (double step = 0.7; step <= 1.4; step += 0.7) {
+            int x = (int) Math.floor(m.x + dx / d * step), z = (int) Math.floor(m.z + dz / d * step);
+            if (!planner.stand(x, y, z) && !planner.stand(x, y - 1, z) && !planner.stand(x, y - 2, z)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /**
+     * A fight by a drop, the player or the mob {@code m} on its rim: the nearest spot (two blocks
+     * or less, within reach of the mob, walked to straight) off the rim and from where a blow does
+     * not knock the mob over, into rimX and rimZ (NaN if none is better than here).
+     */
+    private void rim(Frame f, Frame.Mob m) {
         rimX = Double.NaN;
         if (!f.onGround || inWater(f)) {
             return;
         }
         int fx = (int) Math.floor(f.x), fy = (int) Math.floor(f.y + 0.01), fz = (int) Math.floor(f.z);
-        if (!planner.brink(fx, fy, fz)) {
+        int mx = (int) Math.floor(m.x), my = (int) Math.floor(m.y + 0.01), mz = (int) Math.floor(m.z);
+        boolean onRim = planner.brink(fx, fy, fz);
+        boolean mobOnRim = Math.abs(my - fy) <= 1 && planner.stand(mx, my, mz) && planner.brink(mx, my, mz);
+        edgeFight = onRim || mobOnRim;
+        boolean outward = mobOnRim && knocksTowardDrop(m, f.x, f.z);
+        if (!onRim && !outward) {
             return;
         }
-        double best = 1e9;
+        double best = (onRim ? 8.0 : 0.0) + (outward ? 20.0 : 0.0);
         for (int dx = -2; dx <= 2; dx++) {
             for (int dz = -2; dz <= 2; dz++) {
-                if (dx == 0 && dz == 0) {
+                int x = fx + dx, z = fz + dz;
+                double sx = x + 0.5, sz = z + 0.5;
+                double d = hd(f.x, f.z, sx, sz);
+                if (d <= 0.35 || hd(m.x, m.z, sx, sz) > 2.7 || !planner.stand(x, fy, z) || !planner.straight(f.x, f.y, f.z, sx, sz)) {
                     continue;
                 }
-                for (int dy : new int[] {0, 1, -1}) {
-                    int x = fx + dx, y = fy + dy, z = fz + dz;
-                    if (planner.stand(x, y, z) && !planner.brink(x, y, z)) {
-                        double d = dx * dx + dz * dz + Math.abs(dy);
-                        if (d < best) {
-                            best = d;
-                            rimX = x + 0.5;
-                            rimZ = z + 0.5;
-                        }
-                        break;
-                    }
+                boolean knocks = mobOnRim && knocksTowardDrop(m, sx, sz);
+                double sc = d + (planner.brink(x, fy, z) ? 8.0 : 0.0) + (knocks ? 20.0 : 0.0);
+                if (sc < best) {
+                    best = sc;
+                    rimX = sx;
+                    rimZ = sz;
+                    avoidOutwardHit = outward && !knocks;
                 }
             }
         }
@@ -1045,6 +1257,19 @@ final class Coach {
         // (A reserve kept for the wave on and the way out: the deaths came in the wave the last apples went in.)
         outOfHeals = HEAL_STOP && s.healStop && mostHeals > s.healKeep + 1 && f.gapples + f.potions <= s.healKeep;
         long t = f.tick;
+        // The chest gone for is no longer to be gone to (another player's now): the goal, the
+        // way and a pearl not thrown yet are dropped.
+        int goal = hasGoal ? mem.indexOfChest(goalX, goalY, goalZ) : -1;
+        if (goal >= 0 && !Double.isFinite(score(f, mem, goal))) {
+            hasGoal = false;
+            path = null;
+            deadEnds = 0;
+            boosting = false;
+            boostFrom = -1;
+            if (!pearlThrown) {
+                pearlUntil = -1;
+            }
+        }
         if (!boostJudged) {
             // Did the arrow carry the player? Two that did not: no boosts for a minute.
             boostTop = Math.max(boostTop, Math.sqrt(f.mx * f.mx + f.mz * f.mz));
@@ -1070,7 +1295,6 @@ final class Coach {
         a[8] = 0;
         if (mode != CLAIM) {
             claimSince = -1;
-            claimClicks = 0;
         }
         lastMode = mode;
         mode = NONE;
@@ -1084,6 +1308,8 @@ final class Coach {
         fightWalk = false;
         claimHop = false;
         rimX = Double.NaN;
+        edgeFight = false;
+        avoidOutwardHit = false;
         double hp = f.hp;
 
         int lock = waveLock(f, mem);
@@ -1092,6 +1318,10 @@ final class Coach {
         List<Frame.Mob> cand = new ArrayList<Frame.Mob>();
         int close = 0;
         for (Frame.Mob m : f.mobs) {
+            if (m.contested) {
+                // Another player's: theirs to fight.
+                continue;
+            }
             double d = hd(m.x, m.z, f.x, f.z);
             if (d < 8.0) {
                 close++;
@@ -1121,6 +1351,9 @@ final class Coach {
         coverOn = false;
         double sd = 1e9;
         for (Frame.Mob m : f.mobs) {
+            if (m.contested) {
+                continue;
+            }
             Long st = shotAt.get(m.id);
             double d = hd(m.x, m.z, f.x, f.z);
             if (st != null && t - st <= 80 && d < 30.0 && d < sd) {
@@ -1135,6 +1368,10 @@ final class Coach {
                 cand.add(shooter);
             }
         }
+        if (hasUpperMob(f, cand)) {
+            // One up where the player is: those far below are left for after (no jumping down to them).
+            cand.removeIf(m -> m.y < f.y - MAX_UPPER_DROP);
+        }
         boolean eating = pilot.using && pilot.slot == Pilot.GAPPLE;
         boolean drawing = pilot.using && pilot.slot == Pilot.BOW;
 
@@ -1148,7 +1385,7 @@ final class Coach {
         }
         boolean claimNear = false;
         for (Memory.Known k : mem.chests) {
-            claimNear |= k.seen && k.state == Frame.CLAIMABLE && hd(k.cx(), k.cz(), f.x, f.z) < 5.0;
+            claimNear |= !k.contestedWave && !k.reserved && k.seen && k.state == Frame.CLAIMABLE && hd(k.cx(), k.cz(), f.x, f.z) < 5.0;
         }
         boolean potNeed = havePot && !eating && t - lastPot > POT_GAP
             && ((hp <= s.potHp && (mem.sinceHurt < 100 || close > 0)) || hp <= s.potHp * 0.6);
@@ -1257,6 +1494,8 @@ final class Coach {
         for (Memory.Known k : mem.chests) {
             if (k.state != Frame.CLAIMABLE) {
                 k.claimTicks = 0;
+                k.claimAttempts = 0;
+                k.lastClaimAttempt = -1000;
             }
         }
 
@@ -1279,30 +1518,18 @@ final class Coach {
             && hp + f.absorption >= 12.0f && !pilot.using;
         if (pearlUntil < t && deadEnds >= 2 && t - pearlTryAt >= 40) {
             pearlTryAt = t;
-            double[] shot = pearlOk && t - pearlAt > 160 ? pearlShot(f) : null;
+            double[] shot = pearlOk && t - pearlAt > 160 ? pearlShot(f, pgx, pgy, pgz, false) : null;
             deadEnds = 0;
             if (shot != null) {
-                pearlYaw = shot[0];
-                pearlPitch = shot[1];
-                pearlUntil = t + 50;
-                pearlThrown = false;
+                startPearl(f, shot);
             } else {
                 // No pearl, or none that lands nearer: the goal is given up for now (below).
                 noPearlAt = t;
             }
         }
         if (pearlUntil >= t && heal == HEAL_NONE) {
-            // No way out on foot: an ender pearl to where the goal can be walked to.
-            mode = ESCAPE;
-            boosting = false;
-            if (!pearlThrown) {
-                double yr = Math.toRadians(pearlYaw);
-                aim(f.x - Math.sin(yr) * 30.0, eyeY(f), f.z + Math.cos(yr) * 30.0);
-                pitchAbs = pearlPitch;
-                if (Math.abs(yawTo(f, tx, tz)) < 1.5 && Math.abs(f.pitch - pearlPitch) < 1.5) {
-                    a[8] = 1 + Pilot.PEARL;
-                }
-            }
+            // No way out on foot (or a far chest): an ender pearl to where the goal can be walked to.
+            aimPearl(f, a);
         } else if (t < escapeUntil && dry != null && heal != HEAL_POTION) {
             mode = ESCAPE;
             boosting = false;
@@ -1345,6 +1572,8 @@ final class Coach {
             Frame.Mob tgt = null;
             double bs = 1e9, tgtY = Double.NaN;
             int melee = 0;
+            // One in reach that no blow gets to (a block, a hologram in the way): gone for closer.
+            boolean hidden = false;
             for (Frame.Mob m : cand) {
                 melee += m != shooter && hd(m.x, m.z, f.x, f.z) < 4.0 ? 1 : 0;
             }
@@ -1354,11 +1583,15 @@ final class Coach {
                     continue;
                 }
                 // One just hit takes no harm for half a second: another one meanwhile. One behind a
-                // block or tall grass, where a click would stop, only if there is no other.
+                // block, tall grass or a hologram, where a blow would stop, never.
                 double vy = seenAt(f, m);
-                // The first wave's own before the others; one shooting before one that is not.
-                double sc = r + Math.abs(yawTo(f, m.x, m.z)) / 30.0 + (m.hurtTime > 2 ? 2.0 : 0.0) + (m.id == target && m.hurtTime <= 2 ? -0.8 : 0.0)
-                    + (vy != vy ? 2.5 : 0.0) + (focus.contains(m) ? 0.0 : 2.0) + (m == shooter ? -1.0 : 0.0);
+                if (Double.isNaN(vy)) {
+                    hidden = true;
+                    continue;
+                }
+                // The first wave's own before the others; one shooting before one that is not; the one fought before a new one.
+                double sc = r + (m.hurtTime > 2 ? 2.0 : 0.0) + (m.id == target ? -1.2 : 0.0)
+                    + (focus.contains(m) ? 0.0 : 2.0) + (m == shooter ? -1.0 : 0.0);
                 if (sc < bs) {
                     bs = sc;
                     tgt = m;
@@ -1380,7 +1613,7 @@ final class Coach {
                     hitSeen = t;
                     hitVis = t;
                 }
-                if (tgt.hurtTime > 0 || (!s.hit && tgtY == tgtY)) {
+                if (tgt.hurtTime > 0 || tgtY == tgtY) {
                     hitSeen = t;
                 }
                 if (tgtY == tgtY) {
@@ -1399,20 +1632,8 @@ final class Coach {
                 double ax = tgt.x + tgt.mx * 2.0, az = tgt.z + tgt.mz * 2.0,
                     ay = tgtY == tgtY ? tgtY : tgt.kind == Frame.HORSEMAN ? tgt.y + 2.0 : tgt.y + Math.min(tgt.h, 2.6) * 0.45;
                 aim(ax, ay, az);
-                if (s.hit && heal == HEAL_NONE && !pilot.using) {
-                    // A click only with a mob under the crosshair that can take it (none spent on air).
-                    boolean ok = false;
-                    for (Frame.Mob m : f.mobs) {
-                        ok |= m.id == f.pickMob && m.hurtTime <= 2;
-                    }
-                    if (f.pickMob < 0 && tgtY == tgtY && Math.abs(yawTo(f, ax, az)) < 8.0 && Math.abs(pitchTo(f, ax, ay, az)) < 10.0) {
-                        ok = true;
-                    }
-                    if (ok) {
-                        a[6] = 1;
-                    }
-                }
-                rim(f);
+                // No click here: SilentAim hits (see silentTarget).
+                rim(f, tgt);
                 // Shot at: sprinting and strafing, not hopping on the spot.
                 fightJump = s.fightJump && !pressed && shooter == null && f.onGround && !inWater(f);
                 fightWalk = s.fightJump && !pressed && shooter == null && !Boolean.getBoolean("chestai.fight.sprint");
@@ -1442,8 +1663,11 @@ final class Coach {
                     apprBest = 1e9;
                     apprAt = t;
                 }
-                go(f, gc[0], gc[1], gc[2], 1.5);
-                aim(tx, gc[1] + 1.0, tz);
+                go(f, gc[0], gc[1], gc[2], hidden ? 0.8 : 1.5);
+                // The view up at the group only when walking straight at it.
+                if (aimSet && hd(tx, tz, gc[0], gc[2]) < 0.5) {
+                    aim(tx, gc[1] + 1.0, tz);
+                }
                 if (deadEndNow) {
                     // The way to them stops short (up a cliff, down a pit): left alone now, not in eight seconds.
                     for (Frame.Mob m : focus) {
@@ -1497,16 +1721,16 @@ final class Coach {
                 Memory.Known k = mem.chests.get(g);
                 double dc = hd(k.cx(), k.cz(), f.x, f.z);
                 double ds = hd(standX, standZ, f.x, f.z);
-                if (k.seen && k.state == Frame.CLAIMABLE && dc < 4.0) {
+                if (k.seen && k.state == Frame.CLAIMABLE && dc < 4.0 && Math.abs(k.y - f.y) <= 3.0) {
                     mode = CLAIM;
                     if (claimSince < 0) {
                         claimSince = t;
                     }
-                    if (k.guessed && k.claimTicks > 60 && claimClicks > 20) {
-                        // No hologram to say it was claimed: clicked on a while, taken as done (the next
+                    boolean guessDone = k.guessed && k.claimAttempts >= GUESS_CLAIM_ATTEMPTS;
+                    if (guessDone && t - k.lastClaimAttempt >= CLAIM_CONFIRM_TICKS) {
+                        // No hologram to say it was claimed: clicked on a few times, taken as done (the next
                         // wave as far off as its hologram said last time).
                         mem.claimedGuess(k, t);
-                        claimClicks = 0;
                         hasGoal = false;
                         goalAt = -1000;
                     }
@@ -1534,7 +1758,7 @@ final class Coach {
                         // have): a hop for another height, then another spot.
                         boolean aimed = Math.abs(yawTo(f, lid[0], lid[2])) < 2.5 && Math.abs(pitchTo(f, lid[0], lid[1], lid[2])) < 2.5;
                         claimMiss = f.pickChest >= 0 ? 0 : aimed ? claimMiss + 1 : claimMiss;
-                        claimHop = claimMiss > 15 && f.onGround;
+                        claimHop = claimMiss == 16 && f.onGround;
                         if (claimMiss > 40) {
                             badCells.add(here);
                             claimMiss = 0;
@@ -1548,17 +1772,19 @@ final class Coach {
                             go(f, k.cx(), k.y, k.cz(), 1.0);
                         }
                     }
-                    a[7] = heal == HEAL_NONE && !pilot.using ? 1 : a[7];
-                    if (a[7] == 1 && f.pickChest >= 0) {
-                        claimClicks++;
+                    // One click at a time, on this chest, a while apart (the server takes a moment to answer).
+                    if (heal == HEAL_NONE && !pilot.using && !guessDone && t >= k.skipUntil && f.pickChest == g && t - k.lastClaimAttempt >= CLAIM_RETRY_TICKS) {
+                        a[7] = 1;
                     }
                     if (tried > 240) {
                         claimSince = -1;
                     }
                 } else if (k.seen && k.state == Frame.CLAIMABLE) {
-                    mode = TRAVEL;
-                    go(f, k.cx(), k.y, k.cz(), 2.0);
-                    giveUp(k, t);
+                    if (!tryChestPearl(f, k, pearlOk, a)) {
+                        mode = TRAVEL;
+                        go(f, k.cx(), k.y, k.cz(), 2.0);
+                        giveUp(k, t);
+                    }
                 } else if (shooter != null && ds < 8.0 && shootBack(f, pilot, a, lay)) {
                     // An arrow back at one shooting from where it cannot be got to.
                     mode = WAIT;
@@ -1572,7 +1798,7 @@ final class Coach {
                     } else {
                         aim(k.cx(), k.cy() + 0.5, k.cz());
                     }
-                } else if (ds < (lastMode == WAIT ? 3.0 : 2.0)) {
+                } else if (ds < (lastMode == WAIT ? 3.0 : 2.0) && Math.abs(k.y - f.y) <= 2.5) {
                     mode = WAIT;
                     evade = shooter != null;
                     aim(k.cx(), k.cy() + 0.5, k.cz());
@@ -1587,7 +1813,7 @@ final class Coach {
                         hasGoal = false;
                         goalAt = -1000;
                     }
-                } else {
+                } else if (!tryChestPearl(f, k, pearlOk, a)) {
                     mode = k.seen ? TRAVEL : EXPLORE;
                     go(f, standX, k.y, standZ, 1.5);
                     giveUp(k, t);
@@ -1614,7 +1840,8 @@ final class Coach {
                 wanderAt = -10000;
             }
         }
-        if (!boosting && t != shootTick && heal == HEAL_NONE && !pilot.using && pilot.slot != Pilot.SWORD && lay.real[Pilot.SWORD] >= 0) {
+        // The sword back in the hand, unless another item was just picked (a pearl being thrown).
+        if (a[8] == 0 && !boosting && t != shootTick && heal == HEAL_NONE && !pilot.using && pilot.slot != Pilot.SWORD && lay.real[Pilot.SWORD] >= 0) {
             a[8] = 1 + Pilot.SWORD;
         }
         trapped(f);
@@ -1692,14 +1919,17 @@ final class Coach {
         }
     }
 
-    /** The height on a mob to aim at that a click from the eyes reaches (no block or tall grass between), or NaN. */
+    /** The height on a mob to aim at that a blow from the eyes reaches (no block or hologram between), or NaN; NaN for one out of sight. */
     private double seenAt(Frame f, Frame.Mob m) {
+        if (!m.inSight) {
+            return Double.NaN;
+        }
         double ex = f.x, ey = eyeY(f), ez = f.z;
         double base = m.kind == Frame.HORSEMAN ? m.y + 1.4 : m.y, h = m.kind == Frame.HORSEMAN ? 1.0 : Math.min(m.h, 2.6);
         double[] at = {0.45, 0.7, 0.25, 0.88};
         for (double q : at) {
             double y = base + h * q;
-            if (planner.see(ex, ey, ez, m.x, y, m.z, Integer.MIN_VALUE, 0, 0)) {
+            if (planner.combatSight(ex, ey, ez, m.x, y, m.z)) {
                 return y;
             }
         }
@@ -1758,7 +1988,7 @@ final class Coach {
             // Thrown: still until it lands, then a new way from where the player is.
             pearlThrown = true;
             pearlAt = f.tick;
-            pearlUntil = f.tick + 30;
+            pearlUntil = f.tick + Math.max(30, pearlFlightTicks + 6);
             path = null;
         }
         k.strafe = 0;
@@ -1775,7 +2005,17 @@ final class Coach {
             gain = 0.45 + rnd.nextDouble() * 0.25;
         }
         double ey = aimSet ? yawTo(f, tx, tz) : 0.0, ep = aimSet ? pitchTo(f, tx, ty, tz) : 0.0;
-        double g = mode == FIGHT ? 0.85 : gain, capY = Pilot.MAX_DYAW, capP = Pilot.MAX_DPITCH;
+        double g = gain, capY = Pilot.MAX_DYAW, capP = Pilot.MAX_DPITCH;
+        if (mode == FIGHT || mode == APPROACH) {
+            // At the mobs: quick and far in a tick.
+            g = 0.95;
+            capY = 36.0;
+            capP = 20.0;
+        } else if (mode == TRAVEL || mode == EXPLORE) {
+            g = 0.8;
+            capY = 26.0;
+            capP = 14.0;
+        }
         if (mode == WAIT && heal == HEAL_NONE) {
             // Waiting: a slow look over to the chest, then the view is left alone.
             g = 0.15;
@@ -1823,7 +2063,7 @@ final class Coach {
                 strafing = true;
             }
         }
-        if (!strafing && k.forward == 0 && !(mode == ESCAPE && pearlThrown) && !boosting && heal != HEAL_POTION) {
+        if (!strafing && k.forward == 0 && mode != WAIT && mode != CLAIM && !(mode == ESCAPE && pearlThrown) && !boosting && heal != HEAL_POTION) {
             // Never quite still (an anti-AFK): every second or two a side key is tapped for a few ticks,
             // to a side where the ground is safe; the view is not turned for it.
             if (f.tick >= tapNext) {
@@ -1840,12 +2080,12 @@ final class Coach {
         }
         if (mode == FIGHT && rimX == rimX && heal != HEAL_POTION) {
             // Off the rim, the view left on the mob: the keys toward the spot as seen from where it looks.
-            double yr = Math.toRadians(f.yaw);
+            double yr = Math.toRadians(f.yaw + k.dyaw);
             double dx = rimX - f.x, dz = rimZ - f.z, len = Math.max(Math.sqrt(dx * dx + dz * dz), 1e-6);
             double ahead = (-Math.sin(yr) * dx + Math.cos(yr) * dz) / len, left = (Math.cos(yr) * dx + Math.sin(yr) * dz) / len;
             k.forward = ahead > 0.35 ? 1 : ahead < -0.35 ? -1 : 0;
             k.strafe = left > 0.35 ? 1 : left < -0.35 ? -1 : 0;
-            k.sprint = k.forward > 0;
+            k.sprint = false;
             k.jump = false;
             return;
         }

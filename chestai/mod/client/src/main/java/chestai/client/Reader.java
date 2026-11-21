@@ -28,8 +28,10 @@ import net.minecraft.init.Blocks;
 import net.minecraft.block.Block;
 import net.minecraft.potion.Potion;
 import net.minecraft.potion.PotionEffect;
+import net.minecraft.util.AxisAlignedBB;
 import net.minecraft.util.BlockPos;
 import net.minecraft.util.MovingObjectPosition;
+import net.minecraft.util.Vec3;
 import net.minecraft.world.World;
 import chestai.core.Frame;
 import chestai.core.HoloText;
@@ -43,6 +45,13 @@ import chestai.core.Pilot;
  * holograms say, other players and projectiles.
  */
 final class Reader {
+    /** When each mob was last crossed by another player's arrow (entity id). */
+    private final Map<Integer, Long> foreignArrowAt = new HashMap<Integer, Long>();
+    /**
+     * The entities over the chests that are no mob of a wave (the lines of their holograms, and the
+     * living things the server names to show a chest's state): never fought, and in the way of a blow.
+     */
+    private final Map<Integer, Entity> chestMarkers = new HashMap<Integer, Entity>();
     /** How far under a hologram its chest may be. */
     private static final int HOLO_DEPTH = 8;
     /** -Dchestai.holo.off=true: no hologram read, as on a server that does not show them (for the arena). */
@@ -78,9 +87,6 @@ final class Reader {
         return o instanceof EntityPlayer || (o instanceof EntityLivingBase && !(o instanceof EntityArmorStand) && !o.isInvisible());
     }
 
-    private Reader() {
-    }
-
     private static int effect(EntityPlayerSP p, Potion potion) {
         PotionEffect e = p.getActivePotionEffect(potion);
         return e == null ? 0 : e.getDuration();
@@ -92,11 +98,25 @@ final class Reader {
         return b == Blocks.chest || b == Blocks.trapped_chest || b == Blocks.ender_chest || b == Blocks.skull;
     }
 
+    /** The block a chest is known by: of a double chest, the half to the west or north. */
+    static BlockPos chestAnchor(World w, BlockPos p) {
+        Block b = w.getBlockState(p).getBlock();
+        if (b instanceof net.minecraft.block.BlockChest) {
+            if (w.getBlockState(p.west()).getBlock() == b) {
+                return p.west();
+            }
+            if (w.getBlockState(p.north()).getBlock() == b) {
+                return p.north();
+            }
+        }
+        return p;
+    }
+
     /** The chest under a hologram stand, or null. */
     static BlockPos chestUnder(World w, Entity stand) {
         int x = (int) Math.floor(stand.posX), z = (int) Math.floor(stand.posZ);
         int y0 = (int) Math.floor(stand.posY);
-        for (int y = y0 + 1; y >= y0 - HOLO_DEPTH; y--) {
+        for (int y = y0; y >= y0 - HOLO_DEPTH; y--) {
             BlockPos p = new BlockPos(x, y, z);
             if (isChest(w, p)) {
                 return p;
@@ -129,13 +149,36 @@ final class Reader {
         return null;
     }
 
+    /** Never fought: silverfish, and invisible things (the server's own: hologram carriers, markers). */
+    static boolean excludedFromCombat(Entity e) {
+        return e instanceof net.minecraft.entity.monster.EntitySilverfish || e.isInvisible();
+    }
+
+    /** Whether this entity is one over a chest, of its hologram or its state. */
+    boolean isChestMarker(Entity e) {
+        return chestMarkers.get(e.getEntityId()) == e;
+    }
+
+    Iterable<Entity> chestMarkers() {
+        return chestMarkers.values();
+    }
+
+    /**
+     * A living thing the server keeps over a chest to show its state with its name (always shown,
+     * riding nothing and carrying nothing): a line of a hologram that is not a stand.
+     */
+    private static boolean visibleChestStatus(Entity e, Settings s) {
+        return e instanceof EntityLivingBase && !(e instanceof EntityPlayer) && e.getAlwaysRenderNameTag() && e.hasCustomName()
+            && e.ridingEntity == null && e.riddenByEntity == null && HoloText.isChestStatus(e.getCustomNameTag(), s.claimText);
+    }
+
     /** Kind of a mob of a wave, or -1 for an entity that is none. */
     static int kind(Entity e, EntityPlayerSP me, Settings s) {
         if (e instanceof EntityArmorStand || e instanceof EntityPlayer || !(e instanceof EntityLivingBase)) {
             return -1;
         }
         // Invisible ones are the server's own (hologram carriers, markers), never a wave's.
-        if (e.isInvisible()) {
+        if (excludedFromCombat(e)) {
             return -1;
         }
         String name = EntityList.getEntityString(e);
@@ -146,7 +189,7 @@ final class Reader {
             return Frame.RIDER;
         }
         if (e instanceof EntityHorse) {
-            return e.riddenByEntity instanceof EntityMob ? Frame.HORSEMAN : -1;
+            return e.riddenByEntity instanceof EntityMob && !excludedFromCombat(e.riddenByEntity) ? Frame.HORSEMAN : -1;
         }
         if (e instanceof EntitySkeleton && e.ridingEntity instanceof EntityHorse) {
             // Seen through its horse.
@@ -177,7 +220,7 @@ final class Reader {
      * The frame of this tick. Holograms over chests are matched to the
      * chests of {@code mem}, which learns of every chest that shows one.
      */
-    static Frame read(Minecraft mc, Memory mem, Pilot pilot, Layout lay, Settings s, long tick, double pingMs, int pearlCdLeft) {
+    Frame read(Minecraft mc, Memory mem, Pilot pilot, Layout lay, Settings s, long tick, double pingMs, int pearlCdLeft) {
         EntityPlayerSP me = mc.thePlayer;
         World w = mc.theWorld;
         Frame f = new Frame();
@@ -205,7 +248,11 @@ final class Reader {
         f.food = me.getFoodStats().getFoodLevel();
         f.saturation = me.getFoodStats().getSaturationLevel();
         f.regenLeft = effect(me, Potion.regeneration);
-        f.slowLeft = effect(me, Potion.moveSlowdown);
+        PotionEffect slow = me.getActivePotionEffect(Potion.moveSlowdown);
+        if (slow != null) {
+            f.slowLeft = slow.getDuration();
+            f.slowAmp = slow.getAmplifier();
+        }
         f.blindLeft = effect(me, Potion.blindness);
         f.gapples = lay.gapples;
         f.pearls = lay.pearls;
@@ -229,78 +276,88 @@ final class Reader {
         // A mob's own name (its health bar, a stand riding it or kept on it) is no
         // chest's: those move, ride something or sit on a living thing.
         List<Entity> all = new ArrayList<Entity>(w.loadedEntityList);
+        chestMarkers.values().removeIf(e -> w.getEntityByID(e.getEntityId()) != e);
         Entity hitE = mc.objectMouseOver != null && mc.objectMouseOver.typeOfHit == MovingObjectPosition.MovingObjectType.ENTITY ? mc.objectMouseOver.entityHit : null;
-        Map<Long, List<Entity>> cols = new HashMap<Long, List<Entity>>();
-        Map<Long, BlockPos> colChest = new HashMap<Long, BlockPos>();
+        Map<BlockPos, List<Entity>> cols = new HashMap<BlockPos, List<Entity>>();
         for (Entity e : all) {
-            if (!holoLine(e)) {
+            boolean line = holoLine(e);
+            if (!line && (HOLO_OFF || !visibleChestStatus(e, s))) {
                 continue;
             }
             double mx = e.posX - e.lastTickPosX, my = e.posY - e.lastTickPosY, mz = e.posZ - e.lastTickPosZ;
-            if (mx * mx + my * my + mz * mz > 1e-4 || onLiving(all, e)) {
+            // A line that says a chest's state is the chest's even on a living thing.
+            if (line && (mx * mx + my * my + mz * mz > 1e-4 || (!HoloText.isChestStatus(e.getCustomNameTag(), s.claimText) && onLiving(all, e)))) {
                 continue;
             }
             BlockPos c = chestUnder(w, e);
             if (c == null) {
                 continue;
             }
-            int ki = mem.near(c.getX(), c.getY(), c.getZ(), 2.5);
-            if (ki >= 0) {
-                Memory.Known k = mem.chests.get(ki);
-                c = new BlockPos(k.x, k.y, k.z);
+            // A named living thing only right over a real chest.
+            if (!line && (!isChest(w, c) || Math.abs(e.posX - c.getX() - 0.5) > 0.55 || Math.abs(e.posZ - c.getZ() - 0.5) > 0.55 || e.posY < c.getY())) {
+                continue;
             }
-            long key = c.toLong();
-            List<Entity> l = cols.get(key);
-            if (l == null) {
-                cols.put(key, l = new ArrayList<Entity>());
-                colChest.put(key, c);
+            if (!line) {
+                chestMarkers.put(e.getEntityId(), e);
             }
-            l.add(e);
+            cols.computeIfAbsent(chestAnchor(w, c), k -> new ArrayList<Entity>()).add(e);
         }
-        Map<Integer, List<Entity>> holo = new HashMap<Integer, List<Entity>>();
-        for (Map.Entry<Long, List<Entity>> en : cols.entrySet()) {
-            BlockPos c = colChest.get(en.getKey());
-            int ci = mem.near(c.getX(), c.getY(), c.getZ(), 2.5);
-            if (ci < 0) {
-                // A new chest only where the hologram says what a farm chest's says.
-                StringBuilder all2 = new StringBuilder();
-                List<String> lines = new ArrayList<String>();
-                for (Entity e : en.getValue()) {
-                    lines.add(e.getCustomNameTag());
-                    all2.append(' ').append(HoloText.plain(e.getCustomNameTag()).toLowerCase(Locale.ROOT));
+        for (Map.Entry<BlockPos, List<Entity>> en : cols.entrySet()) {
+            BlockPos c = en.getKey();
+            List<Entity> l = en.getValue();
+            // Top line first.
+            l.sort((a, b) -> Double.compare(b.posY, a.posY));
+            // What the stands say comes first; the named living things only when they say nothing.
+            List<String> lines = new ArrayList<String>();
+            List<String> standLines = new ArrayList<String>();
+            for (Entity e : l) {
+                lines.add(e.getCustomNameTag());
+                if (holoLine(e)) {
+                    standLines.add(e.getCustomNameTag());
                 }
-                if (HoloText.parse(lines, s.claimText, s.activeColors) == null || !looksLikeChest(all2.toString(), s.claimText)) {
+            }
+            int[] st = HoloText.parse(standLines, s.claimText, s.activeColors);
+            if (st == null) {
+                st = HoloText.parse(lines, s.claimText, s.activeColors);
+            }
+            if (st == null) {
+                continue;
+            }
+            int ci = mem.indexOfChest(c.getX(), c.getY(), c.getZ());
+            if (ci < 0) {
+                // A new chest only where there is a chest or the hologram says what a farm chest's says.
+                String text = HoloText.plain(String.join(" ", lines)).toLowerCase(Locale.ROOT);
+                if (!isChest(w, c) && !looksLikeChest(text, s.claimText)) {
                     continue;
                 }
                 ci = mem.chest(c.getX(), c.getY(), c.getZ());
             }
-            holo.put(ci, en.getValue());
-        }
-        for (Map.Entry<Integer, List<Entity>> en : holo.entrySet()) {
-            List<Entity> l = en.getValue();
-            // Top line first.
-            java.util.Collections.sort(l, new java.util.Comparator<Entity>() {
-                public int compare(Entity a, Entity b) {
-                    return Double.compare(b.posY, a.posY);
-                }
-            });
-            List<String> lines = new ArrayList<String>();
             for (Entity e : l) {
-                lines.add(e.getCustomNameTag());
-                if (e == hitE) {
-                    // "Click here to claim" is clicked on the hologram itself.
-                    f.pickChest = en.getKey();
-                }
+                chestMarkers.put(e.getEntityId(), e);
             }
-            int[] st = HoloText.parse(lines, s.claimText, s.activeColors);
-            if (st != null) {
-                Frame.Holo h = new Frame.Holo();
-                h.chest = en.getKey();
-                h.state = st[0];
-                h.secs = st[1];
-                f.holos.add(h);
+            Frame.Holo h = new Frame.Holo();
+            h.chest = ci;
+            h.state = st[0];
+            h.secs = st[1];
+            f.holos.add(h);
+            if (st[0] == Frame.CLAIMABLE && l.contains(hitE) && HoloText.isClaimLabel(hitE.getCustomNameTag(), s.claimText)) {
+                // "Click here to claim" is clicked on the hologram itself, on that line.
+                f.pickChest = ci;
             }
         }
+
+        // Other players' arrows in flight, for the mobs they hit.
+        List<EntityArrow> foreignArrows = new ArrayList<EntityArrow>();
+        for (Entity e : all) {
+            if (e instanceof EntityArrow) {
+                EntityArrow a = (EntityArrow) e;
+                if (a.shootingEntity instanceof EntityPlayer && a.shootingEntity != me
+                        && a.motionX * a.motionX + a.motionY * a.motionY + a.motionZ * a.motionZ > 0.01) {
+                    foreignArrows.add(a);
+                }
+            }
+        }
+        foreignArrowAt.values().removeIf(at -> tick - at > 5);
 
         // Mobs, projectiles, other players.
         Entity hit = mc.objectMouseOver != null && mc.objectMouseOver.typeOfHit == MovingObjectPosition.MovingObjectType.ENTITY ? mc.objectMouseOver.entityHit : null;
@@ -312,7 +369,7 @@ final class Reader {
                 continue;
             }
             if (e instanceof EntityPlayer) {
-                if (!e.isInvisible() && e.getDistanceToEntity(me) < 96.0f) {
+                if (!e.isInvisible() && e.isEntityAlive() && !((EntityPlayer) e).isSpectator() && e.getDistanceToEntity(me) < 96.0f) {
                     f.rivals.add(new double[] {e.posX, e.posY, e.posZ});
                 }
                 continue;
@@ -346,6 +403,9 @@ final class Reader {
                 f.projs.add(p);
                 continue;
             }
+            if (isChestMarker(e) || (e.riddenByEntity != null && isChestMarker(e.riddenByEntity))) {
+                continue;
+            }
             int k = kind(e, me, s);
             if (k < 0 || e.isDead) {
                 continue;
@@ -376,6 +436,12 @@ final class Reader {
             m.hp = life.getHealth() > 0.0f ? life.getHealth() : life.getMaxHealth();
             m.maxHp = life.getMaxHealth();
             m.hurtTime = Math.max(body.hurtTime, life.hurtTime);
+            m.inSight = me.canEntityBeSeen(life);
+            // Hit by another player: just hurt, with one of their arrows through it in the last ticks.
+            if (crossedByArrow(life, foreignArrows)) {
+                foreignArrowAt.put(m.id, tick);
+            }
+            m.hitByOtherPlayer = life.hurtTime >= 8 && foreignArrowAt.containsKey(m.id);
             m.mounted = k == Frame.RIDER && e.ridingEntity == me;
             if (k == Frame.HORSEMAN && e instanceof EntityHorse) {
                 m.hw = 0.7;
@@ -391,18 +457,33 @@ final class Reader {
         }
         if (mc.objectMouseOver != null && mc.objectMouseOver.typeOfHit == MovingObjectPosition.MovingObjectType.BLOCK) {
             BlockPos b = mc.objectMouseOver.getBlockPos();
-            int ci = b == null ? -1 : mem.near(b.getX(), b.getY(), b.getZ(), 1.5);
             // The chest itself (or the other half of it), not the ground beside it: a click there claims nothing.
-            Memory.Known k = ci >= 0 ? mem.chests.get(ci) : null;
-            if (k != null && ((k.x == b.getX() && k.y == b.getY() && k.z == b.getZ()) || isChest(w, b))) {
-                f.pickChest = ci;
+            if (b != null) {
+                BlockPos c = chestAnchor(w, b);
+                int ci = mem.indexOfChest(c.getX(), c.getY(), c.getZ());
+                if (ci >= 0) {
+                    f.pickChest = ci;
+                }
             }
         }
         return f;
     }
 
+    /** Whether one of the arrows went through (or is in) the mob's box, a quarter block around, in the last tick or the next. */
+    private static boolean crossedByArrow(EntityLivingBase m, List<EntityArrow> arrows) {
+        AxisAlignedBB box = m.getEntityBoundingBox().expand(0.25, 0.25, 0.25);
+        for (EntityArrow a : arrows) {
+            Vec3 from = new Vec3(a.lastTickPosX, a.lastTickPosY, a.lastTickPosZ);
+            Vec3 to = new Vec3(a.posX + a.motionX, a.posY + a.motionY, a.posZ + a.motionZ);
+            if (box.isVecInside(from) || box.isVecInside(to) || box.calculateIntercept(from, to) != null) {
+                return true;
+            }
+        }
+        return false;
+    }
+
     /** What only a farm chest's hologram says (Expeditions, and the same in Spanish). */
-    private static final String[] CHEST_WORDS = {"wave", "oleada", "to claim", "reclamar", "rewards", "recompensa"};
+    private static final String[] CHEST_WORDS = {"wave", "oleada", "to claim", "reclamar", "rewards", "recompensa", "respawn", "reaparece", "cooldown"};
 
     static boolean looksLikeChest(String plain, String claimText) {
         for (String w : CHEST_WORDS) {

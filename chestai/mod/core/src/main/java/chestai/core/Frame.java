@@ -22,6 +22,8 @@ public final class Frame {
         public float hp, maxHp;
         public int hurtTime;
         public boolean mounted;
+        /** Whether the player sees it from the eyes, whether another player hit it last, and whether another player is fighting it. */
+        public boolean inSight, hitByOtherPlayer, contested;
         public double hw, h;
     }
 
@@ -49,6 +51,8 @@ public final class Frame {
     public int food = 20;
     public float saturation = 5.0f;
     public int regenLeft, slowLeft, blindLeft;
+    /** The amplifier of the slowness on the player, or -1 with none. */
+    public int slowAmp = -1;
     public int gapples, pearls, potions, arrows, pearlCdLeft;
     /** The agent's slot (0 sword, 1 bow, 2 golden apple, 3 pearl, 4 potion), whether it holds the right button on an item and for how many ticks, and its click allowance. */
     public int slot;
