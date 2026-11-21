@@ -53,6 +53,7 @@ public final class Settings {
     public boolean bowMobs = true;
     /** Out of golden apples and potions: no new waves (sin_curas=parar). */
     public boolean healStop = true;
+    public int healKeep = 4;
     /** Something eaten as soon as the food bar is short of full (plain food first, else a golden apple). */
     public boolean foodFull = true;
 
@@ -103,9 +104,10 @@ public final class Settings {
 
     /** The lines of the settings added after MORE5. */
     static final String MORE6 = ""
-        + "# parar: sin manzanas doradas ni pociones de vida (habiendo tenido), no empieza oleadas nuevas y se queda quieto,\n"
-        + "# para no morir y perder el kit. seguir: sigue farmeando igual.\n"
-        + "sin_curas=parar\n";
+        + "# parar: con curas_reserva o menos entre manzanas doradas y pociones de vida (habiendo tenido mas), no empieza\n"
+        + "# oleadas nuevas y se queda quieto, para no morir y perder el kit. seguir: sigue farmeando igual.\n"
+        + "sin_curas=parar\n"
+        + "curas_reserva=4\n";
 
     /** The lines of the settings added after MORE2. */
     static final String MORE3 = ""
@@ -194,6 +196,7 @@ public final class Settings {
         s.bowMobs = yes(System.getProperty("chestai.bow.mobs", p.getProperty("arco_a_mobs")), true);
         String sc = p.getProperty("sin_curas");
         s.healStop = sc == null || !sc.trim().toLowerCase(Locale.ROOT).startsWith("s");
+        s.healKeep = (int) Math.round(number(p.getProperty("curas_reserva"), 4.0));
         s.search = yes(p.getProperty("buscar_cofres"), true);
         s.searchRadius = number(p.getProperty("buscar_radio"), 160.0);
         s.map = yes(p.getProperty("mapa"), true);

@@ -286,7 +286,7 @@ final class Coach {
     private double score(Frame f, Memory mem, int ci) {
         Memory.Known k = mem.chests.get(ci);
         if (outOfHeals && !(k.seen && k.state == Frame.CLAIMABLE)) {
-            // No apple or potion left: no new wave (one still to claim, yes).
+            // Down to the last apples and potions: no new wave (one still to claim, yes).
             return 1e9;
         }
         if (f.tick < k.skipUntil) {
@@ -1029,8 +1029,8 @@ final class Coach {
 
     /** Changes the network's choices {@code a} of this tick, before the pilot turns them into keys. */
     /**
-     * Out of golden apples and healing potions after having some: no new wave started, only the one
-     * on fought or got away from (-Dchestai.heal.stop=false, or sin_curas=seguir: on as before).
+     * Down to the last few golden apples and healing potions (curas_reserva) after having more: no new
+     * wave started, only the one on fought or got away from (-Dchestai.heal.stop=false, or sin_curas=seguir: on as before).
      */
     private static final boolean HEAL_STOP = !"false".equals(System.getProperty("chestai.heal.stop"));
     private boolean outOfHeals;
@@ -1042,7 +1042,8 @@ final class Coach {
 
     void before(Frame f, Memory mem, Pilot pilot, int[] a, Layout lay) {
         mostHeals = Math.max(mostHeals, f.gapples + f.potions);
-        outOfHeals = HEAL_STOP && s.healStop && mostHeals > 0 && f.gapples + f.potions == 0;
+        // (A reserve kept for the wave on and the way out: the deaths came in the wave the last apples went in.)
+        outOfHeals = HEAL_STOP && s.healStop && mostHeals > s.healKeep + 1 && f.gapples + f.potions <= s.healKeep;
         long t = f.tick;
         if (!boostJudged) {
             // Did the arrow carry the player? Two that did not: no boosts for a minute.
@@ -1595,7 +1596,7 @@ final class Coach {
             }
         }
         if (mode == NONE && outOfHeals) {
-            // Out of apples and potions: still, where it is, rather than off to more mobs.
+            // Down to the last apples and potions: still, where it is, rather than off to more mobs.
             mode = WAIT;
             aim(f.x - Math.sin(Math.toRadians(f.yaw)) * 6.0, eyeY(f), f.z + Math.cos(Math.toRadians(f.yaw)) * 6.0);
         }

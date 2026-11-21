@@ -463,7 +463,7 @@ public final class Session {
         coach.before(f, mem, pilot, a, lay);
         if (coach.outOfHeals() != saidOut) {
             saidOut = coach.outOfHeals();
-            String o = saidOut ? "Chest AI: sin manzanas doradas ni pociones de vida. No empiezo oleadas nuevas para no morir (sin_curas=seguir en ajustes.txt para seguir igual)."
+            String o = saidOut ? "Chest AI: me quedan pocas manzanas doradas y pociones de vida. No empiezo oleadas nuevas para no morir (sin_curas=seguir en ajustes.txt para seguir igual)."
                 : "Chest AI: tengo curas de nuevo, sigo farmeando.";
             note = note == null ? o : note + "\n" + o;
         }
