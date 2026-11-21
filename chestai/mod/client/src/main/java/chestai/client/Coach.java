@@ -168,7 +168,7 @@ final class Coach {
     private double seenSide, seenQ = 0.45;
     /** The mob in reach that no blow gets to, since when, and the side stepped to for a line to it. */
     private int hiddenId = -1;
-    private long hiddenSince;
+    private long hiddenSince, hiddenLast = -1000;
     private double hiddenSide = 1.0;
     /** Ticks since the player was last hurt, as of this tick. */
     private int sinceHurtNow = 1000;
@@ -178,6 +178,14 @@ final class Coach {
     private static final int LAST_FOUGHT_TICKS = 200;
     /** Ticks a mob in reach stays hidden before the step aside for a line to it. */
     private static final int HIDDEN_TICKS = 6;
+    /**
+     * The movement round of fixes (-Dchestai.move2=true), for the arena's A/B: a mob in reach no blow
+     * gets to left after HIDDEN_GIVEUP ticks (not stood by for minutes); a claim walked to the spot it
+     * is clicked from; a way that gets no nearer in PROGRESS_TICKS out by a pearl or left; guarding from
+     * the chest's own level.
+     */
+    static final boolean MOVE2 = Boolean.getBoolean("chestai.move2");
+    private static final int HIDDEN_GIVEUP = 120;
     /** A retreat of a few seconds to eat an apple (apples, no potion), back with the absorption counted. */
     private boolean shortRetreat;
     private double tx, ty, tz;
@@ -1189,6 +1197,53 @@ final class Coach {
         return true;
     }
 
+    /** move2: the goal walked to, the nearest got to it (across and up), and ticks walked since without getting nearer. */
+    private int progKey = Integer.MIN_VALUE, progTicks;
+    private double progBest;
+    private long progLast = -1000;
+    private static final int PROGRESS_TICKS = 300;
+
+    /**
+     * (move2) On the way to chest k (to the spot {@code at} by it, or its middle): fifteen seconds of
+     * walking without getting a block and a half nearer (round and round in water by a bank too high,
+     * up a waterfall and down again, to and fro below a ledge): an ender pearl to where it is got to,
+     * if one lands nearer; else the chest is left for a minute, as one whose way ends short.
+     */
+    private void progress(Frame f, Memory.Known k, int[] at, boolean pearlOk) {
+        long t = f.tick;
+        int key = k.x * 31 + k.z * 17 + k.y;
+        double gx = at != null ? at[0] + 0.5 : k.cx(), gy = at != null ? at[1] : k.y, gz = at != null ? at[2] + 0.5 : k.cz();
+        double d = hd(k.cx(), k.cz(), f.x, f.z) + Math.abs(k.y - f.y);
+        if (key != progKey || t - progLast > 100) {
+            progKey = key;
+            progBest = d;
+            progTicks = 0;
+        }
+        progLast = t;
+        if (d < progBest - 1.5) {
+            progBest = d;
+            progTicks = 0;
+            return;
+        }
+        if (++progTicks < PROGRESS_TICKS || mode == FIGHT || heal != HEAL_NONE) {
+            return;
+        }
+        progTicks = 0;
+        progBest = d;
+        double[] shot = pearlOk && t - pearlAt > 160 && nearestMob >= 6.0 ? pearlShot(f, gx, gy, gz, false) : null;
+        if (shot != null) {
+            pgx = gx;
+            pgy = gy;
+            pgz = gz;
+            startPearl(f, shot);
+            return;
+        }
+        k.skipUntil = t + 1200;
+        hasGoal = false;
+        goalAt = -1000;
+        path = null;
+    }
+
     /** At a dead end on the way to chest k with no pearl to throw: another chest for a minute. */
     private void giveUp(Memory.Known k, long t) {
         if (deadEndNow && t - noPearlAt < 40) {
@@ -1783,11 +1838,22 @@ final class Coach {
                         back = m;
                     }
                 }
-                if (hiddenMob == null || hiddenMob.id != hiddenId) {
+                if (hiddenMob == null || hiddenMob.id != hiddenId || (MOVE2 && t - hiddenLast > 10)) {
                     hiddenId = hiddenMob == null ? -1 : hiddenMob.id;
                     hiddenSince = t;
                 }
+                hiddenLast = t;
                 // Only one hidden for a while (not one that is hidden a tick and in sight the next).
+                if (MOVE2 && back == null && hiddenMob != null && t - hiddenSince >= HIDDEN_GIVEUP) {
+                    // Six seconds in reach and still no line to it (behind a fence, down a hole, in a
+                    // wall): left alone for half a minute, as one no blow lands on, not stood by for minutes.
+                    if (unhit.size() > 64) {
+                        unhit.values().removeIf(u -> u <= t);
+                    }
+                    unhit.put(hiddenMob.id, t + 600);
+                    hiddenId = -1;
+                    hiddenMob = null;
+                }
                 if (back == null && hiddenMob != null && t - hiddenSince >= HIDDEN_TICKS) {
                     // In reach but no blow gets to it (a hologram's stand, a block between): a step to
                     // one side of it for a clear line, the view kept low on its body, never up at the
@@ -1857,7 +1923,8 @@ final class Coach {
                 } else {
                     aim(k.cx(), eyeY(f), k.cz());
                 }
-            } else if (hd(k.cx(), k.cz(), f.x, f.z) > (lastMode == GUARD ? 4.5 : 3.0)) {
+            } else if (hd(k.cx(), k.cz(), f.x, f.z) > (lastMode == GUARD ? 4.5 : 3.0) || (MOVE2 && Math.abs(k.y - f.y) > 2.5)) {
+                // (move2: down a pit or up a ledge by it, back up to the chest's own level, where its mobs are.)
                 go(f, k.cx(), k.y, k.cz(), 2.0);
             } else {
                 aim(k.cx(), eyeY(f), k.cz());
@@ -1874,7 +1941,9 @@ final class Coach {
                 Memory.Known k = mem.chests.get(g);
                 double dc = hd(k.cx(), k.cz(), f.x, f.z);
                 double ds = hd(standX, standZ, f.x, f.z);
-                if (k.seen && k.state == Frame.CLAIMABLE && dc < 4.0 && Math.abs(k.y - f.y) <= 3.0) {
+                // (move2: the spots a click reaches it from go out to four blocks from its middle: at one of
+                // those it is claimed from, not walked to again.)
+                if (k.seen && k.state == Frame.CLAIMABLE && dc < (MOVE2 ? 4.6 : 4.0) && Math.abs(k.y - f.y) <= 3.0) {
                     mode = CLAIM;
                     if (claimSince < 0) {
                         claimSince = t;
@@ -1924,6 +1993,9 @@ final class Coach {
                         } else {
                             go(f, k.cx(), k.y, k.cz(), 1.0);
                         }
+                        if (MOVE2) {
+                            progress(f, k, at, pearlOk);
+                        }
                     }
                     // One click at a time, on this chest, a while apart (the server takes a moment to answer).
                     if (heal == HEAL_NONE && !pilot.using && !guessDone && t >= k.skipUntil && f.pickChest == g && t - k.lastClaimAttempt >= CLAIM_RETRY_TICKS) {
@@ -1935,7 +2007,18 @@ final class Coach {
                 } else if (k.seen && k.state == Frame.CLAIMABLE) {
                     if (!tryChestPearl(f, k, pearlOk, a)) {
                         mode = TRAVEL;
-                        go(f, k.cx(), k.y, k.cz(), 2.0);
+                        // Close by (move2): straight to a spot the click reaches it from, not to the foot of
+                        // the chest (from below a step, from the water round it, no click reaches it, and the
+                        // walk went to and fro between the two).
+                        int[] at = MOVE2 && dc < 10.0 ? claimSpot(f, k, t) : null;
+                        if (at != null) {
+                            go(f, at[0] + 0.5, at[1], at[2] + 0.5, 0.4);
+                        } else {
+                            go(f, k.cx(), k.y, k.cz(), 2.0);
+                        }
+                        if (MOVE2) {
+                            progress(f, k, at, pearlOk);
+                        }
                         giveUp(k, t);
                     }
                 } else if (shooter != null && ds < 8.0 && shootBack(f, pilot, a, lay)) {
@@ -1969,8 +2052,13 @@ final class Coach {
                 } else if (!tryChestPearl(f, k, pearlOk, a)) {
                     mode = k.seen ? TRAVEL : EXPLORE;
                     go(f, standX, standY, standZ, 1.5);
+                    if (MOVE2) {
+                        progress(f, k, new int[] {(int) Math.floor(standX), standY, (int) Math.floor(standZ)}, pearlOk);
+                    }
                     giveUp(k, t);
-                    boost(f, pilot, a, lay, dc);
+                    if (!MOVE2 || pearlUntil < t) {
+                        boost(f, pilot, a, lay, dc);
+                    }
                 }
             }
         }
