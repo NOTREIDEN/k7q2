@@ -128,6 +128,23 @@ final class Coach {
     private static final int CLAIM_RETRY_TICKS = 8;
     private static final int GUESS_CLAIM_ATTEMPTS = 4;
     private static final int CLAIM_CONFIRM_TICKS = 12;
+    /**
+     * The claim round (-Dchestai.claim2=true). In the arena most of the wait from a wave's last mob to
+     * its claim went on mobs fought first: another wave's, set off next to it (one claim in eight,
+     * half a minute each: some 40 to 60% of all the wait), or one wandering up (stood by the chest,
+     * walking at it: 7 to 15% of the claims, 20 to 30 s each); clicking itself took about a second. Now a claim of the agent's own within
+     * CLAIM2_R blocks, its hologram fresh, comes before any of them while life is CLAIM2_MIN_LIFE or
+     * more and the wave on (if any) is not about to run out; for at most CLAIM2_TRY_TICKS at a time,
+     * then CLAIM2_OFF_TICKS of fighting as before. And a chest set aside while its wave was on (its
+     * mobs out of sight a while: a minute aside) is no longer aside once its hologram says claim:
+     * the player went off to the next chest and its wave, the claim left for after. The clicks
+     * themselves are as before: on that chest only, one every CLAIM_RETRY_TICKS (2.5 a second).
+     */
+    static final boolean CLAIM2 = Boolean.getBoolean("chestai.claim2");
+    private static final double CLAIM2_R = 10.0, CLAIM2_MIN_LIFE = 10.0, CLAIM2_WAVE_LEFT_S = 6.0;
+    private static final int CLAIM2_TRY_TICKS = 80, CLAIM2_OFF_TICKS = 200;
+    private Memory.Known claim2K;
+    private long claim2Since = -1, claim2Last = -1000, claim2Off = -1000;
     /** Since when waiting at a chest. */
     private long waitSince = -1;
     private double apprBest = 1e9;
@@ -609,6 +626,80 @@ final class Coach {
             pair(f, mem, best);
         }
         return best;
+    }
+
+    /**
+     * (claim2) A claim at hand to go to before any mob: the nearest chest within CLAIM2_R (three up
+     * or down) whose hologram says claim, read lately (or a guess of the last half minute), the
+     * agent's own (no other player's wave on it, nobody by it, nobody there first), not set aside.
+     * Not while healing or with the bow drawn, with life (blows just taken count it as none) under
+     * CLAIM2_MIN_LIFE, nor with the wave on about to run out; after CLAIM2_TRY_TICKS at one in a row
+     * with no claim (mobs in the way of the click, no spot to click from) the mobs first again for
+     * CLAIM2_OFF_TICKS. Or -1.
+     */
+    private int claimFirst(Frame f, Memory mem, int lock, Pilot pilot, double life) {
+        long t = f.tick;
+        if (!CLAIM2 || heal != HEAL_NONE || pilot.using || t < claim2Off || life < CLAIM2_MIN_LIFE) {
+            claim2K = null;
+            return -1;
+        }
+        if (lock >= 0) {
+            Memory.Known lk = mem.chests.get(lock);
+            if (lk.waveShown >= 0 && lk.waveShown - (t - lk.waveShownAt) / 20.0 < CLAIM2_WAVE_LEFT_S) {
+                claim2K = null;
+                return -1;
+            }
+        }
+        int best = -1;
+        double bd = CLAIM2_R;
+        for (int i = 0; i < mem.chests.size(); i++) {
+            Memory.Known k = mem.chests.get(i);
+            if (!k.seen || k.state != Frame.CLAIMABLE || k.contestedWave || k.reserved || k.theirs || t < k.skipUntil
+                    || Math.abs(k.y - f.y) > 3.0) {
+                continue;
+            }
+            boolean fresh = (!k.guessed && t - k.holoTick <= 2400) || (k.guessed && t - k.tick <= 600);
+            double d = hd(k.cx(), k.cz(), f.x, f.z);
+            if (fresh && d < bd) {
+                bd = d;
+                best = i;
+            }
+        }
+        if (best < 0) {
+            claim2K = null;
+            return -1;
+        }
+        Memory.Known k = mem.chests.get(best);
+        if (k != claim2K || t - claim2Last > 2) {
+            claim2K = k;
+            claim2Since = t;
+            note(String.format(java.util.Locale.ROOT, "reclamo2: %s antes que los mobs, a %.1f", at(k), bd));
+        } else if (t - claim2Since > CLAIM2_TRY_TICKS) {
+            note("reclamo2: " + at(k) + " sin reclamar en " + CLAIM2_TRY_TICKS + " ticks, los mobs antes un rato");
+            claim2Off = t + CLAIM2_OFF_TICKS;
+            claim2K = null;
+            return -1;
+        }
+        claim2Last = t;
+        return best;
+    }
+
+    /** (claim2) Chest i made the goal (as chooseGoal would), for its claim. */
+    private int goalTo(Frame f, Memory mem, int i) {
+        Memory.Known k = mem.chests.get(i);
+        if (!hasGoal || goalX != k.x || goalY != k.y || goalZ != k.z) {
+            waitSince = -1;
+        }
+        hasGoal = true;
+        goalAt = f.tick;
+        goalX = k.x;
+        goalY = k.y;
+        goalZ = k.z;
+        goalWhy = why(k, mem.estSecs(i, f.tick));
+        standX = k.cx();
+        standZ = k.cz();
+        standY = k.y;
+        return i;
     }
 
     /**
@@ -1605,6 +1696,8 @@ final class Coach {
             multiTick(f, mem, lock);
         }
         List<Frame.Mob> focus = null;
+        // (claim2) The chest to claim before any mob, or -1.
+        int first = -1;
         double engage = lock >= 0 ? WAVE_R : FIGHT_R;
         List<Frame.Mob> cand = new ArrayList<Frame.Mob>();
         int close = 0;
@@ -1844,6 +1937,16 @@ final class Coach {
                 k.claimTicks = 0;
                 k.claimAttempts = 0;
                 k.lastClaimAttempt = -1000;
+                k.claimSeen = false;
+            } else if (CLAIM2 && k.seen && !k.claimSeen) {
+                // (claim2) Just come to be claimed: whatever set it aside before (its wave's mobs out of
+                // sight, a way that got no nearer to its wave) is over; set aside again only by the claim
+                // itself going wrong (thirty seconds at it, a way that ends short).
+                k.claimSeen = true;
+                if (k.skipUntil > t) {
+                    note("reclamo2: " + at(k) + " ya no apartado");
+                    k.skipUntil = -1;
+                }
             }
         }
 
@@ -1924,8 +2027,8 @@ final class Coach {
             }
         } else if (s.multi && lock >= 0 && juggle(f, mem, lock)) {
             // 3a. Off for a moment from the wave on to set off the next chest's (multi): back after.
-        } else if (!(focus = focus(f, mem, lock, cand, t)).isEmpty()) {
-            // 3. Mobs: those of the wave that came first, or any about.
+        } else if ((first = claimFirst(f, mem, lock, pilot, burst ? 0.0 : lifeNow)) < 0 && !(focus = focus(f, mem, lock, cand, t)).isEmpty()) {
+            // 3. Mobs: those of the wave that came first, or any about (claim2: after a claim at hand).
             boosting = false;
             boostFrom = -1;
             Frame.Mob tgt = null;
@@ -2103,7 +2206,7 @@ final class Coach {
                     deadEndNow = false;
                 }
             }
-        } else if (lock >= 0) {
+        } else if (first < 0 && lock >= 0) {
             // The wave's mobs are out of sight for now: back to its chest and wait there.
             mode = GUARD;
             Memory.Known k = mem.chests.get(lock);
@@ -2146,7 +2249,7 @@ final class Coach {
             if (shot) {
                 evade = true;
             }
-        } else if (bossId >= 0 && t - bossAt <= BOSS_HOLD_TICKS && !claimNear) {
+        } else if (first < 0 && bossId >= 0 && t - bossAt <= BOSS_HOLD_TICKS && !claimNear) {
             // A boss fight on, the boss out of reach a moment (knocked away, behind something): no new
             // wave meanwhile, the view to where it was.
             mode = WAIT;
@@ -2154,7 +2257,7 @@ final class Coach {
             aim(bossX, bossY + 1.0, bossZ);
         } else {
             // 4. Chests.
-            int g = chooseGoal(f, mem);
+            int g = first >= 0 ? goalTo(f, mem, first) : chooseGoal(f, mem);
             int[] cv;
             if (g >= 0) {
                 Memory.Known k = mem.chests.get(g);
