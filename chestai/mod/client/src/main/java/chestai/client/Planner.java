@@ -27,7 +27,7 @@ final class Planner {
      * block lower than that and cannot get two up out of a pool), falling water (a waterfall)
      * dear to go through or up, and no step up where the head has no room to jump.
      */
-    static final boolean MOVE3 = Boolean.getBoolean("chestai.move3");
+    static final boolean MOVE3 = !"false".equals(System.getProperty("chestai.move3"));
 
     private final World w;
     private final MapStore map;

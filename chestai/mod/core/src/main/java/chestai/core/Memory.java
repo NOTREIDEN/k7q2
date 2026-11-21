@@ -121,7 +121,7 @@ public final class Memory {
      * The movement round 3 (-Dchestai.move3=true): another player by a chest keeps it theirs a few
      * seconds after they step off (no goal dropped and taken again as they walk in and out of 12 blocks).
      */
-    private static final boolean MOVE3 = Boolean.getBoolean("chestai.move3");
+    private static final boolean MOVE3 = !"false".equals(System.getProperty("chestai.move3"));
     private static final int RESERVED_HOLD_TICKS = 60;
 
     private static final class BossSeen {

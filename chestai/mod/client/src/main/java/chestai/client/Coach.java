@@ -184,14 +184,14 @@ final class Coach {
      * is clicked from; a way that gets no nearer in PROGRESS_TICKS out by a pearl or left; guarding from
      * the chest's own level.
      */
-    static final boolean MOVE2 = Boolean.getBoolean("chestai.move2");
+    static final boolean MOVE2 = !"false".equals(System.getProperty("chestai.move2"));
     /**
      * The second movement round (-Dchestai.move3=true): in water up only for air, at a bank or a way
      * up, or over deep water (on a shallow bottom walked, as Depth Strider lets it); a jump timed to a
      * step up just ahead, with room for the head; and a Punch boost shot up from standing, the arrow
      * coming back down on the player, only where its push lands on safe ground the way is slow to.
      */
-    static final boolean MOVE3 = Boolean.getBoolean("chestai.move3");
+    static final boolean MOVE3 = !"false".equals(System.getProperty("chestai.move3"));
     private static final double BOOST3_PITCH = -87.5;
     private static final int BOOST3_DRAW = Integer.getInteger("chestai.boost3.draw", 5);
     /** Ticks a boost must save over walking (-Dchestai.boost3.margin; very low to try the shot itself). */

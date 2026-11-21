@@ -78,7 +78,7 @@ public final class Session {
     private Hands hands;
     private Refill refill;
     /** -Dchestai.survive: after a death, the chests where it happened left aside a while; earlier retreat without potions. */
-    static final boolean SURVIVE = Boolean.getBoolean("chestai.survive");
+    static final boolean SURVIVE = !"false".equals(System.getProperty("chestai.survive"));
     private static final long DEATH_SKIP_MS = 180_000;
     /** Where the player died lately: x, y, z, and when (ms). Kept across restarts of the agent. */
     private static final java.util.List<double[]> DEATHS = new java.util.ArrayList<double[]>();
