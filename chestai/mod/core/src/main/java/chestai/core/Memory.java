@@ -29,6 +29,8 @@ public final class Memory {
         public int claimAttempts;
         public long lastClaimAttempt = -1000;
         public long skipUntil = -1;
+        /** (claim2) Whether it was claimable when last looked at by the coach: a new claim frees it of skipUntil. */
+        public boolean claimSeen;
         /** When its hologram was last read; what it says since then is a guess from its mobs. */
         public long holoTick = -100000;
         public boolean guessed;
