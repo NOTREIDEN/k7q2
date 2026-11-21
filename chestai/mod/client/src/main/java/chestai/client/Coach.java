@@ -48,9 +48,9 @@ final class Coach {
      * GOAL_AT blocks) or just after a pearl thrown toward it, GOAL_STAY_MARGIN. A goal that can no
      * longer be farmed (another player's, set aside, out of heals) is left at once.
      */
-    private static final double GOAL_SWITCH_MARGIN = 8.0, GOAL_STAY_MARGIN = 25.0, GOAL_AT = 8.0;
+    private static final double GOAL_SWITCH_MARGIN = 6.0, GOAL_STAY_MARGIN = 10.0, GOAL_AT = 8.0;
     /** Two chests this close (across) are neighbours: between them the sooner one wins by this many seconds. */
-    private static final double GOAL_NEIGHBOUR_R = 16.0, GOAL_NEIGHBOUR_MARGIN = 2.0;
+    private static final double GOAL_NEIGHBOUR_R = 40.0, GOAL_NEIGHBOUR_MARGIN = 2.0;
     /** Goals looked over again every this many ticks (half a second). */
     private static final int GOAL_EVERY = 10;
     /** After a pearl toward the goal, held to it this long (from the throw). */
